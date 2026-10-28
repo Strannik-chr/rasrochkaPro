@@ -6,4 +6,5 @@ dist
 data/*.sqlite*
 uploads/*
 backups/*
+public/assets/aistudio
 npm-debug.log*
