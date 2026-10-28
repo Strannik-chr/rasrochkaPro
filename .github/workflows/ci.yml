@@ -1,0 +1,44 @@
+name: РассрочкаПро — Production CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  verify:
+    name: Typecheck, Security & Financial Tests, Production Build
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 (with built-in node:sqlite)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check for accidental committed .env or private keys
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "ERROR: .env file must never be committed to Git!"
+            exit 1
+          fi
+
+      - name: Run TypeScript strict typecheck (lint)
+        run: npm run lint
+
+      - name: Run automated financial, RBAC, rate-limit, CSRF, backup/restore & security tests
+        run: npm test
+
+      - name: Build production frontend bundle
+        run: npm run build

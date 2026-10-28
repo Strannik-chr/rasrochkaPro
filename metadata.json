@@ -1,0 +1,6 @@
+{
+  "name": "РассрочкаПро — Защищённая система учёта продаж в рассрочку",
+  "description": "Production-ready финансовая система учёта договоров купли-продажи в рассрочку, графиков платежей, кассы, закупок, просрочек и безопасности.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

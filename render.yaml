@@ -1,0 +1,27 @@
+# ==============================================================================
+# РассрочкаПро — Автоматический Blueprint для деплоя на Render.com (0 ₽ / мес)
+# ==============================================================================
+services:
+  - type: web
+    name: rassrochka-pro
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      - key: SEED_DEMO_DATA
+        value: "false"
+      - key: INITIAL_ADMIN_PHONE
+        value: "+79285550101"
+      - key: INITIAL_ADMIN_PASSWORD
+        value: "MoOwner!2026"
+      - key: INITIAL_ADMIN_NAME
+        value: "Мо (Владелец)"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: BACKUP_ENCRYPTION_KEY
+        generateValue: true

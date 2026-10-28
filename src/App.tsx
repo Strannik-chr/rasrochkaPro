@@ -1,0 +1,4025 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  AuditLogDTO,
+  BackupDTO,
+  ClientDTO,
+  ContractDTO,
+  DocumentDTO,
+  FinancialAccountDTO,
+  InstallmentPlanDTO,
+  LedgerEntryDTO,
+  OverdueItemDTO,
+  PaymentDTO,
+  PurchaseDTO,
+  ReconciliationResultDTO,
+  RoundingRule,
+  SettingHistoryDTO,
+  SupplierDTO,
+  UserDTO,
+  UserRole,
+} from './shared/types';
+import {
+  formatDateRu,
+  formatDateTimeRu,
+  formatMoney,
+  parseRublesInputToKopecks,
+  translateContractStatus,
+  translateEntryType,
+  translateRoundingRule,
+  translateScheduleStatus,
+} from './utils/format';
+import {
+  EarlyPayoffModal,
+  NewContractModal,
+  PrintableDocumentModal,
+  RestructureScheduleModal,
+} from './components/ContractModals';
+import { ManualAllocationModal, NewPaymentModal } from './components/PaymentAllocateModal';
+import { AuthGateModal } from './components/AuthGateModal';
+import {
+  Search,
+  Plus,
+  Download,
+  Printer,
+  ShieldCheck,
+  AlertTriangle,
+  CheckCircle2,
+  Menu,
+  X,
+  RotateCcw,
+  Calculator,
+  History,
+  FileText,
+  Lock,
+  Upload,
+  RefreshCw,
+} from 'lucide-react';
+
+type SectionId =
+  | 'dashboard'
+  | 'clients'
+  | 'contracts'
+  | 'payments'
+  | 'overdues'
+  | 'purchases'
+  | 'suppliers'
+  | 'cash_bank'
+  | 'expenses'
+  | 'reports'
+  | 'documents'
+  | 'users'
+  | 'installment_settings'
+  | 'security_settings';
+
+const NAV_SECTIONS: Array<{ id: SectionId; label: string; group: string; ownerOnly?: boolean }> = [
+  { id: 'dashboard', label: '1. Главная панель', group: 'Операционный контур' },
+  { id: 'clients', label: '2. Клиенты', group: 'Операционный контур' },
+  { id: 'contracts', label: '3. Договоры и графики', group: 'Операционный контур' },
+  { id: 'payments', label: '4. Платежи и распределение', group: 'Операционный контур' },
+  { id: 'overdues', label: '5. Просрочки и контакты', group: 'Операционный контур' },
+  { id: 'purchases', label: '6. Закупки и товары', group: 'Закупки и склад' },
+  { id: 'suppliers', label: '7. Магазины и поставщики', group: 'Закупки и склад' },
+  { id: 'cash_bank', label: '8. Касса и банковские счета', group: 'Финансы и отчётность' },
+  { id: 'expenses', label: '9. Операционные расходы', group: 'Финансы и отчётность' },
+  { id: 'reports', label: '10. Прибыль и отчёты', group: 'Финансы и отчётность' },
+  { id: 'documents', label: '11. Документы и шаблоны', group: 'Финансы и отчётность' },
+  { id: 'users', label: '12. Пользователи и права', group: 'Управление и защита', ownerOnly: true },
+  { id: 'installment_settings', label: '13. Настройки рассрочки', group: 'Управление и защита' },
+  { id: 'security_settings', label: '14. Настройки безопасности', group: 'Управление и защита', ownerOnly: true },
+];
+
+export default function App() {
+  const [currentUser, setCurrentUser] = useState<{
+    id: string;
+    email: string;
+    phone: string;
+    fullName: string;
+    role: UserRole;
+    status: string;
+    mustChangePassword?: boolean;
+    mfaEnabled: boolean;
+  } | null>(null);
+  const [csrfToken, setCsrfToken] = useState<string>('');
+  const [sessionToken, setSessionToken] = useState<string>('');
+  const [activeSection, setActiveSection] = useState<SectionId>('dashboard');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Period filter for reports & ledger
+  const [periodFrom, setPeriodFrom] = useState('2026-07-01');
+  const [periodTo, setPeriodTo] = useState('2026-12-31');
+
+  // Application state from relational DB
+  const [plans, setPlans] = useState<InstallmentPlanDTO[]>([]);
+  const [settingsHistory, setSettingsHistory] = useState<SettingHistoryDTO[]>([]);
+  const [clients, setClients] = useState<ClientDTO[]>([]);
+  const [suppliers, setSuppliers] = useState<SupplierDTO[]>([]);
+  const [purchases, setPurchases] = useState<PurchaseDTO[]>([]);
+  const [contracts, setContracts] = useState<ContractDTO[]>([]);
+  const [payments, setPayments] = useState<PaymentDTO[]>([]);
+  const [overdues, setOverdues] = useState<OverdueItemDTO[]>([]);
+  const [accounts, setAccounts] = useState<FinancialAccountDTO[]>([]);
+  const [ledger, setLedger] = useState<LedgerEntryDTO[]>([]);
+  const [documents, setDocuments] = useState<DocumentDTO[]>([]);
+  const [users, setUsers] = useState<UserDTO[]>([]);
+  const [backups, setBackups] = useState<BackupDTO[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogDTO[]>([]);
+  const [reconciliation, setReconciliation] = useState<ReconciliationResultDTO | null>(null);
+
+  const [loading, setLoading] = useState(true);
+  const [bannerNotice, setBannerNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(
+    null
+  );
+
+  // Modals
+  const [showNewContractModal, setShowNewContractModal] = useState(false);
+  const [earlyPayoffContract, setEarlyPayoffContract] = useState<ContractDTO | null>(null);
+  const [restructureContract, setRestructureContract] = useState<ContractDTO | null>(null);
+  const [printTemplateModal, setPrintTemplateModal] = useState<{
+    contract: ContractDTO;
+    type: 'contract' | 'schedule' | 'handover' | 'payoff';
+  } | null>(null);
+  const [allocatingPayment, setAllocatingPayment] = useState<PaymentDTO | null>(null);
+  const [showNewPaymentModal, setShowNewPaymentModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+
+  // Inline form states for sections
+  const [clientForm, setClientForm] = useState({
+    fullName: '',
+    phone: '',
+    secondaryPhone: '',
+    documentRef: '',
+    address: '',
+    notes: '',
+  });
+  const [supplierForm, setSupplierForm] = useState({
+    name: '',
+    category: 'Магазин электроники',
+    contactInfo: '',
+    notes: '',
+  });
+  const [purchaseForm, setPurchaseForm] = useState({
+    supplierId: '',
+    clientId: '',
+    itemName: '',
+    itemCategory: 'Смартфоны и электроника',
+    purchaseRubles: '',
+    deliveryRubles: '0',
+    otherRubles: '0',
+    paidSupplierRubles: '',
+    paymentAccountId: 'acc_bank_main',
+    purchaseDate: new Date().toISOString().slice(0, 10),
+    notes: '',
+  });
+  const [ledgerForm, setLedgerForm] = useState({
+    accountId: 'acc_cash_main',
+    targetAccountId: 'acc_bank_main',
+    entryType: 'operating_expense' as
+      | 'operating_expense'
+      | 'owner_injection'
+      | 'owner_withdrawal'
+      | 'internal_transfer',
+    category: 'Аренда и операционные расходы',
+    amountRubles: '',
+    description: '',
+    eventDate: new Date().toISOString().slice(0, 10),
+  });
+  const [overdueContactForm, setOverdueContactForm] = useState<{
+    scheduleItemId: string;
+    contractId: string;
+    contactChannel: 'phone' | 'messenger' | 'in_person';
+    summary: string;
+    promisedDate: string;
+    agreedNewDueDate: string;
+  } | null>(null);
+
+  const [newPlanForm, setNewPlanForm] = useState({
+    name: '',
+    termMonths: '9',
+    markupPercent: '29',
+    downPaymentPercent: '30',
+    roundingRule: 'kopeck' as RoundingRule,
+    earlyPayoffDiscountPercent: '30',
+    reason: 'Добавление нового гибкого срока рассрочки через админ-панель',
+  });
+  const [editingPlan, setEditingPlan] = useState<{
+    id: string;
+    name: string;
+    termMonths: string;
+    markupPercent: string;
+    downPaymentPercent: string;
+    roundingRule: RoundingRule;
+    earlyPayoffDiscountPercent: string;
+    isActive: boolean;
+    reason: string;
+  } | null>(null);
+
+  const [mfaSetupInfo, setMfaSetupInfo] = useState<{
+    secret: string;
+    otpauthUrl: string;
+    currentSampleCode: string;
+  } | null>(null);
+  const [mfaConfirmCode, setMfaConfirmCode] = useState('');
+
+  // Admin User Management & Password Change states
+  const [adminNewUserForm, setAdminNewUserForm] = useState({
+    phone: '',
+    password: '',
+    fullName: '',
+    role: 'staff' as UserRole,
+    mustChangePassword: true,
+  });
+  const [editingUser, setEditingUser] = useState<{
+    id: string;
+    phone: string;
+    fullName: string;
+    role: UserRole;
+  } | null>(null);
+  const [resetPasswordModal, setResetPasswordModal] = useState<{
+    id: string;
+    phone: string;
+    newPassword: string;
+    mustChangePassword: boolean;
+  } | null>(null);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [selfPasswordForm, setSelfPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+  });
+  const [editingClient, setEditingClient] = useState<{
+    id: string;
+    fullName: string;
+    phone: string;
+    secondaryPhone: string;
+    documentRef: string;
+    address: string;
+    notes: string;
+    status: 'active' | 'archived';
+  } | null>(null);
+
+  const downloadProtectedFile = useCallback(
+    async (path: string, fallbackFilename: string) => {
+      const headers: Record<string, string> = {};
+      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      if (sessionToken) headers['X-Session-Token'] = sessionToken;
+      const res = await fetch(path, {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      });
+      if (!res.ok) {
+        let errMsg = `Ошибка скачивания файла (${res.status})`;
+        try {
+          const data = await res.json();
+          if (data?.error) errMsg = data.error;
+        } catch {
+          // ignore
+        }
+        throw new Error(errMsg);
+      }
+      const blob = await res.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objUrl;
+      a.download = fallbackFilename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objUrl);
+    },
+    [csrfToken, sessionToken]
+  );
+
+  const apiFetch = useCallback(
+    async (path: string, options: RequestInit = {}) => {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(options.headers as Record<string, string>),
+      };
+      if (csrfToken) {
+        headers['X-CSRF-Token'] = csrfToken;
+      }
+      if (sessionToken) {
+        headers['X-Session-Token'] = sessionToken;
+      }
+      const res = await fetch(path, {
+        ...options,
+        credentials: 'include',
+        headers,
+      });
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || `Ошибка запроса (${res.status})`);
+        }
+        return data;
+      }
+      if (!res.ok) {
+        throw new Error(`Ошибка сервера (${res.status})`);
+      }
+      return res.text();
+    },
+    [csrfToken, sessionToken]
+  );
+
+  const loadFullState = useCallback(
+    async (activeCsrf?: string, activeSessToken?: string) => {
+      const tokenToUse = activeCsrf ?? csrfToken;
+      const sessToUse = activeSessToken ?? sessionToken;
+      const headers: Record<string, string> = {};
+      if (tokenToUse) headers['X-CSRF-Token'] = tokenToUse;
+      if (sessToUse) headers['X-Session-Token'] = sessToUse;
+
+      const res = await fetch('/api/v1/state', {
+        credentials: 'include',
+        headers,
+      });
+      if (!res.ok) {
+        throw new Error('Не удалось загрузить данные системы.');
+      }
+      const data = await res.json();
+      setPlans(data.plans || []);
+      setSettingsHistory(data.settingsHistory || []);
+      setClients(data.clients || []);
+      setSuppliers(data.suppliers || []);
+      setPurchases(data.purchases || []);
+      setContracts(data.contracts || []);
+      setPayments(data.payments || []);
+      setOverdues(data.overdues || []);
+      setAccounts(data.accounts || []);
+      setLedger(data.ledger || []);
+      setDocuments(data.documents || []);
+      setUsers(data.users || []);
+      setBackups(data.backups || []);
+      setAuditLogs(data.auditLogs || []);
+      setReconciliation(data.reconciliation || null);
+    },
+    [csrfToken, sessionToken]
+  );
+
+  const initializeSessionAndData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const sessRes = await fetch('/api/v1/auth/session', {
+        credentials: 'include',
+        headers: sessionToken ? { 'X-Session-Token': sessionToken } : {},
+      });
+      if (sessRes.ok) {
+        const sessData = await sessRes.json();
+        if (sessData.authenticated && sessData.user) {
+          setCurrentUser(sessData.user);
+          setCsrfToken(sessData.csrfToken || '');
+          if (sessData.sessionToken) {
+            setSessionToken(sessData.sessionToken);
+          }
+          await loadFullState(sessData.csrfToken || '', sessData.sessionToken || sessionToken);
+        } else {
+          setCurrentUser(null);
+        }
+      } else {
+        setCurrentUser(null);
+      }
+    } catch {
+      setCurrentUser(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [loadFullState, sessionToken]);
+
+  useEffect(() => {
+    initializeSessionAndData();
+  }, []);
+
+  const notify = (type: 'success' | 'error', text: string) => {
+    setBannerNotice({ type, text });
+    setTimeout(() => {
+      setBannerNotice((prev) => (prev?.text === text ? null : prev));
+    }, 6000);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/v1/auth/logout', { method: 'POST' });
+    } catch {
+      // clear local auth state regardless
+    }
+    setCurrentUser(null);
+    setCsrfToken('');
+    setSessionToken('');
+    setShowAuthModal(false);
+  };
+
+  // Computed financial metrics (strictly separating Cash Flow, Owner Capital, COGS, and Management Profit)
+  const financialMetrics = useMemo(() => {
+    const totalCashKopecks = accounts
+      .filter((a) => a.accountType === 'cash')
+      .reduce((s, a) => s + a.balanceKopecks, 0);
+    const totalBankKopecks = accounts
+      .filter((a) => a.accountType === 'bank')
+      .reduce((s, a) => s + a.balanceKopecks, 0);
+
+    const activeContracts = contracts.filter(
+      (c) => c.status === 'active' || c.status === 'restructured' || c.status === 'completed'
+    );
+    const portfolioSaleVolumeKopecks = activeContracts.reduce((s, c) => s + c.salePriceKopecks, 0);
+    const portfolioCostOfGoodsKopecks = activeContracts.reduce((s, c) => s + c.totalCostKopecks, 0);
+    const totalExpectedMarkupKopecks = activeContracts.reduce(
+      (s, c) => s + (c.salePriceKopecks - c.totalCostKopecks - c.closingDiscountKopecks),
+      0
+    );
+
+    const totalClientDebtKopecks = contracts
+      .filter((c) => c.status === 'active' || c.status === 'restructured')
+      .reduce((s, c) => s + c.remainingDebtKopecks, 0);
+
+    const totalOverdueKopecks = overdues.reduce((s, o) => s + o.overdueKopecks, 0);
+    const totalUnallocatedPaymentsKopecks = payments
+      .filter((p) => p.status === 'confirmed')
+      .reduce((s, p) => s + p.unallocatedKopecks, 0);
+
+    const supplierObligationsKopecks = purchases.reduce((s, p) => s + p.supplierDebtKopecks, 0);
+
+    // Period-filtered ledger metrics
+    const periodLedger = ledger.filter(
+      (l) => l.status === 'confirmed' && l.eventDate >= periodFrom && l.eventDate <= periodTo
+    );
+
+    const clientInflowsKopecks = periodLedger
+      .filter((l) => l.entryType === 'client_payment')
+      .reduce((s, l) => s + l.amountKopecks, 0);
+
+    const purchaseOutflowsKopecks = periodLedger
+      .filter((l) => l.entryType === 'purchase_payment' || l.entryType === 'delivery_expense')
+      .reduce((s, l) => s + l.amountKopecks, 0);
+
+    const operatingExpensesKopecks = periodLedger
+      .filter((l) => l.entryType === 'operating_expense')
+      .reduce((s, l) => s + l.amountKopecks, 0);
+
+    const ownerInjectionsKopecks = periodLedger
+      .filter((l) => l.entryType === 'owner_injection')
+      .reduce((s, l) => s + l.amountKopecks, 0);
+
+    const ownerWithdrawalsKopecks = periodLedger
+      .filter((l) => l.entryType === 'owner_withdrawal')
+      .reduce((s, l) => s + l.amountKopecks, 0);
+
+    const internalTransfersKopecks = periodLedger
+      .filter((l) => l.entryType === 'internal_transfer_out')
+      .reduce((s, l) => s + l.amountKopecks, 0);
+
+    // Realized markup in collected payments vs operating expenses
+    const realizedGrossMarginKopecks = activeContracts.reduce((sum, c) => {
+      if (c.salePriceKopecks <= 0) return sum;
+      const effectiveMarkup = Math.max(0, c.salePriceKopecks - c.totalCostKopecks - c.closingDiscountKopecks);
+      const collectedRatio = Math.min(1, c.totalCollectedKopecks / c.salePriceKopecks);
+      return sum + Math.round(effectiveMarkup * collectedRatio);
+    }, 0);
+
+    const managementNetProfitKopecks = realizedGrossMarginKopecks - operatingExpensesKopecks;
+
+    return {
+      totalCashKopecks,
+      totalBankKopecks,
+      totalLiquidityKopecks: totalCashKopecks + totalBankKopecks,
+      portfolioSaleVolumeKopecks,
+      portfolioCostOfGoodsKopecks,
+      totalExpectedMarkupKopecks,
+      totalClientDebtKopecks,
+      totalOverdueKopecks,
+      totalUnallocatedPaymentsKopecks,
+      supplierObligationsKopecks,
+      clientInflowsKopecks,
+      purchaseOutflowsKopecks,
+      operatingExpensesKopecks,
+      ownerInjectionsKopecks,
+      ownerWithdrawalsKopecks,
+      internalTransfersKopecks,
+      realizedGrossMarginKopecks,
+      managementNetProfitKopecks,
+    };
+  }, [accounts, contracts, overdues, payments, purchases, ledger, periodFrom, periodTo]);
+
+  const isOwner = currentUser?.role === 'owner';
+  const canWrite = currentUser?.role === 'owner' || currentUser?.role === 'staff';
+
+  // Filtered lists by searchQuery
+  const q = searchQuery.trim().toLowerCase();
+  const filteredContracts = contracts.filter(
+    (c) =>
+      !q ||
+      c.contractNumber.toLowerCase().includes(q) ||
+      c.clientName.toLowerCase().includes(q) ||
+      c.itemTitle.toLowerCase().includes(q)
+  );
+  const filteredClients = clients.filter(
+    (c) => !q || c.fullName.toLowerCase().includes(q) || c.phone.toLowerCase().includes(q)
+  );
+  const filteredPayments = payments.filter(
+    (p) =>
+      !q ||
+      p.clientName.toLowerCase().includes(q) ||
+      (p.contractNumber && p.contractNumber.toLowerCase().includes(q)) ||
+      p.notes.toLowerCase().includes(q)
+  );
+
+  // Handlers
+  const handleCreateClient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await apiFetch('/api/v1/clients', {
+        method: 'POST',
+        body: JSON.stringify(clientForm),
+      });
+      setClientForm({
+        fullName: '',
+        phone: '',
+        secondaryPhone: '',
+        documentRef: '',
+        address: '',
+        notes: '',
+      });
+      await loadFullState();
+      notify('success', 'Карточка клиента успешно сохранена.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка создания клиента');
+    }
+  };
+
+  const handleCreateSupplier = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await apiFetch('/api/v1/suppliers', {
+        method: 'POST',
+        body: JSON.stringify(supplierForm),
+      });
+      setSupplierForm({ name: '', category: 'Магазин электроники', contactInfo: '', notes: '' });
+      await loadFullState();
+      notify('success', 'Магазин / поставщик добавлен в справочник.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка добавления поставщика');
+    }
+  };
+
+  const handleCreatePurchase = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const pKop = parseRublesInputToKopecks(purchaseForm.purchaseRubles);
+      const dKop = parseRublesInputToKopecks(purchaseForm.deliveryRubles);
+      const oKop = parseRublesInputToKopecks(purchaseForm.otherRubles);
+      const paidKop =
+        purchaseForm.paidSupplierRubles.trim() === ''
+          ? pKop
+          : parseRublesInputToKopecks(purchaseForm.paidSupplierRubles);
+
+      await apiFetch('/api/v1/purchases', {
+        method: 'POST',
+        body: JSON.stringify({
+          supplierId: purchaseForm.supplierId || suppliers[0]?.id,
+          clientId: purchaseForm.clientId || null,
+          itemName: purchaseForm.itemName,
+          itemCategory: purchaseForm.itemCategory,
+          quantity: 1,
+          purchasePriceKopecks: pKop,
+          deliveryCostKopecks: dKop,
+          otherCostKopecks: oKop,
+          paidToSupplierKopecks: paidKop,
+          paymentAccountId: purchaseForm.paymentAccountId,
+          purchaseDate: purchaseForm.purchaseDate,
+          notes: purchaseForm.notes,
+        }),
+      });
+      setPurchaseForm((prev) => ({
+        ...prev,
+        itemName: '',
+        purchaseRubles: '',
+        deliveryRubles: '0',
+        otherRubles: '0',
+        paidSupplierRubles: '',
+        notes: '',
+      }));
+      await loadFullState();
+      notify('success', 'Закупка зарегистрирована, полная себестоимость и кассовые регистры обновлены.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка создания закупки');
+    }
+  };
+
+  const handleRecordLedgerOperation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const amountKop = parseRublesInputToKopecks(ledgerForm.amountRubles);
+      await apiFetch('/api/v1/finance/ledger', {
+        method: 'POST',
+        body: JSON.stringify({
+          accountId: ledgerForm.accountId,
+          targetAccountId: ledgerForm.targetAccountId,
+          entryType: ledgerForm.entryType,
+          category: ledgerForm.category,
+          amountKopecks: amountKop,
+          description: ledgerForm.description,
+          eventDate: ledgerForm.eventDate,
+        }),
+      });
+      setLedgerForm((prev) => ({ ...prev, amountRubles: '', description: '' }));
+      await loadFullState();
+      notify('success', 'Финансовая операция успешно проведена и проверена.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка проведения операции');
+    }
+  };
+
+  const handleSaveOverdueContact = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!overdueContactForm) return;
+    try {
+      await apiFetch('/api/v1/overdues/contact', {
+        method: 'POST',
+        body: JSON.stringify({
+          contractId: overdueContactForm.contractId,
+          scheduleItemId: overdueContactForm.scheduleItemId,
+          contactChannel: overdueContactForm.contactChannel,
+          summary: overdueContactForm.summary,
+          promisedDate: overdueContactForm.promisedDate || null,
+          agreedNewDueDate: overdueContactForm.agreedNewDueDate || null,
+        }),
+      });
+      setOverdueContactForm(null);
+      await loadFullState();
+      notify('success', 'Контакт с клиентом и обещанная дата оплаты сохранены (штрафы не начислялись).');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка сохранения контакта');
+    }
+  };
+
+  const handleCreatePlan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await apiFetch('/api/v1/settings/plans', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: newPlanForm.name,
+          termMonths: Number(newPlanForm.termMonths),
+          markupPercent: Number(newPlanForm.markupPercent),
+          downPaymentPercent: Number(newPlanForm.downPaymentPercent),
+          downPaymentRequired: true,
+          roundingRule: newPlanForm.roundingRule,
+          earlyPayoffDiscountPercent: Number(newPlanForm.earlyPayoffDiscountPercent),
+          reason: newPlanForm.reason,
+        }),
+      });
+      setNewPlanForm({
+        name: '',
+        termMonths: '9',
+        markupPercent: '29',
+        downPaymentPercent: '30',
+        roundingRule: 'kopeck',
+        earlyPayoffDiscountPercent: '30',
+        reason: 'Добавление нового гибкого срока рассрочки через админ-панель',
+      });
+      await loadFullState();
+      notify('success', 'Новый тариф рассрочки сохранён. Он доступен при оформлении новых договоров.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка сохранения тарифа');
+    }
+  };
+
+  const handleUpdatePlan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPlan) return;
+    try {
+      await apiFetch(`/api/v1/settings/plans/${editingPlan.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: editingPlan.name,
+          termMonths: Number(editingPlan.termMonths),
+          markupPercent: Number(editingPlan.markupPercent),
+          downPaymentPercent: Number(editingPlan.downPaymentPercent),
+          roundingRule: editingPlan.roundingRule,
+          earlyPayoffDiscountPercent: Number(editingPlan.earlyPayoffDiscountPercent),
+          isActive: editingPlan.isActive,
+          reason: editingPlan.reason,
+        }),
+      });
+      setEditingPlan(null);
+      await loadFullState();
+      notify(
+        'success',
+        'Тариф обновлён с повышением версии. Ранее заключённые договоры сохранили свои исходные условия.'
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка обновления тарифа');
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const resultStr = String(reader.result || '');
+        const base64 = resultStr.includes(',') ? resultStr.split(',')[1] : resultStr;
+        await apiFetch('/api/v1/documents/upload', {
+          method: 'POST',
+          body: JSON.stringify({
+            entityType: 'contract',
+            entityId: contracts[0]?.id || 'cnt_01',
+            docCategory: 'contract_scan',
+            title: `Скан / подтверждение: ${file.name}`,
+            originalFilename: file.name,
+            mimeType: file.type,
+            contentBase64: base64,
+          }),
+        });
+        await loadFullState();
+        notify('success', `Файл «${file.name}» прошёл проверку сигнатуры (magic bytes) и сохранён.`);
+      } catch (err) {
+        notify('error', err instanceof Error ? err.message : 'Ошибка загрузки файла');
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const handleCreateSamplePdfReceipt = async () => {
+    try {
+      // Minimal valid PDF header (%PDF-1.4) encoded in Base64 for testing magic byte validation
+      const pdfString = `%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n%%EOF`;
+      const base64 = btoa(pdfString);
+      await apiFetch('/api/v1/documents/upload', {
+        method: 'POST',
+        body: JSON.stringify({
+          entityType: 'contract',
+          entityId: contracts[0]?.id || 'cnt_01',
+          docCategory: 'receipt',
+          title: `Кассовый чек и подтверждение передачи по договору ${contracts[0]?.contractNumber || 'ДГ-2026-0001'}`,
+          originalFilename: 'receipt_verified_scan.pdf',
+          mimeType: 'application/pdf',
+          contentBase64: base64,
+        }),
+      });
+      await loadFullState();
+      notify('success', 'Проверенный PDF-документ (с валидной сигнатурой %PDF) прикреплён к договору.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Ошибка прикрепления документа');
+    }
+  };
+
+  if (loading && !currentUser) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC] text-xs text-slate-500">
+        Проверка защищённой сессии...
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <AuthGateModal
+        fullScreen
+        apiFetch={apiFetch}
+        onSuccessLogin={async (loginData) => {
+          if (loginData?.user) {
+            setCurrentUser(loginData.user);
+            setCsrfToken(loginData.csrfToken || '');
+            setSessionToken(loginData.sessionToken || '');
+            await loadFullState(loginData.csrfToken || '', loginData.sessionToken || '');
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F172A]">
+      {/* Top Bar Contract: Zone 1 (Wordmark) — Zone 2 (Quick Top Nav) — Zone 3 (Primary CTA) */}
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-8 px-6 py-3.5 bg-white border-b border-slate-200 no-print">
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            className="lg:hidden p-1.5 text-slate-600 hover:text-slate-900 rounded-lg"
+            aria-label="Открыть меню разделов"
+          >
+            {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+          <a
+            href="#dashboard"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveSection('dashboard');
+            }}
+            className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
+          >
+            РассрочкаПро
+          </a>
+        </div>
+
+        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+          <button
+            type="button"
+            onClick={() => setActiveSection('dashboard')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
+              activeSection === 'dashboard' ? 'text-slate-900 underline underline-offset-8' : ''
+            }`}
+          >
+            Сводка
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('contracts')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
+              activeSection === 'contracts' ? 'text-slate-900 underline underline-offset-8' : ''
+            }`}
+          >
+            Договоры
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('payments')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
+              activeSection === 'payments' ? 'text-slate-900 underline underline-offset-8' : ''
+            }`}
+          >
+            Платежи
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('overdues')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
+              activeSection === 'overdues' ? 'text-slate-900 underline underline-offset-8' : ''
+            }`}
+          >
+            Просрочки
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('installment_settings')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
+              activeSection === 'installment_settings'
+                ? 'text-slate-900 underline underline-offset-8'
+                : ''
+            }`}
+          >
+            Тарифы рассрочки
+          </button>
+        </nav>
+
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowNewContractModal(true)}
+            disabled={!canWrite}
+            className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+          >
+            Оформить договор
+          </button>
+        </div>
+      </header>
+
+      {/* Main Workspace Container */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Sidebar Navigation (14 Required Modules) */}
+        <aside
+          className={`${
+            mobileMenuOpen ? 'fixed inset-y-0 left-0 z-40 w-72 bg-white shadow-xl' : 'hidden lg:flex lg:w-64'
+          } flex-col border-r border-slate-200 bg-white shrink-0 no-print overflow-y-auto`}
+        >
+          <div className="p-4 border-b border-slate-200 space-y-2">
+            <div className="text-xs text-slate-500">
+              Телефон: <strong className="font-mono text-slate-900">{currentUser.phone || currentUser.fullName}</strong>
+            </div>
+            <div className="text-[11px] text-slate-500 truncate">{currentUser.fullName}</div>
+            <div className="text-xs text-slate-500 flex items-center justify-between pt-1">
+              <span>
+                Роль: <span className="font-mono text-slate-800">{currentUser.role}</span>
+              </span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowChangePasswordModal(true)}
+                  className="text-xs font-medium text-slate-700 hover:text-slate-900 underline"
+                >
+                  Пароль
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="text-xs font-medium text-red-700 hover:text-red-900 underline"
+                >
+                  Выйти
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-3 space-y-5 flex-1">
+            {['Операционный контур', 'Закупки и склад', 'Финансы и отчётность', 'Управление и защита'].map(
+              (groupName) => {
+                const items = NAV_SECTIONS.filter(
+                  (item) => item.group === groupName && (!item.ownerOnly || isOwner)
+                );
+                if (items.length === 0) return null;
+                return (
+                  <div key={groupName}>
+                    <div className="px-3 mb-1.5 text-[11px] font-semibold text-slate-400">
+                      {groupName}
+                    </div>
+                    <div className="space-y-0.5">
+                      {items.map((item) => {
+                        const active = activeSection === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setActiveSection(item.id);
+                              setMobileMenuOpen(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap truncate ${
+                              active
+                                ? 'bg-slate-900 text-white'
+                                : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                            }`}
+                          >
+                            {item.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              }
+            )}
+          </div>
+
+          <div className="p-4 border-t border-slate-200 text-[11px] text-slate-500 space-y-1">
+            <div className="flex items-center gap-1.5 text-slate-800 font-medium">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+              <span>Точность: целые копейки</span>
+            </div>
+            <div>
+              Сверка регистров:{' '}
+              {reconciliation?.isHealthy ? (
+                <span className="text-emerald-700 font-medium">Все балансы сходятся</span>
+              ) : (
+                <span className="text-red-600 font-medium">Есть расхождения</span>
+              )}
+            </div>
+          </div>
+        </aside>
+
+        {/* Main Content Viewport */}
+        <main className="flex-1 overflow-y-auto p-6 max-w-[1440px] mx-auto w-full space-y-6">
+          {/* Workspace Toolbar: Search & Quick Actions */}
+          <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-200 no-print">
+            <div className="relative w-full sm:w-80">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Быстрый поиск по клиенту, договору, товару..."
+                className="w-full pl-9 pr-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setShowNewPaymentModal(true)}
+                disabled={!canWrite}
+                className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Принять платёж</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => loadFullState()}
+                className="px-3 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:text-slate-900 whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Сверить регистры</span>
+              </button>
+            </div>
+          </div>
+
+          {bannerNotice && (
+            <div
+              className={`p-3.5 rounded-xl border text-xs flex items-center justify-between gap-3 ${
+                bannerNotice.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  : 'bg-red-50 border-red-200 text-red-900'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {bannerNotice.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                )}
+                <span>{bannerNotice.text}</span>
+              </div>
+              <button onClick={() => setBannerNotice(null)} className="text-slate-500 hover:text-slate-900">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {loading ? (
+            <div className="p-12 text-center text-sm text-slate-500">
+              Загрузка и проверка целостности финансовых регистров...
+            </div>
+          ) : (
+            <>
+              {/* ==================== 1. ГЛАВНАЯ ПАНЕЛЬ ==================== */}
+              {activeSection === 'dashboard' && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      Финансовая сводка и контроль задолженностей
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Все показатели рассчитываются с точностью до копейки. Пополнения собственными средствами и внутренние переводы отделены от выручки и прибыли.
+                    </p>
+                  </div>
+
+                  {/* Primary Financial Strip */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                      <div className="text-xs text-slate-500">
+                        Фактические денежные остатки (Касса + Банк)
+                      </div>
+                      <div className="text-2xl font-bold font-mono text-slate-900 mt-1.5">
+                        {formatMoney(financialMetrics.totalLiquidityKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2 font-mono">
+                        Наличные: {formatMoney(financialMetrics.totalCashKopecks)} · Банк:{' '}
+                        {formatMoney(financialMetrics.totalBankKopecks)}
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                      <div className="text-xs text-slate-500">
+                        Общая задолженность клиентов (ожидаемые поступления)
+                      </div>
+                      <div className="text-2xl font-bold font-mono text-slate-900 mt-1.5">
+                        {formatMoney(financialMetrics.totalClientDebtKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2">
+                        Активных договоров: {contracts.filter((c) => c.status === 'active' || c.status === 'restructured').length} · Клиентов: {clients.length}
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                      <div className="text-xs text-slate-500">
+                        Просроченная задолженность (без авто-штрафов)
+                      </div>
+                      <div
+                        className={`text-2xl font-bold font-mono mt-1.5 ${
+                          financialMetrics.totalOverdueKopecks > 0 ? 'text-red-600' : 'text-emerald-700'
+                        }`}
+                      >
+                        {formatMoney(financialMetrics.totalOverdueKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2">
+                        Просроченных платежей: {overdues.length} · Нераспределённых поступлений:{' '}
+                        <span className="font-mono font-medium text-amber-700">
+                          {formatMoney(financialMetrics.totalUnallocatedPaymentsKopecks)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                      <div className="text-xs text-slate-500">
+                        Управленческая прибыль (реализованная наценка − опер. расходы)
+                      </div>
+                      <div className="text-2xl font-bold font-mono text-emerald-700 mt-1.5">
+                        {formatMoney(financialMetrics.managementNetProfitKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2 font-mono">
+                        Обязательства поставщикам: {formatMoney(financialMetrics.supplierObligationsKopecks)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Unallocated payments alert & Overdue attention table */}
+                  {financialMetrics.totalUnallocatedPaymentsKopecks > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Поступления от клиентов, ожидающие ручного распределения
+                        </h3>
+                        <p className="text-xs text-slate-600 mt-0.5">
+                          Найдены платежи с нераспределённым остатком на сумму{' '}
+                          <span className="font-mono font-semibold text-amber-700">
+                            {formatMoney(financialMetrics.totalUnallocatedPaymentsKopecks)}
+                          </span>
+                          . Система не списывает старейший долг автоматически без вашего выбора.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveSection('payments')}
+                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap"
+                      >
+                        Перейти к ручному распределению
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Active Contracts Overview Table */}
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                      <div>
+                        <h2 className="text-base font-semibold text-slate-900">
+                          Действующие договоры рассрочки
+                        </h2>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Нажмите «График / Досрочное» для просмотра версий графика и расчёта досрочного погашения
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveSection('contracts')}
+                        className="text-xs font-medium text-slate-700 hover:text-slate-900 underline"
+                      >
+                        Все договоры ({contracts.length})
+                      </button>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium">Договор и дата</th>
+                            <th className="py-3 px-4 font-medium">Клиент и товар</th>
+                            <th className="py-3 px-4 font-medium text-right">Себестоимость</th>
+                            <th className="py-3 px-4 font-medium text-right">Цена продажи</th>
+                            <th className="py-3 px-4 font-medium text-right">Внесено всего</th>
+                            <th className="py-3 px-4 font-medium text-right">Остаток долга</th>
+                            <th className="py-3 px-4 font-medium text-right">Действия</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {filteredContracts.map((c) => (
+                            <tr key={c.id} className="hover:bg-slate-50/80">
+                              <td className="py-3 px-4">
+                                <div className="font-mono font-semibold text-slate-900">
+                                  {c.contractNumber}
+                                </div>
+                                <div className="text-slate-500 mt-0.5">
+                                  {formatDateRu(c.startDate)} · {c.termMonths} мес. · Наценка{' '}
+                                  {c.markupPercent}%
+                                </div>
+                              </td>
+                              <td className="py-3 px-4">
+                                <div className="font-medium text-slate-900">{c.clientName}</div>
+                                <div className="text-slate-500 mt-0.5">{c.itemTitle}</div>
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right text-slate-700">
+                                {formatMoney(c.totalCostKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right font-medium text-slate-900">
+                                {formatMoney(c.salePriceKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right text-emerald-700">
+                                {formatMoney(c.totalCollectedKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
+                                {formatMoney(c.remainingDebtKopecks)}
+                                {c.overdueKopecks > 0 && (
+                                  <div className="text-[11px] text-red-600 font-normal">
+                                    Просрочено: {formatMoney(c.overdueKopecks)}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-3 px-4 text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEarlyPayoffContract(c)}
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
+                                  >
+                                    Досрочное
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setRestructureContract(c)}
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
+                                  >
+                                    График (v{c.currentScheduleVersion})
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 2. КЛИЕНТЫ ==================== */}
+              {activeSection === 'clients' && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">Реестр клиентов</h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Минимизация персональных данных: хранятся только необходимые для исполнения договора контакты и проверочная отметка документа.
+                    </p>
+                  </div>
+
+                  {canWrite && (
+                    <form
+                      onSubmit={handleCreateClient}
+                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                    >
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        Добавить нового клиента
+                      </h2>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <input
+                          type="text"
+                          value={clientForm.fullName}
+                          onChange={(e) =>
+                            setClientForm((p) => ({ ...p, fullName: e.target.value }))
+                          }
+                          placeholder="ФИО клиента полностью *"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="text"
+                          value={clientForm.phone}
+                          onChange={(e) => setClientForm((p) => ({ ...p, phone: e.target.value }))}
+                          placeholder="Основной телефон *"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="text"
+                          value={clientForm.secondaryPhone}
+                          onChange={(e) =>
+                            setClientForm((p) => ({ ...p, secondaryPhone: e.target.value }))
+                          }
+                          placeholder="Дополнительный телефон"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={clientForm.documentRef}
+                          onChange={(e) =>
+                            setClientForm((p) => ({ ...p, documentRef: e.target.value }))
+                          }
+                          placeholder="Отметка о документе (без лишних ПДн)"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={clientForm.address}
+                          onChange={(e) =>
+                            setClientForm((p) => ({ ...p, address: e.target.value }))
+                          }
+                          placeholder="Адрес доставки / проживания"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={clientForm.notes}
+                          onChange={(e) => setClientForm((p) => ({ ...p, notes: e.target.value }))}
+                          placeholder="Примечание"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Сохранить карточку клиента
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {editingClient && canWrite && (
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        try {
+                          await apiFetch(`/api/v1/clients/${editingClient.id}`, {
+                            method: 'PATCH',
+                            body: JSON.stringify({
+                              fullName: editingClient.fullName,
+                              phone: editingClient.phone,
+                              secondaryPhone: editingClient.secondaryPhone,
+                              documentRef: editingClient.documentRef,
+                              address: editingClient.address,
+                              notes: editingClient.notes,
+                              status: editingClient.status,
+                            }),
+                          });
+                          setEditingClient(null);
+                          await loadFullState();
+                          notify('success', 'Карточка клиента успешно обновлена.');
+                        } catch (err) {
+                          notify('error', err instanceof Error ? err.message : 'Ошибка обновления клиента');
+                        }
+                      }}
+                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Редактирование карточки клиента: {editingClient.fullName}
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setEditingClient(null)}
+                          className="text-xs text-slate-500 hover:text-slate-900"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <input
+                          type="text"
+                          value={editingClient.fullName}
+                          onChange={(e) =>
+                            setEditingClient((p) => (p ? { ...p, fullName: e.target.value } : null))
+                          }
+                          placeholder="ФИО клиента полностью *"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="text"
+                          value={editingClient.phone}
+                          onChange={(e) =>
+                            setEditingClient((p) => (p ? { ...p, phone: e.target.value } : null))
+                          }
+                          placeholder="Основной телефон *"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="text"
+                          value={editingClient.secondaryPhone}
+                          onChange={(e) =>
+                            setEditingClient((p) =>
+                              p ? { ...p, secondaryPhone: e.target.value } : null
+                            )
+                          }
+                          placeholder="Дополнительный телефон"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={editingClient.documentRef}
+                          onChange={(e) =>
+                            setEditingClient((p) => (p ? { ...p, documentRef: e.target.value } : null))
+                          }
+                          placeholder="Отметка о документе"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={editingClient.address}
+                          onChange={(e) =>
+                            setEditingClient((p) => (p ? { ...p, address: e.target.value } : null))
+                          }
+                          placeholder="Адрес доставки / проживания"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={editingClient.notes}
+                          onChange={(e) =>
+                            setEditingClient((p) => (p ? { ...p, notes: e.target.value } : null))
+                          }
+                          placeholder="Примечание"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <select
+                          value={editingClient.status}
+                          onChange={(e) =>
+                            setEditingClient((p) =>
+                              p ? { ...p, status: e.target.value as 'active' | 'archived' } : null
+                            )
+                          }
+                          className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                        >
+                          <option value="active">Статус: Активен</option>
+                          <option value="archived">Статус: В архиве</option>
+                        </select>
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Сохранить изменения
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-3 px-4 font-medium">ФИО клиента</th>
+                          <th className="py-3 px-4 font-medium">Контакты и документ</th>
+                          <th className="py-3 px-4 font-medium text-right">Активных договоров</th>
+                          <th className="py-3 px-4 font-medium text-right">Общий остаток долга</th>
+                          <th className="py-3 px-4 font-medium text-right">В т.ч. просрочено</th>
+                          <th className="py-3 px-4 font-medium text-right">Действия</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredClients.map((cl) => (
+                          <tr key={cl.id} className="hover:bg-slate-50/80">
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-900">{cl.fullName}</div>
+                              <div className="text-slate-500 mt-0.5">{cl.address || '—'}</div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-mono text-slate-800">
+                                {cl.phone}
+                                {cl.secondaryPhone ? ` · ${cl.secondaryPhone}` : ''}
+                              </div>
+                              <div className="text-slate-500 mt-0.5">{cl.documentRef || '—'}</div>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right">
+                              {cl.activeContractsCount}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
+                              {formatMoney(cl.totalDebtKopecks)}
+                            </td>
+                            <td
+                              className={`py-3 px-4 font-mono text-right font-medium ${
+                                cl.overdueDebtKopecks > 0 ? 'text-red-600' : 'text-slate-500'
+                              }`}
+                            >
+                              {formatMoney(cl.overdueDebtKopecks)}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {canWrite && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setEditingClient({
+                                        id: cl.id,
+                                        fullName: cl.fullName,
+                                        phone: cl.phone,
+                                        secondaryPhone: cl.secondaryPhone || '',
+                                        documentRef: cl.documentRef || '',
+                                        address: cl.address || '',
+                                        notes: cl.notes || '',
+                                        status: cl.status,
+                                      })
+                                    }
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100"
+                                  >
+                                    Изменить
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSearchQuery(cl.fullName);
+                                    setActiveSection('contracts');
+                                  }}
+                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100"
+                                >
+                                  Договоры
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 3. ДОГОВОРЫ И ГРАФИКИ ==================== */}
+              {activeSection === 'contracts' && (
+                <div className="space-y-6">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <h1 className="text-2xl font-bold text-slate-900">
+                        Договоры продажи в рассрочку и графики платежей
+                      </h1>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Каждый договор хранит зафиксированную версию правил рассрочки, историю версий графика и связанные документы.
+                      </p>
+                    </div>
+                    {canWrite && (
+                      <button
+                        type="button"
+                        onClick={() => setShowNewContractModal(true)}
+                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Оформить новый договор</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-4">
+                    {filteredContracts.map((c) => (
+                      <div key={c.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-4">
+                          <div>
+                            <div className="flex items-center gap-2 text-sm">
+                              <span className="font-mono font-bold text-slate-900">
+                                {c.contractNumber}
+                              </span>
+                              <span className="text-slate-400">·</span>
+                              <span className="font-semibold text-slate-900">{c.clientName}</span>
+                              <span className="text-slate-400">·</span>
+                              <span className="text-xs text-slate-600">
+                                Статус: {translateContractStatus(c.status)}
+                              </span>
+                            </div>
+                            <div className="text-xs text-slate-600 mt-1">
+                              Товар: <strong>{c.itemTitle}</strong> · Оформлен:{' '}
+                              <span className="font-mono">{formatDateRu(c.startDate)}</span> · Срок:{' '}
+                              <span className="font-mono">{c.termMonths} мес.</span> · Версия графика:{' '}
+                              <span className="font-mono">v{c.currentScheduleVersion}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setEarlyPayoffContract(c)}
+                              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                            >
+                              <Calculator className="w-3.5 h-3.5" />
+                              <span>Калькулятор досрочного погашения</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRestructureContract(c)}
+                              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                            >
+                              <History className="w-3.5 h-3.5" />
+                              <span>История графика (v{c.currentScheduleVersion})</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPrintTemplateModal({ contract: c, type: 'contract' })}
+                              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>Печать договора</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Contract Financial Breakdown */}
+                        <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs font-mono bg-slate-50 p-3.5 rounded-lg border border-slate-200">
+                          <div>
+                            <div className="font-sans text-slate-500">Полная себестоимость</div>
+                            <div className="font-semibold text-slate-900 mt-0.5">
+                              {formatMoney(c.totalCostKopecks)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="font-sans text-slate-500">
+                              Наценка ({c.markupPercent}%)
+                            </div>
+                            <div className="font-semibold text-emerald-700 mt-0.5">
+                              +{formatMoney(c.markupKopecks)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="font-sans text-slate-500">Цена продажи</div>
+                            <div className="font-semibold text-slate-900 mt-0.5">
+                              {formatMoney(c.salePriceKopecks)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="font-sans text-slate-500">
+                              1-й взнос ({c.downPaymentPercent}%)
+                            </div>
+                            <div className="font-semibold text-slate-900 mt-0.5">
+                              {formatMoney(c.downPaymentKopecks)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="font-sans text-slate-500">Фактически оплачено</div>
+                            <div className="font-semibold text-emerald-700 mt-0.5">
+                              {formatMoney(c.totalCollectedKopecks)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="font-sans text-slate-500">Текущий остаток долга</div>
+                            <div className="font-bold text-slate-900 mt-0.5">
+                              {formatMoney(c.remainingDebtKopecks)}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Active Schedule Table */}
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-200 text-slate-500">
+                                <th className="py-2 pr-3 font-medium">Платёж</th>
+                                <th className="py-2 pr-3 font-medium">Дата по графику</th>
+                                <th className="py-2 pr-3 font-medium text-right">Сумма по плану</th>
+                                <th className="py-2 pr-3 font-medium text-right">Внесено</th>
+                                <th className="py-2 pr-3 font-medium text-right">Остаток по строке</th>
+                                <th className="py-2 font-medium">Статус и примечание</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {c.schedule.map((item) => (
+                                <tr key={item.id}>
+                                  <td className="py-2 pr-3 font-mono font-medium">
+                                    №{item.installmentNumber}
+                                  </td>
+                                  <td className="py-2 pr-3 font-mono">{formatDateRu(item.dueDate)}</td>
+                                  <td className="py-2 pr-3 font-mono text-right">
+                                    {formatMoney(item.plannedKopecks)}
+                                  </td>
+                                  <td className="py-2 pr-3 font-mono text-right text-emerald-700">
+                                    {formatMoney(item.paidKopecks)}
+                                  </td>
+                                  <td className="py-2 pr-3 font-mono text-right font-semibold">
+                                    {formatMoney(item.remainingKopecks)}
+                                  </td>
+                                  <td className="py-2 text-slate-700">
+                                    <span
+                                      className={
+                                        item.daysOverdue > 0
+                                          ? 'text-red-600 font-medium'
+                                          : item.status === 'paid'
+                                            ? 'text-emerald-700'
+                                            : 'text-slate-700'
+                                      }
+                                    >
+                                      {translateScheduleStatus(item.status)}
+                                    </span>
+                                    {item.daysOverdue > 0 && (
+                                      <span className="text-red-600 ml-1.5 font-mono">
+                                        ({item.daysOverdue} дн. задержки)
+                                      </span>
+                                    )}
+                                    {item.promisedDate && (
+                                      <span className="text-slate-500 ml-1.5">
+                                        · Обещано до {formatDateRu(item.promisedDate)}
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 4. ПЛАТЕЖИ И РУЧНОЕ РАСПРЕДЕЛЕНИЕ ==================== */}
+              {activeSection === 'payments' && (
+                <div className="space-y-6">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <h1 className="text-2xl font-bold text-slate-900">
+                        Платежи клиентов и ручное распределение
+                      </h1>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Частичные платежи и переводы без указания договора распределяются строго вручную по выбранным строкам графика.
+                      </p>
+                    </div>
+                    {canWrite && (
+                      <button
+                        type="button"
+                        onClick={() => setShowNewPaymentModal(true)}
+                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>Зарегистрировать поступление</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-3 px-4 font-medium">Дата и ID операции</th>
+                          <th className="py-3 px-4 font-medium">Клиент и договор</th>
+                          <th className="py-3 px-4 font-medium">Касса / Счёт</th>
+                          <th className="py-3 px-4 font-medium text-right">Сумма поступления</th>
+                          <th className="py-3 px-4 font-medium text-right">Распределено</th>
+                          <th className="py-3 px-4 font-medium text-right">Не распределено</th>
+                          <th className="py-3 px-4 font-medium text-right">Действия</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredPayments.map((p) => (
+                          <tr
+                            key={p.id}
+                            className={`hover:bg-slate-50/80 ${
+                              p.status === 'reversed' ? 'opacity-50' : ''
+                            }`}
+                          >
+                            <td className="py-3 px-4">
+                              <div className="font-mono font-medium text-slate-900">
+                                {formatDateRu(p.eventDate)}
+                              </div>
+                              <div className="font-mono text-[11px] text-slate-400">{p.id}</div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-900">{p.clientName}</div>
+                              <div className="text-slate-500 mt-0.5">
+                                {p.contractNumber ? `Договор ${p.contractNumber}` : 'Без договора (ожидает выбора)'}{' '}
+                                · {p.notes}
+                              </div>
+                              {p.allocations.length > 0 && (
+                                <div className="text-[11px] text-slate-500 mt-1 font-mono">
+                                  Распределено на:{' '}
+                                  {p.allocations
+                                    .map(
+                                      (a) =>
+                                        `№${a.installmentNumber} (${formatMoney(a.amountKopecks)})`
+                                    )
+                                    .join(', ')}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-slate-700">{p.accountName}</td>
+                            <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
+                              {formatMoney(p.amountKopecks)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right text-emerald-700">
+                              {formatMoney(p.allocatedKopecks)}
+                            </td>
+                            <td
+                              className={`py-3 px-4 font-mono text-right font-semibold ${
+                                p.unallocatedKopecks > 0 ? 'text-amber-700' : 'text-slate-400'
+                              }`}
+                            >
+                              {formatMoney(p.unallocatedKopecks)}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                {p.status === 'confirmed' && p.unallocatedKopecks > 0 && canWrite && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setAllocatingPayment(p)}
+                                    className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap"
+                                  >
+                                    Распределить вручную
+                                  </button>
+                                )}
+                                {p.status === 'confirmed' && !p.isDownPayment && isOwner && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      try {
+                                        await apiFetch(`/api/v1/payments/${p.id}/reverse`, {
+                                          method: 'POST',
+                                          body: JSON.stringify({
+                                            reason:
+                                              'Корректирующее сторно платежа по решению владельца',
+                                          }),
+                                        });
+                                        await loadFullState();
+                                        notify(
+                                          'success',
+                                          'Платёж сторнирован с сохранением записи в истории и возвратом сумм в графике.'
+                                        );
+                                      } catch (err) {
+                                        notify(
+                                          'error',
+                                          err instanceof Error ? err.message : 'Ошибка сторнирования'
+                                        );
+                                      }
+                                    }}
+                                    className="px-2.5 py-1.5 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50 flex items-center gap-1 whitespace-nowrap"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Сторно</span>
+                                  </button>
+                                )}
+                                {p.status === 'reversed' && (
+                                  <span className="text-xs text-red-600">
+                                    Сторнирован ({p.reversalReason})
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 5. ПРОСРОЧКИ ==================== */}
+              {activeSection === 'overdues' && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      Контроль просроченных платежей
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Автоматические штрафы и пени не начисляются. Фиксируйте результаты контактов с клиентом, обещанную дату оплаты или согласованный перенос срока.
+                    </p>
+                  </div>
+
+                  {overdueContactForm && (
+                    <form
+                      onSubmit={handleSaveOverdueContact}
+                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Зафиксировать контакт с клиентом / обещанную дату оплаты
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setOverdueContactForm(null)}
+                          className="text-xs text-slate-500 hover:text-slate-900"
+                        >
+                          Закрыть
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Канал связи
+                          </label>
+                          <select
+                            value={overdueContactForm.contactChannel}
+                            onChange={(e) =>
+                              setOverdueContactForm((p) =>
+                                p ? { ...p, contactChannel: e.target.value as any } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          >
+                            <option value="phone">Телефонный звонок</option>
+                            <option value="messenger">Сообщение в мессенджере</option>
+                            <option value="in_person">Личная встреча</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Обещанная клиентом дата оплаты
+                          </label>
+                          <input
+                            type="date"
+                            value={overdueContactForm.promisedDate}
+                            onChange={(e) =>
+                              setOverdueContactForm((p) =>
+                                p ? { ...p, promisedDate: e.target.value } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Согласованный перенос даты в графике (если утверждён)
+                          </label>
+                          <input
+                            type="date"
+                            value={overdueContactForm.agreedNewDueDate}
+                            onChange={(e) =>
+                              setOverdueContactForm((p) =>
+                                p ? { ...p, agreedNewDueDate: e.target.value } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div className="sm:col-span-3">
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Результат договорённости с клиентом *
+                          </label>
+                          <input
+                            type="text"
+                            value={overdueContactForm.summary}
+                            onChange={(e) =>
+                              setOverdueContactForm((p) =>
+                                p ? { ...p, summary: e.target.value } : null
+                              )
+                            }
+                            placeholder="Например: Клиент предупредил о задержке зарплаты, обязуется внести остаток 31.10.2026"
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            required
+                          />
+                        </div>
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Сохранить в журнал просрочек
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  <div className="space-y-4">
+                    {overdues.map((o) => (
+                      <div
+                        key={o.scheduleItemId}
+                        className="bg-white border border-slate-200 rounded-xl p-5 space-y-3"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900">
+                              {o.clientName} · <span className="font-mono">{o.clientPhone}</span>
+                            </div>
+                            <div className="text-xs text-slate-600 mt-0.5">
+                              Договор <span className="font-mono font-medium">{o.contractNumber}</span>{' '}
+                              · Товар: {o.itemTitle} · Платёж №{o.installmentNumber} от{' '}
+                              <span className="font-mono">{formatDateRu(o.dueDate)}</span>
+                            </div>
+                          </div>
+
+                          <div className="text-right">
+                            <div className="text-xs text-slate-500">
+                              Просрочка: <strong className="text-red-600">{o.daysOverdue} дн.</strong>
+                            </div>
+                            <div className="text-base font-bold font-mono text-red-600">
+                              {formatMoney(o.overdueKopecks)}
+                            </div>
+                            {o.promisedDate && (
+                              <div className="text-xs text-slate-600">
+                                Обещанная дата: <span className="font-mono">{formatDateRu(o.promisedDate)}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {o.contacts.length > 0 && (
+                          <div className="pt-2 border-t border-slate-100 space-y-1.5 text-xs">
+                            <div className="font-medium text-slate-700">История контактов:</div>
+                            {o.contacts.map((ct) => (
+                              <div key={ct.id} className="text-slate-600">
+                                <span className="font-mono text-slate-500">
+                                  {formatDateTimeRu(ct.createdAt)}
+                                </span>{' '}
+                                · {ct.summary}
+                                {ct.promisedDate ? ` (обещано к ${formatDateRu(ct.promisedDate)})` : ''}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {canWrite && (
+                          <div className="pt-2 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOverdueContactForm({
+                                  scheduleItemId: o.scheduleItemId,
+                                  contractId: o.contractId,
+                                  contactChannel: 'phone',
+                                  summary: '',
+                                  promisedDate: o.promisedDate || '',
+                                  agreedNewDueDate: '',
+                                })
+                              }
+                              className="px-3 py-1.5 text-xs font-medium text-slate-800 border border-slate-300 rounded-lg hover:bg-slate-50"
+                            >
+                              Зафиксировать звонок / перенос даты
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 6. ЗАКУПКИ И ТОВАРЫ ==================== */}
+              {activeSection === 'purchases' && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      Целевые закупки товаров под клиентов
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Полная себестоимость = Цена покупки в магазине + Доставка + Прочие прямые затраты.
+                    </p>
+                  </div>
+
+                  {canWrite && (
+                    <form
+                      onSubmit={handleCreatePurchase}
+                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                    >
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        Зарегистрировать новую покупку товара
+                      </h2>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <select
+                          value={purchaseForm.supplierId}
+                          onChange={(e) =>
+                            setPurchaseForm((p) => ({ ...p, supplierId: e.target.value }))
+                          }
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                        >
+                          {suppliers.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              Магазин: {s.name}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          value={purchaseForm.clientId}
+                          onChange={(e) =>
+                            setPurchaseForm((p) => ({ ...p, clientId: e.target.value }))
+                          }
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                        >
+                          <option value="">— Под клиента (опционально) —</option>
+                          {clients.map((cl) => (
+                            <option key={cl.id} value={cl.id}>
+                              {cl.fullName}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="text"
+                          value={purchaseForm.itemName}
+                          onChange={(e) =>
+                            setPurchaseForm((p) => ({ ...p, itemName: e.target.value }))
+                          }
+                          placeholder="Наименование товара *"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="1"
+                          value={purchaseForm.purchaseRubles}
+                          onChange={(e) =>
+                            setPurchaseForm((p) => ({ ...p, purchaseRubles: e.target.value }))
+                          }
+                          placeholder="Цена покупки в магазине (₽) *"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={purchaseForm.deliveryRubles}
+                          onChange={(e) =>
+                            setPurchaseForm((p) => ({ ...p, deliveryRubles: e.target.value }))
+                          }
+                          placeholder="Стоимость доставки (₽)"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={purchaseForm.paidSupplierRubles}
+                          onChange={(e) =>
+                            setPurchaseForm((p) => ({ ...p, paidSupplierRubles: e.target.value }))
+                          }
+                          placeholder="Оплачено поставщику сразу (₽)"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                        />
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Сохранить закупку и провести оплату
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-3 px-4 font-medium">Дата и товар</th>
+                          <th className="py-3 px-4 font-medium">Магазин / Клиент</th>
+                          <th className="py-3 px-4 font-medium text-right">Цена покупки</th>
+                          <th className="py-3 px-4 font-medium text-right">Доставка</th>
+                          <th className="py-3 px-4 font-medium text-right">Полная себестоимость</th>
+                          <th className="py-3 px-4 font-medium text-right">Долг поставщику</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {purchases.map((p) => (
+                          <tr key={p.id} className="hover:bg-slate-50/80">
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-900">{p.itemName}</div>
+                              <div className="text-slate-500 mt-0.5">
+                                {formatDateRu(p.purchaseDate)} ·{' '}
+                                {p.contractNumber ? `Договор ${p.contractNumber}` : 'Свободен к оформлению'}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="text-slate-900">{p.supplierName}</div>
+                              <div className="text-slate-500 mt-0.5">{p.clientName || '—'}</div>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right">
+                              {formatMoney(p.purchasePriceKopecks)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right">
+                              {formatMoney(p.deliveryCostKopecks + p.otherCostKopecks)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
+                              {formatMoney(p.totalCostKopecks)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right">
+                              {p.supplierDebtKopecks > 0 ? (
+                                <span className="text-amber-700 font-semibold">
+                                  {formatMoney(p.supplierDebtKopecks)}
+                                </span>
+                              ) : (
+                                <span className="text-emerald-700">Оплачено</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 7. МАГАЗИНЫ И ПОСТАВЩИКИ ==================== */}
+              {activeSection === 'suppliers' && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">Магазины и поставщики</h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Учёт магазинов приобретения товаров, объёмов закупок и текущих обязательств перед поставщиками.
+                    </p>
+                  </div>
+
+                  {canWrite && (
+                    <form
+                      onSubmit={handleCreateSupplier}
+                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                    >
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        Добавить магазин или поставщика
+                      </h2>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <input
+                          type="text"
+                          value={supplierForm.name}
+                          onChange={(e) => setSupplierForm((p) => ({ ...p, name: e.target.value }))}
+                          placeholder="Название магазина / поставщика *"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="text"
+                          value={supplierForm.category}
+                          onChange={(e) =>
+                            setSupplierForm((p) => ({ ...p, category: e.target.value }))
+                          }
+                          placeholder="Направление (Электроника, Мебель, Автотовары)"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={supplierForm.contactInfo}
+                          onChange={(e) =>
+                            setSupplierForm((p) => ({ ...p, contactInfo: e.target.value }))
+                          }
+                          placeholder="Контакты и адрес магазина"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Добавить в справочник
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-3 px-4 font-medium">Магазин / Поставщик</th>
+                          <th className="py-3 px-4 font-medium">Контакты</th>
+                          <th className="py-3 px-4 font-medium text-right">Закупок</th>
+                          <th className="py-3 px-4 font-medium text-right">Объём закупок</th>
+                          <th className="py-3 px-4 font-medium text-right">Оплачено</th>
+                          <th className="py-3 px-4 font-medium text-right">Наш долг поставщику</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {suppliers.map((s) => (
+                          <tr key={s.id} className="hover:bg-slate-50/80">
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-900">{s.name}</div>
+                              <div className="text-slate-500 mt-0.5">{s.category}</div>
+                            </td>
+                            <td className="py-3 px-4 text-slate-600">{s.contactInfo || '—'}</td>
+                            <td className="py-3 px-4 font-mono text-right">{s.purchasesCount}</td>
+                            <td className="py-3 px-4 font-mono text-right">
+                              {formatMoney(s.totalPurchasedKopecks)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right text-emerald-700">
+                              {formatMoney(s.totalPaidKopecks)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right font-semibold text-amber-700">
+                              {formatMoney(s.totalDebtKopecks)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 8. КАССА И БАНКОВСКИЕ СЧЕТА & 9. РАСХОДЫ ==================== */}
+              {(activeSection === 'cash_bank' || activeSection === 'expenses') && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      {activeSection === 'cash_bank'
+                        ? 'Касса, банковские счета и движение денежных средств'
+                        : 'Операционные расходы бизнеса'}
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Подтверждённые денежные операции не удаляются бесследно. Пополнения собственными средствами и внутренние переводы не искажают выручку.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    {accounts.map((acc) => (
+                      <div key={acc.id} className="bg-white border border-slate-200 rounded-xl p-5">
+                        <div className="text-xs text-slate-500">
+                          {acc.accountType === 'cash' ? 'Наличная касса' : 'Банковский счёт'}
+                        </div>
+                        <div className="text-sm font-semibold text-slate-900 mt-0.5">{acc.name}</div>
+                        <div className="text-2xl font-bold font-mono text-slate-900 mt-2">
+                          {formatMoney(acc.balanceKopecks)}
+                        </div>
+                      </div>
+                    ))}
+                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                      <div className="text-xs text-slate-500">Статус сверки регистров</div>
+                      <div className="text-sm font-semibold text-emerald-700 mt-1 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>
+                          {reconciliation?.isHealthy
+                            ? 'Балансы счетов = сумме проводок'
+                            : 'Обнаружено расхождение'}
+                        </span>
+                      </div>
+                      <div className="text-xs font-mono text-slate-500 mt-2">
+                        Сальдо: {formatMoney(reconciliation?.calculatedLedgerBalanceKopecks || 0)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {canWrite && (
+                    <form
+                      onSubmit={handleRecordLedgerOperation}
+                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                    >
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        Провести операцию по кассе или банковскому счёту
+                      </h2>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Тип операции
+                          </label>
+                          <select
+                            value={ledgerForm.entryType}
+                            onChange={(e) =>
+                              setLedgerForm((p) => ({ ...p, entryType: e.target.value as any }))
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          >
+                            <option value="operating_expense">Операционный расход бизнеса</option>
+                            <option value="internal_transfer">
+                              Внутренний перевод между своими счетами
+                            </option>
+                            {isOwner && (
+                              <>
+                                <option value="owner_injection">
+                                  Пополнение собственными средствами владельца (не выручка)
+                                </option>
+                                <option value="owner_withdrawal">
+                                  Личное изъятие средств владельцем
+                                </option>
+                              </>
+                            )}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Счёт операции
+                          </label>
+                          <select
+                            value={ledgerForm.accountId}
+                            onChange={(e) =>
+                              setLedgerForm((p) => ({ ...p, accountId: e.target.value }))
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          >
+                            {accounts.map((a) => (
+                              <option key={a.id} value={a.id}>
+                                {a.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {ledgerForm.entryType === 'internal_transfer' ? (
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 mb-1">
+                              Счёт зачисления перевода
+                            </label>
+                            <select
+                              value={ledgerForm.targetAccountId}
+                              onChange={(e) =>
+                                setLedgerForm((p) => ({ ...p, targetAccountId: e.target.value }))
+                              }
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                            >
+                              {accounts.map((a) => (
+                                <option key={a.id} value={a.id}>
+                                  {a.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ) : (
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 mb-1">
+                              Категория
+                            </label>
+                            <input
+                              type="text"
+                              value={ledgerForm.category}
+                              onChange={(e) =>
+                                setLedgerForm((p) => ({ ...p, category: e.target.value }))
+                              }
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            />
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Сумма (₽) *
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="1"
+                            value={ledgerForm.amountRubles}
+                            onChange={(e) =>
+                              setLedgerForm((p) => ({ ...p, amountRubles: e.target.value }))
+                            }
+                            placeholder="0.00"
+                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            required
+                          />
+                        </div>
+
+                        <div className="sm:col-span-2">
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Описание / основание операции *
+                          </label>
+                          <input
+                            type="text"
+                            value={ledgerForm.description}
+                            onChange={(e) =>
+                              setLedgerForm((p) => ({ ...p, description: e.target.value }))
+                            }
+                            placeholder="Подробное назначение операции"
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            required
+                          />
+                        </div>
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Провести операцию в регистре
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-3 px-4 font-medium">Дата</th>
+                          <th className="py-3 px-4 font-medium">Счёт / Касса</th>
+                          <th className="py-3 px-4 font-medium">Вид операции и категория</th>
+                          <th className="py-3 px-4 font-medium">Основание</th>
+                          <th className="py-3 px-4 font-medium text-right">Сумма</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {ledger
+                          .filter(
+                            (l) =>
+                              activeSection === 'cash_bank' ||
+                              l.entryType === 'operating_expense' ||
+                              l.entryType === 'delivery_expense'
+                          )
+                          .map((l) => (
+                            <tr
+                              key={l.id}
+                              className={l.status === 'reversed' ? 'opacity-50 line-through' : ''}
+                            >
+                              <td className="py-3 px-4 font-mono">{formatDateRu(l.eventDate)}</td>
+                              <td className="py-3 px-4">{l.accountName}</td>
+                              <td className="py-3 px-4">
+                                <div className="font-medium text-slate-900">
+                                  {translateEntryType(l.entryType)}
+                                </div>
+                                <div className="text-slate-500">{l.category}</div>
+                              </td>
+                              <td className="py-3 px-4 text-slate-700">{l.description}</td>
+                              <td
+                                className={`py-3 px-4 font-mono text-right font-semibold ${
+                                  l.direction === 'in' ? 'text-emerald-700' : 'text-slate-900'
+                                }`}
+                              >
+                                {l.direction === 'in' ? '+' : '−'}
+                                {formatMoney(l.amountKopecks)}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 10. ПРИБЫЛЬ И ОТЧЁТЫ ==================== */}
+              {activeSection === 'reports' && (
+                <div className="space-y-6">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <h1 className="text-2xl font-bold text-slate-900">
+                        Управленческая прибыль и отчёты за период
+                      </h1>
+                      <p className="text-xs text-slate-500 mt-1">
+                        До уточнения налогового режима владельца показатель именуется «Управленческая прибыль (до налогообложения)».
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 no-print">
+                      <input
+                        type="date"
+                        value={periodFrom}
+                        onChange={(e) => setPeriodFrom(e.target.value)}
+                        className="px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg"
+                      />
+                      <span className="text-xs text-slate-500">—</span>
+                      <input
+                        type="date"
+                        value={periodTo}
+                        onChange={(e) => setPeriodTo(e.target.value)}
+                        className="px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg"
+                      />
+                      <a
+                        href={`/api/v1/reports/export/csv?from=${periodFrom}&to=${periodTo}`}
+                        className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Экспорт Excel / CSV (безопасный)</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => window.print()}
+                        className="px-3.5 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>Печать отчёта (PDF)</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* P&L vs Cost of Goods */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+                      <h2 className="text-base font-semibold text-slate-900 border-b border-slate-200 pb-2">
+                        1. Отчёт по портфелю договоров и управленческой прибыли
+                      </h2>
+                      <div className="space-y-2.5 text-xs">
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">
+                            Объём продаж по оформленным договорам (с наценкой):
+                          </span>
+                          <span className="font-mono font-semibold">
+                            {formatMoney(financialMetrics.portfolioSaleVolumeKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">
+                            Полная себестоимость реализованных по договорам товаров (закупка + доставка):
+                          </span>
+                          <span className="font-mono">
+                            {formatMoney(financialMetrics.portfolioCostOfGoodsKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">
+                            Ожидаемая валовая наценка по действующему портфелю:
+                          </span>
+                          <span className="font-mono font-semibold text-emerald-700">
+                            {formatMoney(financialMetrics.totalExpectedMarkupKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">
+                            Фактически реализованная наценка в поступивших платежах:
+                          </span>
+                          <span className="font-mono font-semibold text-emerald-700">
+                            {formatMoney(financialMetrics.realizedGrossMarginKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">
+                            Операционные расходы за период ({formatDateRu(periodFrom)} — {formatDateRu(periodTo)}):
+                          </span>
+                          <span className="font-mono text-red-600">
+                            −{formatMoney(financialMetrics.operatingExpensesKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-2 bg-slate-50 px-3 rounded-lg font-semibold text-sm">
+                          <span>Управленческая прибыль (до налогообложения):</span>
+                          <span className="font-mono text-emerald-700">
+                            {formatMoney(financialMetrics.managementNetProfitKopecks)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Cash Flow Statement */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+                      <h2 className="text-base font-semibold text-slate-900 border-b border-slate-200 pb-2">
+                        2. Отчёт о движении денежных средств (ДДС) за период
+                      </h2>
+                      <div className="space-y-2.5 text-xs">
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">Поступления от клиентов по рассрочке:</span>
+                          <span className="font-mono font-semibold text-emerald-700">
+                            +{formatMoney(financialMetrics.clientInflowsKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">
+                            Оплата закупок товаров и доставки поставщикам:
+                          </span>
+                          <span className="font-mono">
+                            −{formatMoney(financialMetrics.purchaseOutflowsKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">Оплата операционных расходов:</span>
+                          <span className="font-mono">
+                            −{formatMoney(financialMetrics.operatingExpensesKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">
+                            Собственные пополнения владельца (капитал, не выручка):
+                          </span>
+                          <span className="font-mono text-slate-800">
+                            +{formatMoney(financialMetrics.ownerInjectionsKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1 border-b border-slate-100">
+                          <span className="text-slate-600">Личные изъятия владельца:</span>
+                          <span className="font-mono text-slate-800">
+                            −{formatMoney(financialMetrics.ownerWithdrawalsKopecks)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between py-1">
+                          <span className="text-slate-600">
+                            Внутренние переводы между счетами (нейтрально к прибыли):
+                          </span>
+                          <span className="font-mono text-slate-500">
+                            {formatMoney(financialMetrics.internalTransfersKopecks)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 11. ДОКУМЕНТЫ И ШАБЛОНЫ ==================== */}
+              {activeSection === 'documents' && (
+                <div className="space-y-6">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <h1 className="text-2xl font-bold text-slate-900">
+                        Защищённое хранилище документов и печатные шаблоны
+                      </h1>
+                      <p className="text-xs text-slate-500 mt-1">
+                        При загрузке проверяются расширение, размер (до 10 МБ) и бинарная сигнатура содержимого (magic bytes: PDF, PNG, JPEG).
+                      </p>
+                    </div>
+                    {canWrite && (
+                      <div className="flex items-center gap-2">
+                        <label className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer flex items-center gap-1.5">
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>Загрузить файл (PDF/PNG/JPG)</span>
+                          <input
+                            type="file"
+                            accept=".pdf,.png,.jpg,.jpeg,.txt,.csv"
+                            onChange={handleFileUpload}
+                            className="hidden"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={handleCreateSamplePdfReceipt}
+                          className="px-3.5 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Сформировать тестовый чек PDF
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Document Templates Generator */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      Генерация документов по шаблонам для действующих договоров
+                    </h2>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {contracts.map((c) => (
+                        <div
+                          key={c.id}
+                          className="p-3.5 border border-slate-200 rounded-lg flex flex-wrap items-center justify-between gap-3 text-xs"
+                        >
+                          <div>
+                            <div className="font-semibold text-slate-900">
+                              {c.contractNumber} · {c.clientName}
+                            </div>
+                            <div className="text-slate-500">{c.itemTitle}</div>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPrintTemplateModal({ contract: c, type: 'contract' })
+                              }
+                              className="px-2.5 py-1 border border-slate-300 rounded hover:bg-slate-50"
+                            >
+                              Договор
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPrintTemplateModal({ contract: c, type: 'schedule' })
+                              }
+                              className="px-2.5 py-1 border border-slate-300 rounded hover:bg-slate-50"
+                            >
+                              График
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPrintTemplateModal({ contract: c, type: 'handover' })
+                              }
+                              className="px-2.5 py-1 border border-slate-300 rounded hover:bg-slate-50"
+                            >
+                              Акт передачи
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPrintTemplateModal({ contract: c, type: 'payoff' })}
+                              className="px-2.5 py-1 border border-slate-300 rounded hover:bg-slate-50"
+                            >
+                              Справка о погашении
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-3 px-4 font-medium">Наименование документа</th>
+                          <th className="py-3 px-4 font-medium">Исходный файл и MIME</th>
+                          <th className="py-3 px-4 font-medium">Контрольная сумма SHA-256</th>
+                          <th className="py-3 px-4 font-medium text-right">Размер</th>
+                          <th className="py-3 px-4 font-medium text-right">Дата загрузки</th>
+                          <th className="py-3 px-4 font-medium text-right">Действия</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {documents.map((d) => (
+                          <tr key={d.id}>
+                            <td className="py-3 px-4 font-medium text-slate-900 flex items-center gap-2">
+                              <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                              <span>{d.title}</span>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-600">
+                              {d.originalFilename} · {d.mimeType}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-[11px] text-slate-500">
+                              {d.sha256Hash.slice(0, 24)}...
+                            </td>
+                            <td className="py-3 px-4 font-mono text-right">{d.sizeBytes} Б</td>
+                            <td className="py-3 px-4 font-mono text-right">
+                              {formatDateTimeRu(d.createdAt)}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await downloadProtectedFile(
+                                        `/api/v1/documents/${d.id}/download`,
+                                        d.originalFilename || `${d.id}.bin`
+                                      );
+                                      notify('success', `Файл «${d.originalFilename}» скачан (SHA-256 проверен).`);
+                                    } catch (err) {
+                                      notify(
+                                        'error',
+                                        err instanceof Error ? err.message : 'Ошибка скачивания документа'
+                                      );
+                                    }
+                                  }}
+                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
+                                >
+                                  <Download className="w-3 h-3" />
+                                  <span>Скачать</span>
+                                </button>
+                                {isOwner && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      try {
+                                        await apiFetch(`/api/v1/documents/${d.id}`, {
+                                          method: 'DELETE',
+                                        });
+                                        await loadFullState();
+                                        notify('success', `Документ «${d.title}» удалён.`);
+                                      } catch (err) {
+                                        notify(
+                                          'error',
+                                          err instanceof Error ? err.message : 'Ошибка удаления документа'
+                                        );
+                                      }
+                                    }}
+                                    className="px-2.5 py-1 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                                  >
+                                    Удалить
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                        {documents.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="py-8 text-center text-slate-500">
+                              Нет загруженных файлов. Нажмите «Сформировать тестовый чек PDF» или загрузите файл.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 12. ПОЛЬЗОВАТЕЛИ И ПРАВА (ADMIN USER MANAGEMENT) ==================== */}
+              {activeSection === 'users' && isOwner && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      Управление пользователями (только для администратора)
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Самостоятельная регистрация отключена. Учётные записи создаются, активируются и блокируются вручную администратором. Первоначальный пароль передаётся сотруднику по защищённому каналу.
+                    </p>
+                  </div>
+
+                  {/* Create User Form */}
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      try {
+                        await apiFetch('/api/v1/users', {
+                          method: 'POST',
+                          body: JSON.stringify(adminNewUserForm),
+                        });
+                        setAdminNewUserForm({
+                          phone: '',
+                          password: '',
+                          fullName: '',
+                          role: 'staff',
+                          mustChangePassword: true,
+                        });
+                        await loadFullState();
+                        notify('success', 'Пользователь успешно создан.');
+                      } catch (err) {
+                        notify('error', err instanceof Error ? err.message : 'Ошибка создания пользователя');
+                      }
+                    }}
+                    className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                  >
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      Создать новую учётную запись
+                    </h2>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">
+                          Номер телефона *
+                        </label>
+                        <input
+                          type="tel"
+                          value={adminNewUserForm.phone}
+                          onChange={(e) =>
+                            setAdminNewUserForm((p) => ({ ...p, phone: e.target.value }))
+                          }
+                          placeholder="+7 928 000-00-00"
+                          className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">
+                          Первоначальный пароль (от 8 симв.) *
+                        </label>
+                        <input
+                          type="password"
+                          value={adminNewUserForm.password}
+                          onChange={(e) =>
+                            setAdminNewUserForm((p) => ({ ...p, password: e.target.value }))
+                          }
+                          placeholder="Минимум 8 символов"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">
+                          Имя / комментарий (необязательно)
+                        </label>
+                        <input
+                          type="text"
+                          value={adminNewUserForm.fullName}
+                          onChange={(e) =>
+                            setAdminNewUserForm((p) => ({ ...p, fullName: e.target.value }))
+                          }
+                          placeholder="Напр.: Оператор кассы"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 mb-1">
+                          Роль доступа
+                        </label>
+                        <select
+                          value={adminNewUserForm.role}
+                          onChange={(e) =>
+                            setAdminNewUserForm((p) => ({
+                              ...p,
+                              role: e.target.value as UserRole,
+                            }))
+                          }
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                        >
+                          <option value="staff">Оператор (staff)</option>
+                          <option value="readonly">Только чтение (readonly)</option>
+                          <option value="owner">Администратор / Владелец (owner)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                      <label className="inline-flex items-center gap-2 text-xs text-slate-700">
+                        <input
+                          type="checkbox"
+                          checked={adminNewUserForm.mustChangePassword}
+                          onChange={(e) =>
+                            setAdminNewUserForm((p) => ({
+                              ...p,
+                              mustChangePassword: e.target.checked,
+                            }))
+                          }
+                          className="rounded border-slate-300"
+                        />
+                        <span>Потребовать смену первоначального пароля при первом входе</span>
+                      </label>
+                      <button
+                        type="submit"
+                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                      >
+                        Создать пользователя
+                      </button>
+                    </div>
+                  </form>
+
+                  {/* Edit User Phone / Role Modal-Inline Box */}
+                  {editingUser && (
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        try {
+                          await apiFetch(`/api/v1/users/${editingUser.id}`, {
+                            method: 'PATCH',
+                            body: JSON.stringify({
+                              phone: editingUser.phone,
+                              fullName: editingUser.fullName,
+                              role: editingUser.role,
+                            }),
+                          });
+                          setEditingUser(null);
+                          await loadFullState();
+                          notify('success', 'Данные учётной записи обновлены.');
+                        } catch (err) {
+                          notify('error', err instanceof Error ? err.message : 'Ошибка обновления');
+                        }
+                      }}
+                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Изменение номера телефона и роли пользователя
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setEditingUser(null)}
+                          className="text-xs text-slate-500 hover:text-slate-900"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Номер телефона
+                          </label>
+                          <input
+                            type="tel"
+                            value={editingUser.phone}
+                            onChange={(e) =>
+                              setEditingUser((p) => (p ? { ...p, phone: e.target.value } : null))
+                            }
+                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            required
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Имя / описание
+                          </label>
+                          <input
+                            type="text"
+                            value={editingUser.fullName}
+                            onChange={(e) =>
+                              setEditingUser((p) => (p ? { ...p, fullName: e.target.value } : null))
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Роль
+                          </label>
+                          <select
+                            value={editingUser.role}
+                            onChange={(e) =>
+                              setEditingUser((p) =>
+                                p ? { ...p, role: e.target.value as UserRole } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          >
+                            <option value="staff">staff (Оператор)</option>
+                            <option value="readonly">readonly (Только чтение)</option>
+                            <option value="owner">owner (Администратор)</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                        >
+                          Сохранить изменения
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Reset User Password Box */}
+                  {resetPasswordModal && (
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        try {
+                          await apiFetch(`/api/v1/users/${resetPasswordModal.id}/reset-password`, {
+                            method: 'POST',
+                            body: JSON.stringify({
+                              newPassword: resetPasswordModal.newPassword,
+                              mustChangePassword: resetPasswordModal.mustChangePassword,
+                            }),
+                          });
+                          setResetPasswordModal(null);
+                          await loadFullState();
+                          notify(
+                            'success',
+                            'Пароль сброшен, все старые сессии пользователя немедленно отозваны.'
+                          );
+                        } catch (err) {
+                          notify('error', err instanceof Error ? err.message : 'Ошибка сброса пароля');
+                        }
+                      }}
+                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Сброс пароля для номера {resetPasswordModal.phone}
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setResetPasswordModal(null)}
+                          className="text-xs text-slate-500 hover:text-slate-900"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Новый временный пароль (от 8 символов) *
+                          </label>
+                          <input
+                            type="password"
+                            value={resetPasswordModal.newPassword}
+                            onChange={(e) =>
+                              setResetPasswordModal((p) =>
+                                p ? { ...p, newPassword: e.target.value } : null
+                              )
+                            }
+                            placeholder="Введите новый пароль"
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            required
+                          />
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <label className="inline-flex items-center gap-2 text-xs text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={resetPasswordModal.mustChangePassword}
+                              onChange={(e) =>
+                                setResetPasswordModal((p) =>
+                                  p ? { ...p, mustChangePassword: e.target.checked } : null
+                                )
+                              }
+                            />
+                            <span>Сменить при следующем входе</span>
+                          </label>
+                          <button
+                            type="submit"
+                            className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                          >
+                            Установить пароль и отозвать сессии
+                          </button>
+                        </div>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Users List Table */}
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-3 px-4 font-medium">Номер телефона и описание</th>
+                          <th className="py-3 px-4 font-medium">Статус аккаунта</th>
+                          <th className="py-3 px-4 font-medium">Роль</th>
+                          <th className="py-3 px-4 font-medium">Дата создания</th>
+                          <th className="py-3 px-4 font-medium text-right">Действия администратора</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {users.map((u) => (
+                          <tr key={u.id}>
+                            <td className="py-3 px-4">
+                              <div className="font-mono font-semibold text-slate-900">{u.phone}</div>
+                              <div className="text-slate-500">{u.fullName}</div>
+                            </td>
+                            <td className="py-3 px-4">
+                              {u.status === 'active' ? (
+                                <span className="text-emerald-700 font-medium">Активен</span>
+                              ) : (
+                                <span className="text-red-600 font-semibold">Заблокирован</span>
+                              )}
+                              {u.mustChangePassword && (
+                                <div className="text-[11px] text-amber-700">
+                                  Требуется смена первоначального пароля
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 font-mono">{u.role}</td>
+                            <td className="py-3 px-4 font-mono text-slate-600">
+                              {formatDateTimeRu(u.createdAt)}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEditingUser({
+                                      id: u.id,
+                                      phone: u.phone,
+                                      fullName: u.fullName,
+                                      role: u.role,
+                                    })
+                                  }
+                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                                >
+                                  Изменить номер / роль
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setResetPasswordModal({
+                                      id: u.id,
+                                      phone: u.phone,
+                                      newPassword: '',
+                                      mustChangePassword: true,
+                                    })
+                                  }
+                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                                >
+                                  Сбросить пароль
+                                </button>
+                                {u.status === 'blocked' && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      await apiFetch(`/api/v1/users/${u.id}`, {
+                                        method: 'PATCH',
+                                        body: JSON.stringify({ status: 'active' }),
+                                      });
+                                      await loadFullState();
+                                      notify('success', `Аккаунт ${u.phone} активирован.`);
+                                    }}
+                                    className="px-2.5 py-1 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                                  >
+                                    Активировать
+                                  </button>
+                                )}
+                                {u.id !== currentUser?.id && u.status === 'active' && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      await apiFetch(`/api/v1/users/${u.id}/block`, {
+                                        method: 'POST',
+                                      });
+                                      await loadFullState();
+                                      notify(
+                                        'success',
+                                        `Аккаунт ${u.phone} заблокирован, активные сессии отозваны.`
+                                      );
+                                    }}
+                                    className="px-2.5 py-1 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                                  >
+                                    Заблокировать
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 13. ГИБКИЕ НАСТРОЙКИ РАССРОЧКИ ==================== */}
+              {activeSection === 'installment_settings' && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      Гибкие версионируемые настройки рассрочки
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Изменение сроков, процентов наценки, первоначального взноса и правил округления применяется к новым договорам. Уже оформленные договоры сохраняют свои зафиксированные условия.
+                    </p>
+                  </div>
+
+                  {/* Existing Installment Plans */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {plans.map((p) => (
+                      <div
+                        key={p.id}
+                        className="bg-white border border-slate-200 rounded-xl p-5 space-y-3"
+                      >
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="text-base font-bold text-slate-900">{p.name}</div>
+                            <div className="text-xs text-slate-500 font-mono">
+                              Версия v{p.version} · {p.isActive ? 'Активен' : 'Отключён для новых'}
+                            </div>
+                          </div>
+                          {isOwner && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingPlan({
+                                  id: p.id,
+                                  name: p.name,
+                                  termMonths: String(p.termMonths),
+                                  markupPercent: String(p.markupPercent),
+                                  downPaymentPercent: String(p.downPaymentPercent),
+                                  roundingRule: p.roundingRule,
+                                  earlyPayoffDiscountPercent: String(p.earlyPayoffDiscountPercent),
+                                  isActive: p.isActive,
+                                  reason: 'Плановое изменение условий тарифа владельцем',
+                                })
+                              }
+                              className="text-xs font-medium text-slate-900 underline"
+                            >
+                              Изменить
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="space-y-1.5 text-xs border-t border-slate-100 pt-3">
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Срок рассрочки:</span>
+                            <span className="font-mono font-semibold">{p.termMonths} мес.</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Наценка на себестоимость:</span>
+                            <span className="font-mono font-semibold text-emerald-700">
+                              {p.markupPercent}%
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Стандартный первый взнос:</span>
+                            <span className="font-mono font-semibold">{p.downPaymentPercent}%</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-500">Округление графика:</span>
+                            <span className="font-mono">{p.roundingRule}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Edit existing plan modal / form */}
+                  {editingPlan && isOwner && (
+                    <form
+                      onSubmit={handleUpdatePlan}
+                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Редактирование тарифа «{editingPlan.name}» (создаст новую версию настроек)
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setEditingPlan(null)}
+                          className="text-xs text-slate-500"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Название тарифа
+                          </label>
+                          <input
+                            type="text"
+                            value={editingPlan.name}
+                            onChange={(e) =>
+                              setEditingPlan((p) => (p ? { ...p, name: e.target.value } : null))
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Срок (месяцев)
+                          </label>
+                          <input
+                            type="number"
+                            value={editingPlan.termMonths}
+                            onChange={(e) =>
+                              setEditingPlan((p) =>
+                                p ? { ...p, termMonths: e.target.value } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Процент наценки (%)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.1"
+                            value={editingPlan.markupPercent}
+                            onChange={(e) =>
+                              setEditingPlan((p) =>
+                                p ? { ...p, markupPercent: e.target.value } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Первоначальный взнос (%)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.1"
+                            value={editingPlan.downPaymentPercent}
+                            onChange={(e) =>
+                              setEditingPlan((p) =>
+                                p ? { ...p, downPaymentPercent: e.target.value } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Правило округления
+                          </label>
+                          <select
+                            value={editingPlan.roundingRule}
+                            onChange={(e) =>
+                              setEditingPlan((p) =>
+                                p ? { ...p, roundingRule: e.target.value as RoundingRule } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          >
+                            <option value="kopeck">До копейки</option>
+                            <option value="ruble">До рубля</option>
+                            <option value="ten_rubles">До 10 рублей</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Статус срока рассрочки
+                          </label>
+                          <select
+                            value={editingPlan.isActive ? '1' : '0'}
+                            onChange={(e) =>
+                              setEditingPlan((p) =>
+                                p ? { ...p, isActive: e.target.value === '1' } : null
+                              )
+                            }
+                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          >
+                            <option value="1">Включён для новых договоров</option>
+                            <option value="0">Отключён (старые договоры продолжают действовать)</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                        >
+                          Сохранить новую версию тарифа
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Add New Plan Form (Owner) */}
+                  {isOwner && (
+                    <form
+                      onSubmit={handleCreatePlan}
+                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                    >
+                      <h2 className="text-sm font-semibold text-slate-900">
+                        Добавить новый срок / тариф рассрочки без изменения кода
+                      </h2>
+                      <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+                        <input
+                          type="text"
+                          value={newPlanForm.name}
+                          onChange={(e) => setNewPlanForm((p) => ({ ...p, name: e.target.value }))}
+                          placeholder="Название (напр. 9 месяцев) *"
+                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="number"
+                          min="1"
+                          max="120"
+                          value={newPlanForm.termMonths}
+                          onChange={(e) =>
+                            setNewPlanForm((p) => ({ ...p, termMonths: e.target.value }))
+                          }
+                          placeholder="Месяцев *"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={newPlanForm.markupPercent}
+                          onChange={(e) =>
+                            setNewPlanForm((p) => ({ ...p, markupPercent: e.target.value }))
+                          }
+                          placeholder="Наценка % *"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={newPlanForm.downPaymentPercent}
+                          onChange={(e) =>
+                            setNewPlanForm((p) => ({ ...p, downPaymentPercent: e.target.value }))
+                          }
+                          placeholder="Первый взнос % *"
+                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          required
+                        />
+                        <button
+                          type="submit"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                        >
+                          Добавить срок
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Settings Change History */}
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="px-5 py-3.5 border-b border-slate-200">
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Журнал истории изменений настроек рассрочки (старое и новое значение, автор, время)
+                      </h3>
+                    </div>
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-2.5 px-4 font-medium">Время</th>
+                          <th className="py-2.5 px-4 font-medium">Пользователь</th>
+                          <th className="py-2.5 px-4 font-medium">Старое значение</th>
+                          <th className="py-2.5 px-4 font-medium">Новое значение</th>
+                          <th className="py-2.5 px-4 font-medium">Основание</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {settingsHistory.map((sh) => (
+                          <tr key={sh.id}>
+                            <td className="py-2.5 px-4 font-mono">
+                              {formatDateTimeRu(sh.createdAt)}
+                            </td>
+                            <td className="py-2.5 px-4 font-mono">{sh.changedByEmail}</td>
+                            <td className="py-2.5 px-4 font-mono text-[11px] text-slate-500">
+                              {sh.oldValueJson}
+                            </td>
+                            <td className="py-2.5 px-4 font-mono text-[11px] text-slate-900">
+                              {sh.newValueJson}
+                            </td>
+                            <td className="py-2.5 px-4 text-slate-600">{sh.reason}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ==================== 14. НАСТРОЙКИ БЕЗОПАСНОСТИ И РЕЗЕРВНЫЕ КОПИИ ==================== */}
+              {activeSection === 'security_settings' && isOwner && (
+                <div className="space-y-6">
+                  <div>
+                    <h1 className="text-2xl font-bold text-slate-900">
+                      Настройки безопасности, шифрованные резервные копии и журнал аудита
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Управление вторым фактором (TOTP MFA), резервное копирование AES-256-GCM с тестом восстановления и неизменяемый журнал событий.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* TOTP MFA Configuration */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                      <div className="flex items-center gap-2">
+                        <Lock className="w-4 h-4 text-slate-900" />
+                        <h2 className="text-sm font-semibold text-slate-900">
+                          Двухфакторная аутентификация владельца (TOTP MFA, RFC 6238)
+                        </h2>
+                      </div>
+                      <p className="text-xs text-slate-600">
+                        Статус MFA:{' '}
+                        <strong>
+                          {currentUser?.mfaEnabled
+                            ? 'Включена (при входе требуется 6-значный код TOTP)'
+                            : 'Отключена'}
+                        </strong>
+                      </p>
+
+                      {!currentUser?.mfaEnabled ? (
+                        <div className="space-y-3">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const info = await apiFetch('/api/v1/auth/mfa/setup', {
+                                method: 'POST',
+                              });
+                              setMfaSetupInfo(info);
+                              setMfaConfirmCode(info.currentSampleCode);
+                            }}
+                            className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                          >
+                            Сгенерировать секретный ключ TOTP
+                          </button>
+
+                          {mfaSetupInfo && (
+                            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
+                              <div>
+                                Секрет Base32:{' '}
+                                <span className="font-mono font-bold">{mfaSetupInfo.secret}</span>
+                              </div>
+                              <div>
+                                Текущий 30-секундный код:{' '}
+                                <span className="font-mono font-semibold text-emerald-700">
+                                  {mfaSetupInfo.currentSampleCode}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 pt-1">
+                                <input
+                                  type="text"
+                                  value={mfaConfirmCode}
+                                  onChange={(e) => setMfaConfirmCode(e.target.value)}
+                                  className="px-3 py-1.5 text-xs font-mono border border-slate-300 rounded-lg w-32 bg-white"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await apiFetch('/api/v1/auth/mfa/enable', {
+                                      method: 'POST',
+                                      body: JSON.stringify({ code: mfaConfirmCode }),
+                                    });
+                                    setCurrentUser((u) => (u ? { ...u, mfaEnabled: true } : null));
+                                    setMfaSetupInfo(null);
+                                    await loadFullState();
+                                    notify('success', 'Двухфакторная аутентификация TOTP MFA успешно активирована.');
+                                  }}
+                                  className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                                >
+                                  Подтвердить и включить MFA
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await apiFetch('/api/v1/auth/mfa/disable', { method: 'POST' });
+                            setCurrentUser((u) => (u ? { ...u, mfaEnabled: false } : null));
+                            await loadFullState();
+                            notify('success', 'TOTP MFA отключена.');
+                          }}
+                          className="px-4 py-2 text-xs font-medium text-red-700 border border-red-200 rounded-lg"
+                        >
+                          Отключить TOTP MFA
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Encrypted Backups & Restore Verification */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h2 className="text-sm font-semibold text-slate-900">
+                          Шифрованное резервное копирование (AES-256-GCM)
+                        </h2>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="px-3 py-1.5 text-xs font-medium text-slate-800 border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer">
+                            <span>Восстановить из файла (.enc.json)</span>
+                            <input
+                              type="file"
+                              accept=".json,application/json"
+                              className="hidden"
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.target.value = '';
+                                if (!file) return;
+                                try {
+                                  const text = await file.text();
+                                  const res = await apiFetch('/api/v1/security/backups/restore-file', {
+                                    method: 'POST',
+                                    body: JSON.stringify({
+                                      filename: file.name,
+                                      envelopeContent: text,
+                                    }),
+                                  });
+                                  await loadFullState();
+                                  notify(
+                                    'success',
+                                    `База данных полностью восстановлена из файла «${file.name}» (договоров: ${res.contractsCount}, клиентов: ${res.clientsCount}).`
+                                  );
+                                } catch (err) {
+                                  notify(
+                                    'error',
+                                    err instanceof Error
+                                      ? err.message
+                                      : 'Ошибка восстановления из файла копии'
+                                  );
+                                }
+                              }}
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await apiFetch('/api/v1/security/backups', { method: 'POST' });
+                                await loadFullState();
+                                notify(
+                                  'success',
+                                  'Создана зашифрованная резервная копия (AES-256-GCM) со сверкой регистров.'
+                                );
+                              } catch (err) {
+                                notify(
+                                  'error',
+                                  err instanceof Error ? err.message : 'Ошибка создания копии'
+                                );
+                              }
+                            }}
+                            className="px-3.5 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                          >
+                            Создать резервную копию
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 max-h-48 overflow-y-auto">
+                        {backups.map((b) => (
+                          <div
+                            key={b.id}
+                            className="p-3 border border-slate-200 rounded-lg flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div>
+                              <div className="font-mono font-medium text-slate-900">
+                                {b.filename}
+                              </div>
+                              <div className="text-slate-500 mt-0.5">
+                                {b.encryptedAlg} · SHA-256: {b.sha256Hash.slice(0, 12)}... ·{' '}
+                                {b.verifiedRestoreAt
+                                  ? `Восстановление проверено: ${formatDateTimeRu(b.verifiedRestoreAt)}`
+                                  : 'Ожидает теста восстановления'}
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await downloadProtectedFile(
+                                      `/api/v1/security/backups/${b.id}/download`,
+                                      b.filename
+                                    );
+                                    notify('success', `Файл копии ${b.filename} скачан.`);
+                                  } catch (err) {
+                                    notify(
+                                      'error',
+                                      err instanceof Error ? err.message : 'Ошибка скачивания копии'
+                                    );
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap"
+                              >
+                                Скачать
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await apiFetch(`/api/v1/security/backups/${b.id}/verify`, {
+                                      method: 'POST',
+                                    });
+                                    await loadFullState();
+                                    notify(
+                                      'success',
+                                      'Тест восстановления пройден: копия расшифрована, SHA-256 и финансовые регистры полностью совпали.'
+                                    );
+                                  } catch (err) {
+                                    notify(
+                                      'error',
+                                      err instanceof Error ? err.message : 'Ошибка проверки копии'
+                                    );
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-800 border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap"
+                              >
+                                Проверить целостность
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await apiFetch(`/api/v1/security/backups/${b.id}/restore`, {
+                                      method: 'POST',
+                                    });
+                                    await loadFullState();
+                                    notify(
+                                      'success',
+                                      `База данных успешно восстановлена из копии ${b.filename}. Все регистры сверены.`
+                                    );
+                                  } catch (err) {
+                                    notify(
+                                      'error',
+                                      err instanceof Error ? err.message : 'Ошибка восстановления'
+                                    );
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap"
+                              >
+                                Восстановить БД
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                        {backups.length === 0 && (
+                          <div className="text-xs text-slate-500 py-4 text-center">
+                            Нажмите «Создать резервную копию» для формирования зашифрованного снимка БД.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Immutable Audit Log */}
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                    <div className="px-5 py-3.5 border-b border-slate-200">
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Защищённый журнал аудита безопасности и финансовых действий
+                      </h3>
+                    </div>
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                          <th className="py-2.5 px-4 font-medium">Время (UTC)</th>
+                          <th className="py-2.5 px-4 font-medium">Пользователь</th>
+                          <th className="py-2.5 px-4 font-medium">Код события</th>
+                          <th className="py-2.5 px-4 font-medium">Описание действия</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {auditLogs.map((a) => (
+                          <tr key={a.id}>
+                            <td className="py-2.5 px-4 font-mono whitespace-nowrap">
+                              {formatDateTimeRu(a.createdAt)}
+                            </td>
+                            <td className="py-2.5 px-4 font-mono">{a.actorEmail}</td>
+                            <td className="py-2.5 px-4 font-mono text-slate-800">{a.action}</td>
+                            <td className="py-2.5 px-4 text-slate-700">{a.summary}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </main>
+      </div>
+
+      {/* Modals */}
+      {showNewContractModal && (
+        <NewContractModal
+          clients={clients}
+          purchases={purchases}
+          plans={plans}
+          accounts={accounts}
+          onClose={() => setShowNewContractModal(false)}
+          apiFetch={apiFetch}
+          onSubmit={async (payload) => {
+            await apiFetch('/api/v1/contracts', {
+              method: 'POST',
+              body: JSON.stringify(payload),
+            });
+            await loadFullState();
+            notify('success', 'Договор успешно оформлен и активирован.');
+          }}
+        />
+      )}
+
+      {earlyPayoffContract && (
+        <EarlyPayoffModal
+          contract={earlyPayoffContract}
+          accounts={accounts}
+          isOwner={isOwner}
+          onClose={() => setEarlyPayoffContract(null)}
+          apiFetch={apiFetch}
+          onSuccess={async () => {
+            await loadFullState();
+            notify('success', 'Досрочное погашение договора успешно проведено.');
+          }}
+        />
+      )}
+
+      {restructureContract && (
+        <RestructureScheduleModal
+          contract={restructureContract}
+          isOwner={isOwner}
+          onClose={() => setRestructureContract(null)}
+          apiFetch={apiFetch}
+          onSuccess={async () => {
+            await loadFullState();
+            notify(
+              'success',
+              'Создана новая версия графика платежей. Предыдущая версия сохранена в истории.'
+            );
+          }}
+        />
+      )}
+
+      {printTemplateModal && (
+        <PrintableDocumentModal
+          contract={printTemplateModal.contract}
+          templateType={printTemplateModal.type}
+          onClose={() => setPrintTemplateModal(null)}
+        />
+      )}
+
+      {allocatingPayment && (
+        <ManualAllocationModal
+          payment={allocatingPayment}
+          contracts={contracts}
+          onClose={() => setAllocatingPayment(null)}
+          apiFetch={apiFetch}
+          onSuccess={async () => {
+            await loadFullState();
+            notify('success', 'Сумма платежа успешно распределена по выбранным строкам графика.');
+          }}
+        />
+      )}
+
+      {showNewPaymentModal && (
+        <NewPaymentModal
+          clients={clients}
+          contracts={contracts}
+          accounts={accounts}
+          onClose={() => setShowNewPaymentModal(false)}
+          apiFetch={apiFetch}
+          onSuccess={async () => {
+            await loadFullState();
+            notify('success', 'Поступление зарегистрировано в кассе и реестре платежей.');
+          }}
+        />
+      )}
+
+      {(showChangePasswordModal || currentUser?.mustChangePassword) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                await apiFetch('/api/v1/auth/change-password', {
+                  method: 'POST',
+                  body: JSON.stringify(selfPasswordForm),
+                });
+                setSelfPasswordForm({ currentPassword: '', newPassword: '' });
+                setShowChangePasswordModal(false);
+                setCurrentUser((prev) => (prev ? { ...prev, mustChangePassword: false } : null));
+                await loadFullState();
+                notify('success', 'Пароль успешно изменён.');
+              } catch (err) {
+                notify('error', err instanceof Error ? err.message : 'Ошибка смены пароля');
+              }
+            }}
+            className="bg-white border border-slate-200 rounded-xl w-full max-w-sm p-6 space-y-4"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+              <h2 className="text-sm font-bold text-slate-900">
+                {currentUser?.mustChangePassword
+                  ? 'Смена первоначального пароля'
+                  : 'Смена пароля учётной записи'}
+              </h2>
+              {!currentUser?.mustChangePassword && (
+                <button
+                  type="button"
+                  onClick={() => setShowChangePasswordModal(false)}
+                  className="text-slate-400 hover:text-slate-900"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+            {currentUser?.mustChangePassword && (
+              <p className="text-xs text-slate-600">
+                Администратор установил для вашего аккаунта временный пароль. Пожалуйста, задайте собственный постоянный пароль.
+              </p>
+            )}
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Текущий пароль
+              </label>
+              <input
+                type="password"
+                value={selfPasswordForm.currentPassword}
+                onChange={(e) =>
+                  setSelfPasswordForm((p) => ({ ...p, currentPassword: e.target.value }))
+                }
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Новый пароль (не менее 8 символов)
+              </label>
+              <input
+                type="password"
+                value={selfPasswordForm.newPassword}
+                onChange={(e) =>
+                  setSelfPasswordForm((p) => ({ ...p, newPassword: e.target.value }))
+                }
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                required
+              />
+            </div>
+            <button
+              type="submit"
+              className="w-full py-2.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+            >
+              Сохранить новый пароль
+            </button>
+          </form>
+        </div>
+      )}
+
+      {showAuthModal && (
+        <AuthGateModal
+          onClose={() => setShowAuthModal(false)}
+          apiFetch={apiFetch}
+          onSuccessLogin={async (loginData) => {
+            if (loginData?.user) {
+              setCurrentUser(loginData.user);
+              setCsrfToken(loginData.csrfToken || '');
+              setSessionToken(loginData.sessionToken || '');
+              await loadFullState(loginData.csrfToken || '', loginData.sessionToken || '');
+            } else {
+              await initializeSessionAndData();
+            }
+            notify('success', 'Выполнена авторизация в защищённой сессии.');
+          }}
+        />
+      )}
+    </div>
+  );
+}

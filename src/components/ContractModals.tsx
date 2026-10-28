@@ -1,0 +1,1092 @@
+import React, { useState, useEffect } from 'react';
+import {
+  ClientDTO,
+  ContractDTO,
+  FinancialAccountDTO,
+  InstallmentPlanDTO,
+  PurchaseDTO,
+  RoundingRule,
+  ScheduleType,
+} from '../shared/types';
+import {
+  formatDateRu,
+  formatMoney,
+  parseRublesInputToKopecks,
+  translateRoundingRule,
+  translateScheduleStatus,
+} from '../utils/format';
+import { X, Calculator, Check, AlertTriangle, Printer, History } from 'lucide-react';
+
+interface NewContractModalProps {
+  clients: ClientDTO[];
+  purchases: PurchaseDTO[];
+  plans: InstallmentPlanDTO[];
+  accounts: FinancialAccountDTO[];
+  onClose: () => void;
+  onSubmit: (payload: Record<string, unknown>) => Promise<void>;
+  apiFetch: (path: string, options?: RequestInit) => Promise<any>;
+}
+
+export const NewContractModal: React.FC<NewContractModalProps> = ({
+  clients,
+  purchases,
+  plans,
+  accounts,
+  onClose,
+  onSubmit,
+  apiFetch,
+}) => {
+  const activePlans = plans.filter((p) => p.isActive);
+  const defaultPlan = activePlans[0] || plans[0];
+
+  const [clientId, setClientId] = useState(clients[0]?.id || '');
+  const [purchaseId, setPurchaseId] = useState<string>('');
+  const [planId, setPlanId] = useState<string>(defaultPlan?.id || '');
+  const [itemTitle, setItemTitle] = useState('');
+  const [purchaseRubles, setPurchaseRubles] = useState('50000');
+  const [deliveryRubles, setDeliveryRubles] = useState('1000');
+  const [otherRubles, setOtherRubles] = useState('0');
+  const [markupPercent, setMarkupPercent] = useState(String(defaultPlan?.markupPercent ?? 25));
+  const [downPaymentPercent, setDownPaymentPercent] = useState(
+    String(defaultPlan?.downPaymentPercent ?? 30)
+  );
+  const [termMonths, setTermMonths] = useState(String(defaultPlan?.termMonths ?? 6));
+  const [roundingRule, setRoundingRule] = useState<RoundingRule>(
+    defaultPlan?.roundingRule || 'kopeck'
+  );
+  const [scheduleType, setScheduleType] = useState<ScheduleType>('equal');
+  const [startDate, setStartDate] = useState(new Date().toISOString().slice(0, 10));
+  const [collectDownPaymentNow, setCollectDownPaymentNow] = useState(true);
+  const [downPaymentAccountId, setDownPaymentAccountId] = useState(accounts[0]?.id || 'acc_cash_main');
+  const [downPaymentMethod, setDownPaymentMethod] = useState<'cash' | 'bank_transfer'>('cash');
+  const [notes, setNotes] = useState('');
+
+  const [previewResult, setPreviewResult] = useState< any | null >(null);
+  const [previewConfirmed, setPreviewConfirmed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSelectPlan = (selectedId: string) => {
+    setPlanId(selectedId);
+    setPreviewConfirmed(false);
+    const found = plans.find((p) => p.id === selectedId);
+    if (found) {
+      setMarkupPercent(String(found.markupPercent));
+      setDownPaymentPercent(String(found.downPaymentPercent));
+      setTermMonths(String(found.termMonths));
+      setRoundingRule(found.roundingRule);
+    }
+  };
+
+  const handleSelectPurchase = (purId: string) => {
+    setPurchaseId(purId);
+    setPreviewConfirmed(false);
+    const found = purchases.find((p) => p.id === purId);
+    if (found) {
+      setItemTitle(found.itemName);
+      setPurchaseRubles(String(found.purchasePriceKopecks / 100));
+      setDeliveryRubles(String(found.deliveryCostKopecks / 100));
+      setOtherRubles(String(found.otherCostKopecks / 100));
+      if (found.clientId) {
+        setClientId(found.clientId);
+      }
+    }
+  };
+
+  const runPreviewCalculation = async () => {
+    setError(null);
+    setPreviewConfirmed(false);
+    try {
+      const data = await apiFetch('/api/v1/contracts/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          purchaseCostKopecks: parseRublesInputToKopecks(purchaseRubles),
+          deliveryCostKopecks: parseRublesInputToKopecks(deliveryRubles),
+          otherCostKopecks: parseRublesInputToKopecks(otherRubles),
+          markupPercent: Number(markupPercent),
+          downPaymentPercent: Number(downPaymentPercent),
+          termMonths: Number(termMonths),
+          roundingRule,
+          scheduleType,
+          startDate,
+        }),
+      });
+      setPreviewResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка расчёта');
+    }
+  };
+
+  useEffect(() => {
+    runPreviewCalculation();
+  }, [
+    purchaseRubles,
+    deliveryRubles,
+    otherRubles,
+    markupPercent,
+    downPaymentPercent,
+    termMonths,
+    roundingRule,
+    startDate,
+  ]);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!previewConfirmed) {
+      setError('Необходимо проверить и подтвердить расчёт и график платежей перед активацией договора.');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onSubmit({
+        clientId,
+        purchaseId: purchaseId || null,
+        planId: planId || null,
+        itemTitle,
+        purchaseCostKopecks: parseRublesInputToKopecks(purchaseRubles),
+        deliveryCostKopecks: parseRublesInputToKopecks(deliveryRubles),
+        otherCostKopecks: parseRublesInputToKopecks(otherRubles),
+        markupPercent: Number(markupPercent),
+        downPaymentPercent: Number(downPaymentPercent),
+        termMonths: Number(termMonths),
+        roundingRule,
+        scheduleType,
+        startDate,
+        collectDownPaymentNow,
+        downPaymentAccountId,
+        downPaymentMethod,
+        confirmedCalculation: previewConfirmed,
+        notes,
+      });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка создания договора');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-4xl max-h-[92vh] overflow-y-auto p-6">
+        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">
+              Оформление договора продажи в рассрочку
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Условия тарифа фиксируются в договоре и не меняются при последующем редактировании настроек
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-2 text-slate-500 hover:text-slate-900 rounded-lg"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {error && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleCreate} className="mt-5 space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Клиент *</label>
+              <select
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                required
+              >
+                {clients.map((cl) => (
+                  <option key={cl.id} value={cl.id}>
+                    {cl.fullName} ({cl.phone})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Связать с целевой закупкой (опционально)
+              </label>
+              <select
+                value={purchaseId}
+                onChange={(e) => handleSelectPurchase(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+              >
+                <option value="">— Ввести параметры товара вручную —</option>
+                {purchases
+                  .filter((p) => !p.contractId)
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.itemName} · Себестоимость {formatMoney(p.totalCostKopecks)} ({p.supplierName})
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Наименование товара (предмет договора) *
+              </label>
+              <input
+                type="text"
+                value={itemTitle}
+                onChange={(e) => setItemTitle(e.target.value)}
+                placeholder="Например: Смартфон Samsung Galaxy S25 Ultra 512GB Titanium"
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Цена покупки в магазине (₽) *
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="1"
+                value={purchaseRubles}
+                onChange={(e) => {
+                  setPurchaseRubles(e.target.value);
+                  setPreviewConfirmed(false);
+                }}
+                className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                required
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Доставка (₽)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={deliveryRubles}
+                  onChange={(e) => {
+                    setDeliveryRubles(e.target.value);
+                    setPreviewConfirmed(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Прочие затраты (₽)
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={otherRubles}
+                  onChange={(e) => {
+                    setOtherRubles(e.target.value);
+                    setPreviewConfirmed(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Тарифный профиль рассрочки
+              </label>
+              <select
+                value={planId}
+                onChange={(e) => handleSelectPlan(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+              >
+                {activePlans.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} — {p.termMonths} мес. · наценка {p.markupPercent}% · взнос {p.downPaymentPercent}% (v{p.version})
+                  </option>
+                ))}
+                <option value="">Индивидуальные условия договора</option>
+              </select>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Срок (мес.)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="120"
+                  value={termMonths}
+                  onChange={(e) => {
+                    setTermMonths(e.target.value);
+                    setPreviewConfirmed(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Наценка (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={markupPercent}
+                  onChange={(e) => {
+                    setMarkupPercent(e.target.value);
+                    setPreviewConfirmed(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">1-й взнос (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="99"
+                  value={downPaymentPercent}
+                  onChange={(e) => {
+                    setDownPaymentPercent(e.target.value);
+                    setPreviewConfirmed(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Правило округления платежей
+              </label>
+              <select
+                value={roundingRule}
+                onChange={(e) => {
+                  setRoundingRule(e.target.value as RoundingRule);
+                  setPreviewConfirmed(false);
+                }}
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+              >
+                <option value="kopeck">Точно до копейки (корректировка в последнем платеже)</option>
+                <option value="ruble">До целого рубля (остаток в последнем платеже)</option>
+                <option value="ten_rubles">До 10 рублей (остаток в последнем платеже)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Дата оформления договора
+              </label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => {
+                  setStartDate(e.target.value);
+                  setPreviewConfirmed(false);
+                }}
+                className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+              />
+            </div>
+          </div>
+
+          {/* Detailed Server Calculation Preview */}
+          {previewResult && (
+            <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/70 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                <div className="flex items-center gap-2">
+                  <Calculator className="w-4 h-4 text-slate-700" />
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Предварительный расчёт и график платежей (расчёт выполнен сервером в копейках)
+                  </h3>
+                </div>
+                <span className="text-xs text-slate-500 font-mono">
+                  {translateRoundingRule(previewResult.roundingRule)}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+                <div>
+                  <div className="text-slate-500">Полная себестоимость</div>
+                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                    {formatMoney(previewResult.totalCostKopecks)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Наценка ({previewResult.markupPercent}%)</div>
+                  <div className="text-sm font-semibold font-mono text-emerald-700 mt-0.5">
+                    +{formatMoney(previewResult.markupKopecks)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Цена продажи</div>
+                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                    {formatMoney(previewResult.salePriceKopecks)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">
+                    Первый взнос ({previewResult.downPaymentPercent}%)
+                  </div>
+                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                    {formatMoney(previewResult.downPaymentKopecks)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Остаток в рассрочку</div>
+                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                    {formatMoney(previewResult.financedPrincipalKopecks)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg bg-white">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                      <th className="py-2 px-3 font-medium">№ платежа</th>
+                      <th className="py-2 px-3 font-medium">Дата оплаты</th>
+                      <th className="py-2 px-3 font-medium text-right">Сумма по графику</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {previewResult.schedule.map((row: any) => (
+                      <tr key={row.installmentNumber}>
+                        <td className="py-1.5 px-3 font-mono text-slate-700">
+                          Платёж №{row.installmentNumber}
+                        </td>
+                        <td className="py-1.5 px-3 font-mono text-slate-700">
+                          {formatDateRu(row.dueDate)}
+                        </td>
+                        <td className="py-1.5 px-3 font-mono text-right font-medium text-slate-900">
+                          {formatMoney(row.plannedKopecks)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+                <label className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={collectDownPaymentNow}
+                    onChange={(e) => setCollectDownPaymentNow(e.target.checked)}
+                    className="rounded border-slate-300"
+                  />
+                  <span>Принять первоначальный взнос в кассу/банк сразу</span>
+                </label>
+
+                {collectDownPaymentNow && (
+                  <>
+                    <select
+                      value={downPaymentAccountId}
+                      onChange={(e) => setDownPaymentAccountId(e.target.value)}
+                      className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                    >
+                      {accounts.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          Зачислить на: {a.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={downPaymentMethod}
+                      onChange={(e) =>
+                        setDownPaymentMethod(e.target.value as 'cash' | 'bank_transfer')
+                      }
+                      className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                    >
+                      <option value="cash">Способ: Наличные ₽</option>
+                      <option value="bank_transfer">Способ: Банковский перевод</option>
+                    </select>
+                  </>
+                )}
+              </div>
+
+              <div className="pt-2 border-t border-slate-200">
+                <label className="flex items-start gap-2.5 text-xs font-medium text-slate-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={previewConfirmed}
+                    onChange={(e) => setPreviewConfirmed(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-300"
+                  />
+                  <span>
+                    Я проверил расчёт полной себестоимости, наценки, первоначального взноса и график
+                    платежей. Подтверждаю активацию договора с фиксацией указанных условий.
+                  </span>
+                </label>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+            >
+              Отмена
+            </button>
+            <button
+              type="submit"
+              disabled={!previewConfirmed || submitting}
+              className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50 flex items-center gap-1.5"
+            >
+              <Check className="w-4 h-4" />
+              <span>{submitting ? 'Оформление...' : 'Подтвердить и активировать договор'}</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+interface EarlyPayoffModalProps {
+  contract: ContractDTO;
+  accounts: FinancialAccountDTO[];
+  isOwner: boolean;
+  onClose: () => void;
+  apiFetch: (path: string, options?: RequestInit) => Promise<any>;
+  onSuccess: () => Promise<void>;
+}
+
+export const EarlyPayoffModal: React.FC<EarlyPayoffModalProps> = ({
+  contract,
+  accounts,
+  isOwner,
+  onClose,
+  apiFetch,
+  onSuccess,
+}) => {
+  const [options, setOptions] = useState<any[]>([]);
+  const [selectedMode, setSelectedMode] = useState<string>('full_balance');
+  const [manualRubles, setManualRubles] = useState<string>(
+    String(contract.remainingDebtKopecks / 100)
+  );
+  const [accountId, setAccountId] = useState(accounts[0]?.id || 'acc_bank_main');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank_transfer'>('bank_transfer');
+  const [reason, setReason] = useState('Досрочное закрытие договора по заявлению клиента');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const loadComparison = async (manualKop?: number) => {
+    try {
+      const data = await apiFetch(`/api/v1/contracts/${contract.id}/early-payoff-preview`, {
+        method: 'POST',
+        body: JSON.stringify({
+          manualPayoffKopecks: manualKop,
+        }),
+      });
+      setOptions(data.options || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка расчёта вариантов');
+    }
+  };
+
+  useEffect(() => {
+    loadComparison(parseRublesInputToKopecks(manualRubles));
+  }, [manualRubles]);
+
+  const selectedOption = options.find((o) => o.mode === selectedMode) || options[0];
+
+  const handleApply = async () => {
+    if (!selectedOption) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/v1/contracts/${contract.id}/early-payoff-apply`, {
+        method: 'POST',
+        body: JSON.stringify({
+          payoffAmountKopecks: selectedOption.payoffAmountKopecks,
+          accountId,
+          paymentMethod,
+          reason,
+        }),
+      });
+      await onSuccess();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка проведения досрочного погашения');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">
+              Калькулятор сравнения вариантов досрочного погашения · {contract.contractNumber}
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Клиент: {contract.clientName} · Остаток по графику: {formatMoney(contract.remainingDebtKopecks)}
+            </p>
+          </div>
+          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {error && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+            {error}
+          </div>
+        )}
+
+        <div className="mt-4 space-y-3">
+          {options.map((opt) => {
+            const active = selectedMode === opt.mode;
+            return (
+              <div
+                key={opt.mode}
+                onClick={() => setSelectedMode(opt.mode)}
+                className={`p-4 rounded-xl border transition-colors cursor-pointer ${
+                  active
+                    ? 'border-slate-900 bg-slate-50'
+                    : 'border-slate-200 hover:border-slate-300 bg-white'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">{opt.title}</div>
+                    <p className="text-xs text-slate-500 mt-0.5">{opt.description}</p>
+                    {opt.requiresLegalConfirmation && (
+                      <p className="text-[11px] text-amber-700 mt-1">
+                        Предварительная формула: применение скидки требует согласования владельцем и соответствия тексту договора
+                      </p>
+                    )}
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="text-xs text-slate-500">К оплате для закрытия</div>
+                    <div className="text-base font-bold font-mono text-slate-900">
+                      {formatMoney(opt.payoffAmountKopecks)}
+                    </div>
+                    <div className="text-xs font-mono text-emerald-700">
+                      Скидка: {formatMoney(opt.discountKopecks)} · Сохраняемая наценка: {formatMoney(opt.retainedMarkupKopecks)}
+                    </div>
+                  </div>
+                </div>
+
+                {opt.mode === 'manual_owner' && active && (
+                  <div className="mt-3 pt-3 border-t border-slate-200 flex items-center gap-3">
+                    <label className="text-xs font-medium text-slate-700">
+                      Утверждённая сумма к оплате (₽):
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={manualRubles}
+                      onChange={(e) => setManualRubles(e.target.value)}
+                      className="px-3 py-1.5 text-xs font-mono border border-slate-300 rounded-lg bg-white w-44"
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {isOwner ? (
+          <div className="mt-5 pt-4 border-t border-slate-200 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Счёт зачисления средств
+                </label>
+                <select
+                  value={accountId}
+                  onChange={(e) => setAccountId(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                >
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Основание / комментарий к закрытию
+                </label>
+                <input
+                  type="text"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg"
+              >
+                Закрыть без изменений
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleApply}
+                className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+              >
+                {loading
+                  ? 'Проведение...'
+                  : `Подтвердить закрытие за ${selectedOption ? formatMoney(selectedOption.payoffAmountKopecks) : ''}`}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 p-3 bg-slate-100 rounded-lg text-xs text-slate-600">
+            Просмотр калькулятора доступен всем сотрудникам. Окончательное утверждение скидки и
+            досрочное закрытие договора выполняет владелец бизнеса.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+interface RestructureModalProps {
+  contract: ContractDTO;
+  isOwner: boolean;
+  onClose: () => void;
+  apiFetch: (path: string, options?: RequestInit) => Promise<any>;
+  onSuccess: () => Promise<void>;
+}
+
+export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
+  contract,
+  isOwner,
+  onClose,
+  apiFetch,
+  onSuccess,
+}) => {
+  const [additionalMonths, setAdditionalMonths] = useState('4');
+  const [nextStartDate, setNextStartDate] = useState(new Date().toISOString().slice(0, 10));
+  const [reason, setReason] = useState('Согласованная реструктуризация остатка долга по заявлению клиента');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleRestructure = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/v1/contracts/${contract.id}/restructure`, {
+        method: 'POST',
+        body: JSON.stringify({
+          additionalMonths: Number(additionalMonths),
+          nextStartDate,
+          reason,
+        }),
+      });
+      await onSuccess();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка реструктуризации');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+          <div className="flex items-center gap-2">
+            <History className="w-5 h-5 text-slate-700" />
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">
+                История версий графика и реструктуризация · {contract.contractNumber}
+              </h2>
+              <p className="text-xs text-slate-500">
+                Активная версия графика: v{contract.currentScheduleVersion} · Исторические версии не перезаписываются
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Version History */}
+        <div className="mt-4 space-y-4">
+          {contract.scheduleHistory.map((ver) => (
+            <div key={ver.id} className="border border-slate-200 rounded-xl p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100 text-xs">
+                <div className="font-semibold text-slate-900">
+                  Версия графика v{ver.version}{' '}
+                  {ver.version === contract.currentScheduleVersion ? '· (Действующая)' : '· (Архивная)'}
+                </div>
+                <div className="text-slate-500">
+                  Основание: {ver.changeReason} · Автор: {ver.createdByEmail} · {formatDateRu(ver.createdAt)}
+                </div>
+              </div>
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="text-slate-500 border-b border-slate-100">
+                      <th className="py-1.5 pr-3">№</th>
+                      <th className="py-1.5 pr-3">Срок оплаты</th>
+                      <th className="py-1.5 pr-3 text-right">План</th>
+                      <th className="py-1.5 pr-3 text-right">Оплачено</th>
+                      <th className="py-1.5">Статус</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-mono">
+                    {ver.items.map((item) => (
+                      <tr key={item.id}>
+                        <td className="py-1 pr-3">#{item.installmentNumber}</td>
+                        <td className="py-1 pr-3">{formatDateRu(item.dueDate)}</td>
+                        <td className="py-1 pr-3 text-right">{formatMoney(item.plannedKopecks)}</td>
+                        <td className="py-1 pr-3 text-right">{formatMoney(item.paidKopecks)}</td>
+                        <td className="py-1 font-sans text-slate-600">
+                          {translateScheduleStatus(item.status)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Create new schedule version (Owner only) */}
+        {isOwner && contract.remainingDebtKopecks > 0 && (
+          <form onSubmit={handleRestructure} className="mt-6 pt-4 border-t border-slate-200 space-y-4">
+            <h3 className="text-sm font-semibold text-slate-900">
+              Создать новую версию графика (v{contract.currentScheduleVersion + 1}) для остатка{' '}
+              {formatMoney(contract.remainingDebtKopecks)}
+            </h3>
+            {error && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+                {error}
+              </div>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  На сколько месяцев распределить остаток
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="36"
+                  value={additionalMonths}
+                  onChange={(e) => setAdditionalMonths(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Базовая дата нового графика
+                </label>
+                <input
+                  type="date"
+                  value={nextStartDate}
+                  onChange={(e) => setNextStartDate(e.target.value)}
+                  className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Основание реструктуризации *
+                </label>
+                <input
+                  type="text"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                  required
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg"
+              >
+                Отмена
+              </button>
+              <button
+                type="submit"
+                disabled={loading}
+                className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+              >
+                {loading
+                  ? 'Сохранение...'
+                  : `Утвердить новую версию графика v${contract.currentScheduleVersion + 1}`}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+};
+
+interface PrintableDocumentModalProps {
+  contract: ContractDTO;
+  templateType: 'contract' | 'schedule' | 'handover' | 'payoff';
+  onClose: () => void;
+}
+
+export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
+  contract,
+  templateType,
+  onClose,
+}) => {
+  const [sellerTitle, setSellerTitle] = useState(
+    '[ФИО / ИП / Наименование Продавца — заполняется после согласования юр. статуса]'
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-center justify-between pb-4 border-b border-slate-200 no-print">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">
+              Предварительный шаблон документа · {contract.contractNumber}
+            </h2>
+            <p className="text-xs text-amber-700 mt-0.5">
+              Внимание: система не является юридической консультацией. Проверьте текст шаблона с российским юристом (ст. 488, 489 ГК РФ).
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg flex items-center gap-1.5"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Печать / Сохранить PDF</span>
+            </button>
+            <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        <div className="my-3 no-print">
+          <label className="block text-xs font-medium text-slate-700 mb-1">
+            Реквизиты Продавца в печатной форме:
+          </label>
+          <input
+            type="text"
+            value={sellerTitle}
+            onChange={(e) => setSellerTitle(e.target.value)}
+            className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+          />
+        </div>
+
+        <div className="p-6 border border-slate-300 rounded-lg text-xs text-slate-900 space-y-4 leading-relaxed">
+          <div className="text-center border-b border-slate-200 pb-3">
+            <div className="text-sm font-bold">
+              {templateType === 'contract' &&
+                `ДОГОВОР КУПЛИ-ПРОДАЖИ ТОВАРА В РАССРОЧКУ № ${contract.contractNumber}`}
+              {templateType === 'schedule' &&
+                `ПРИЛОЖЕНИЕ №1: ГРАФИК ПЛАТЕЖЕЙ К ДОГОВОРУ № ${contract.contractNumber} (Версия v${contract.currentScheduleVersion})`}
+              {templateType === 'handover' &&
+                `АКТ ПРИЁМА-ПЕРЕДАЧИ ТОВАРА ПО ДОГОВОРУ № ${contract.contractNumber}`}
+              {templateType === 'payoff' &&
+                `СПРАВКА О ПОЛНОМ ИСПОЛНЕНИИ ОБЯЗАТЕЛЬСТВ ПО ДОГОВОРУ № ${contract.contractNumber}`}
+            </div>
+            <div className="text-slate-500 mt-1">Дата составления: {formatDateRu(contract.startDate)}</div>
+          </div>
+
+          <div className="space-y-2">
+            <p>
+              <strong>Продавец:</strong> {sellerTitle}
+            </p>
+            <p>
+              <strong>Покупатель:</strong> {contract.clientName}, контактный телефон: {contract.clientPhone}
+            </p>
+            <p>
+              <strong>Наименование передаваемого товара:</strong> {contract.itemTitle}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg font-mono">
+            <div>
+              <div className="text-[11px] font-sans text-slate-500">Цена продажи в рассрочку</div>
+              <div className="font-semibold">{formatMoney(contract.salePriceKopecks)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] font-sans text-slate-500">Первоначальный взнос</div>
+              <div className="font-semibold">{formatMoney(contract.downPaymentKopecks)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] font-sans text-slate-500">Остаток к погашению</div>
+              <div className="font-semibold">{formatMoney(contract.financedPrincipalKopecks)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] font-sans text-slate-500">Текущий остаток долга</div>
+              <div className="font-semibold">{formatMoney(contract.remainingDebtKopecks)}</div>
+            </div>
+          </div>
+
+          {(templateType === 'contract' || templateType === 'schedule') && (
+            <div>
+              <div className="font-semibold mb-2">
+                Утверждённый график ежемесячных платежей ({contract.termMonths} мес.):
+              </div>
+              <table className="w-full border-collapse border border-slate-300 text-xs font-mono">
+                <thead>
+                  <tr className="bg-slate-50 font-sans">
+                    <th className="border border-slate-300 p-1.5 text-left">№</th>
+                    <th className="border border-slate-300 p-1.5 text-left">Дата платежа</th>
+                    <th className="border border-slate-300 p-1.5 text-right">Сумма по графику</th>
+                    <th className="border border-slate-300 p-1.5 text-right">Фактически внесено</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {contract.schedule.map((item) => (
+                    <tr key={item.id}>
+                      <td className="border border-slate-300 p-1.5">{item.installmentNumber}</td>
+                      <td className="border border-slate-300 p-1.5">{formatDateRu(item.dueDate)}</td>
+                      <td className="border border-slate-300 p-1.5 text-right">
+                        {formatMoney(item.plannedKopecks)}
+                      </td>
+                      <td className="border border-slate-300 p-1.5 text-right">
+                        {formatMoney(item.paidKopecks)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="pt-8 grid grid-cols-2 gap-8 text-xs">
+            <div className="border-t border-slate-400 pt-2">
+              Подпись Продавца: ______________________
+            </div>
+            <div className="border-t border-slate-400 pt-2">
+              Подпись Покупателя: ______________________
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
