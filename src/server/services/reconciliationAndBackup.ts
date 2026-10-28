@@ -163,6 +163,16 @@ export function reconcileFinance(db: DatabaseSync): ReconciliationResultDTO {
   };
 }
 
+function getBackupDir(): string {
+  const backupDir = process.env.BACKUP_STORAGE_DIR
+    ? path.resolve(process.env.BACKUP_STORAGE_DIR)
+    : path.resolve(process.cwd(), 'backups');
+  if (!fs.existsSync(backupDir)) {
+    fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+  }
+  return backupDir;
+}
+
 export function createEncryptedBackup(
   db: DatabaseSync,
   actorUserId: string,
@@ -175,10 +185,7 @@ export function createEncryptedBackup(
   contractsCount: number;
   ledgerNetKopecks: number;
 } {
-  const backupDir = path.resolve(process.cwd(), 'backups');
-  if (!fs.existsSync(backupDir)) {
-    fs.mkdirSync(backupDir, { recursive: true });
-  }
+  const backupDir = getBackupDir();
 
   const reconciliation = reconcileFinance(db);
   if (!reconciliation.isHealthy) {
@@ -282,7 +289,7 @@ export function verifyEncryptedBackup(
     throw new Error('Резервная копия не найдена.');
   }
 
-  const filePath = path.resolve(process.cwd(), 'backups', path.basename(row.filename));
+  const filePath = path.resolve(getBackupDir(), path.basename(row.filename));
   if (!fs.existsSync(filePath)) {
     throw new Error('Файл резервной копии отсутствует на диске.');
   }
@@ -341,7 +348,7 @@ export function getBackupEnvelopeFile(
   }
 
   const safeFilename = path.basename(row.filename);
-  const filePath = path.resolve(process.cwd(), 'backups', safeFilename);
+  const filePath = path.resolve(getBackupDir(), safeFilename);
   if (!fs.existsSync(filePath)) {
     throw new Error('Файл резервной копии отсутствует на диске.');
   }
@@ -558,7 +565,7 @@ export function restoreEncryptedBackup(
   }
 
   const safeFilename = path.basename(row.filename);
-  const filePath = path.resolve(process.cwd(), 'backups', safeFilename);
+  const filePath = path.resolve(getBackupDir(), safeFilename);
   if (!fs.existsSync(filePath)) {
     throw new Error('Файл резервной копии отсутствует на диске.');
   }
