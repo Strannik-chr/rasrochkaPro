@@ -29,7 +29,7 @@ export function getStorageConfig() {
   const localUploadsDir =
     process.env.PRIVATE_STORAGE_DIR ||
     process.env.LOCAL_UPLOADS_DIR ||
-    path.resolve(process.cwd(), 'uploads');
+    path.resolve(process.cwd(), 'data', 'uploads');
 
   return {
     mode: (isR2Configured ? 'cloudflare_r2_configured' : 'local_private') as StorageBackendMode,
@@ -79,7 +79,8 @@ export function writePrivateDocumentBuffer(
 
 /**
  * Reads a private document buffer and verifies its SHA-256 integrity hash before serving.
- * Falls back to legacy `content_base64` column if the file was created in an in-memory test DB.
+ * If the file on disk was lost (e.g. after container rebuild), automatically self-heals
+ * by restoring it from the database `content_base64` column back to disk.
  */
 export function readPrivateDocumentBuffer(
   storedFilename: string,
@@ -89,12 +90,19 @@ export function readPrivateDocumentBuffer(
   const cfg = getStorageConfig();
   const safeName = sanitizeStoredFilename(storedFilename);
   const fullPath = path.join(cfg.localUploadsDir, safeName);
+  const legacyPath = path.join(path.resolve(process.cwd(), 'uploads'), safeName);
 
   let buffer: Buffer;
+  let restoredFromFallback = false;
+
   if (fs.existsSync(fullPath)) {
     buffer = fs.readFileSync(fullPath);
+  } else if (fs.existsSync(legacyPath)) {
+    buffer = fs.readFileSync(legacyPath);
+    restoredFromFallback = true;
   } else if (fallbackBase64) {
     buffer = Buffer.from(fallbackBase64, 'base64');
+    restoredFromFallback = true;
   } else {
     throw new Error('Файл документа не найден в защищённом хранилище.');
   }
@@ -103,6 +111,19 @@ export function readPrivateDocumentBuffer(
   if (expectedSha256 && actualSha256 !== expectedSha256) {
     throw new Error('Нарушена целостность файла документа (SHA-256 не совпадает).');
   }
+
+  // Self-heal file on disk if it was served from DB fallback or legacy folder
+  if (restoredFromFallback) {
+    try {
+      if (!fs.existsSync(cfg.localUploadsDir)) {
+        fs.mkdirSync(cfg.localUploadsDir, { recursive: true, mode: 0o700 });
+      }
+      fs.writeFileSync(fullPath, buffer, { mode: 0o600 });
+    } catch {
+      // Non-fatal if filesystem is read-only in a test environment
+    }
+  }
+
   return buffer;
 }
 

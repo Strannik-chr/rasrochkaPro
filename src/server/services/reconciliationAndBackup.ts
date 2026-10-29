@@ -166,7 +166,7 @@ export function reconcileFinance(db: DatabaseSync): ReconciliationResultDTO {
 function getBackupDir(): string {
   const backupDir = process.env.BACKUP_STORAGE_DIR
     ? path.resolve(process.env.BACKUP_STORAGE_DIR)
-    : path.resolve(process.cwd(), 'backups');
+    : path.resolve(process.cwd(), 'data', 'backups');
   if (!fs.existsSync(backupDir)) {
     fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
   }
@@ -204,6 +204,7 @@ export function createEncryptedBackup(
         )
         .all(),
       installment_plans: db.prepare('SELECT * FROM installment_plans').all(),
+      status_rules_config: db.prepare('SELECT * FROM status_rules_config').all(),
       settings_history: db.prepare('SELECT * FROM settings_history').all(),
       clients: db.prepare('SELECT * FROM clients').all(),
       suppliers: db.prepare('SELECT * FROM suppliers').all(),
@@ -216,11 +217,7 @@ export function createEncryptedBackup(
       payments: db.prepare('SELECT * FROM payments').all(),
       payment_allocations: db.prepare('SELECT * FROM payment_allocations').all(),
       ledger_entries: db.prepare('SELECT * FROM ledger_entries').all(),
-      documents: db
-        .prepare(
-          'SELECT id, entity_type, entity_id, doc_category, title, original_filename, stored_filename, mime_type, size_bytes, sha256_hash, created_at FROM documents'
-        )
-        .all(),
+      documents: db.prepare('SELECT * FROM documents').all(),
     },
   };
 
@@ -396,6 +393,8 @@ export function restoreEncryptedBackupFromEnvelope(
     reconciliation: ReconciliationResultDTO;
     tables: {
       installment_plans?: Array<Record<string, unknown>>;
+      status_rules_config?: Array<Record<string, unknown>>;
+      settings_history?: Array<Record<string, unknown>>;
       clients?: Array<Record<string, unknown>>;
       suppliers?: Array<Record<string, unknown>>;
       purchases?: Array<Record<string, unknown>>;
@@ -407,6 +406,7 @@ export function restoreEncryptedBackupFromEnvelope(
       payments?: Array<Record<string, unknown>>;
       payment_allocations?: Array<Record<string, unknown>>;
       ledger_entries?: Array<Record<string, unknown>>;
+      documents?: Array<Record<string, unknown>>;
     };
   };
 
@@ -418,18 +418,16 @@ export function restoreEncryptedBackupFromEnvelope(
   const safeFilename = path.basename(filenameLabel || 'uploaded_backup.enc.json').replace(/[^a-zA-Z0-9._-]/g, '_');
   const backupId = existingBackupId || `bkp_${crypto.randomUUID().slice(0, 8)}`;
 
-  // Ensure the envelope is also persisted in ./backups on disk
+  // Ensure the envelope is also persisted in backupDir on disk
   if (!existingBackupId) {
-    const backupDir = path.resolve(process.cwd(), 'backups');
-    if (!fs.existsSync(backupDir)) {
-      fs.mkdirSync(backupDir, { recursive: true });
-    }
+    const backupDir = getBackupDir();
     fs.writeFileSync(path.join(backupDir, safeFilename), envelopeRaw, { encoding: 'utf8', mode: 0o600 });
   }
 
   db.exec('BEGIN IMMEDIATE TRANSACTION;');
   try {
     // Clear operational tables in reverse FK dependency order
+    db.exec('DELETE FROM documents;');
     db.exec('DELETE FROM payment_allocations;');
     db.exec('DELETE FROM payments;');
     db.exec('DELETE FROM ledger_entries;');
@@ -452,6 +450,12 @@ export function restoreEncryptedBackupFromEnvelope(
 
     for (const plan of tables.installment_plans || []) {
       insertRow('installment_plans', plan);
+    }
+    for (const sr of tables.status_rules_config || []) {
+      insertRow('status_rules_config', sr);
+    }
+    for (const sh of tables.settings_history || []) {
+      insertRow('settings_history', sh);
     }
     for (const acc of tables.financial_accounts || []) {
       insertRow('financial_accounts', acc);
@@ -485,6 +489,31 @@ export function restoreEncryptedBackupFromEnvelope(
     }
     for (const le of tables.ledger_entries || []) {
       insertRow('ledger_entries', le);
+    }
+    for (const doc of tables.documents || []) {
+      insertRow('documents', doc);
+      // Also restore the physical file onto disk if content_base64 is present
+      const storedFilename = typeof doc.stored_filename === 'string' ? doc.stored_filename : '';
+      const contentBase64 = typeof doc.content_base64 === 'string' ? doc.content_base64 : '';
+      if (storedFilename && contentBase64) {
+        try {
+          const uploadsDir =
+            process.env.PRIVATE_STORAGE_DIR ||
+            process.env.LOCAL_UPLOADS_DIR ||
+            path.resolve(process.cwd(), 'data', 'uploads');
+          if (!fs.existsSync(uploadsDir)) {
+            fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o700 });
+          }
+          const safeDocName = path.basename(storedFilename).replace(/[^a-zA-Z0-9._-]/g, '');
+          if (safeDocName) {
+            fs.writeFileSync(path.join(uploadsDir, safeDocName), Buffer.from(contentBase64, 'base64'), {
+              mode: 0o600,
+            });
+          }
+        } catch {
+          // Non-fatal in read-only test environments
+        }
+      }
     }
 
     const postRestoreReconciliation = reconcileFinance(db);

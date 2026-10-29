@@ -116,3 +116,82 @@ export function translateEntryType(type: string): string {
       return type;
   }
 }
+
+export function getClientPaymentStatusMeta(status?: string): {
+  label: string;
+  badgeClass: string;
+  dotClass: string;
+  description: string;
+} {
+  switch (status) {
+    case 'vip':
+      return {
+        label: 'VIP',
+        badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+        dotClass: 'bg-emerald-600',
+        description: 'Своевременно оплачивает все действующие рассрочки, просрочек нет',
+      };
+    case 'reliable':
+      return {
+        label: 'Надёжный',
+        badgeClass: 'bg-sky-50 text-sky-800 border-sky-200',
+        dotClass: 'bg-sky-600',
+        description: 'Соблюдает график платежей, существенной задолженности нет',
+      };
+    case 'watch':
+      return {
+        label: 'Под наблюдением',
+        badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
+        dotClass: 'bg-amber-500',
+        description: 'Имеется текущая просрочка, которую необходимо контролировать',
+      };
+    case 'complex':
+      return {
+        label: 'Сложный',
+        badgeClass: 'bg-red-50 text-red-800 border-red-200',
+        dotClass: 'bg-red-600',
+        description: 'Длительная просрочка, несколько пропущенных платежей подряд или крупный долг',
+      };
+    case 'closed':
+      return {
+        label: 'Рассрочка закрыта',
+        badgeClass: 'bg-slate-100 text-slate-700 border-slate-300',
+        dotClass: 'bg-slate-500',
+        description: 'Все договорные обязательства полностью выполнены',
+      };
+    case 'new':
+    default:
+      return {
+        label: 'Новый клиент',
+        badgeClass: 'bg-slate-50 text-slate-600 border-slate-200',
+        dotClass: 'bg-slate-400',
+        description: 'Ещё нет активных или завершённых договоров рассрочки',
+      };
+  }
+}
+
+export function getClientStatusSortWeight(status?: string): number {
+  switch (status) {
+    case 'complex':
+      return 1;
+    case 'watch':
+      return 2;
+    case 'reliable':
+      return 3;
+    case 'vip':
+      return 4;
+    case 'closed':
+      return 5;
+    case 'new':
+    default:
+      return 6;
+  }
+}
+
+export function formatFileSize(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) return '0 Б';
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} МБ`;
+}
+

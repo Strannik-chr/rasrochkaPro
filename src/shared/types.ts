@@ -6,6 +6,16 @@ export type ContractStatus = 'draft' | 'active' | 'completed' | 'restructured' |
 export type ScheduleItemStatus = 'pending' | 'partial' | 'paid' | 'overdue' | 'superseded' | 'waived';
 export type HandoverStatus = 'in_procurement' | 'ready' | 'handed_over' | 'returned';
 export type PaymentMethod = 'cash' | 'bank_transfer';
+export type ClientPaymentStatus = 'vip' | 'reliable' | 'watch' | 'complex' | 'closed' | 'new';
+
+export interface StatusRulesConfigDTO {
+  gracePeriodDays: number;
+  complexMinOverdueDays: number;
+  complexConsecutiveMissedCount: number;
+  complexMinOverdueKopecks: number;
+  reliableMaxPastLateCount: number;
+  updatedAt: string;
+}
 export type LedgerEntryType =
   | 'client_payment'
   | 'purchase_payment'
@@ -70,8 +80,18 @@ export interface ClientDTO {
   status: 'active' | 'archived';
   createdAt: string;
   activeContractsCount: number;
+  completedContractsCount?: number;
   totalDebtKopecks: number;
   overdueDebtKopecks: number;
+  totalRemainingDebtKopecks?: number;
+  totalOverdueKopecks?: number;
+  nextPaymentDate?: string | null;
+  nextPaymentAmountKopecks?: number;
+  maxDaysOverdue?: number;
+  consecutiveOverdueCount?: number;
+  paymentStatus?: ClientPaymentStatus;
+  paymentStatusLabel?: string;
+  paymentStatusReason?: string;
 }
 
 export interface SupplierDTO {
@@ -170,6 +190,12 @@ export interface ContractDTO {
   totalCollectedKopecks: number;
   remainingDebtKopecks: number;
   overdueKopecks: number;
+  computedStatus?: ClientPaymentStatus;
+  computedStatusLabel?: string;
+  computedStatusReason?: string;
+  contractStatus?: ClientPaymentStatus;
+  contractStatusLabel?: string;
+  contractStatusReason?: string;
   schedule: ScheduleItemDTO[];
   scheduleHistory: ScheduleVersionDTO[];
 }
@@ -269,12 +295,17 @@ export interface DocumentDTO {
   id: string;
   entityType: 'client' | 'contract' | 'purchase' | 'payment' | 'return';
   entityId: string;
+  clientId?: string | null;
+  contractId?: string | null;
   docCategory: 'contract_scan' | 'receipt' | 'transfer_proof' | 'handover_act' | 'return_act' | 'photo' | 'generated_template';
   title: string;
   originalFilename: string;
   mimeType: string;
   sizeBytes: number;
   sha256Hash: string;
+  previousDocumentId?: string | null;
+  replacedById?: string | null;
+  isArchived?: boolean;
   createdByEmail: string;
   createdAt: string;
 }

@@ -3,6 +3,7 @@ import {
   AuditLogDTO,
   BackupDTO,
   ClientDTO,
+  ClientPaymentStatus,
   ContractDTO,
   DocumentDTO,
   FinancialAccountDTO,
@@ -14,6 +15,7 @@ import {
   ReconciliationResultDTO,
   RoundingRule,
   SettingHistoryDTO,
+  StatusRulesConfigDTO,
   SupplierDTO,
   UserDTO,
   UserRole,
@@ -22,6 +24,8 @@ import {
   formatDateRu,
   formatDateTimeRu,
   formatMoney,
+  getClientPaymentStatusMeta,
+  getClientStatusSortWeight,
   parseRublesInputToKopecks,
   translateContractStatus,
   translateEntryType,
@@ -34,12 +38,20 @@ import {
   PrintableDocumentModal,
   RestructureScheduleModal,
 } from './components/ContractModals';
+import {
+  ClientDetailsModal,
+  DocumentPreviewModal,
+  FindAndSendContractSection,
+  QuickCallAndCopyBar,
+  StatusRulesConfigCard,
+} from './components/ClientAndWhatsAppViews';
 import { ManualAllocationModal, NewPaymentModal } from './components/PaymentAllocateModal';
 import { AuthGateModal } from './components/AuthGateModal';
 import {
   Search,
   Plus,
   Download,
+  Eye,
   Printer,
   ShieldCheck,
   AlertTriangle,
@@ -53,12 +65,16 @@ import {
   Lock,
   Upload,
   RefreshCw,
+  MessageCircle,
+  Paperclip,
+  Trash2,
 } from 'lucide-react';
 
 type SectionId =
   | 'dashboard'
   | 'clients'
   | 'contracts'
+  | 'whatsapp_contracts'
   | 'payments'
   | 'overdues'
   | 'purchases'
@@ -73,8 +89,9 @@ type SectionId =
 
 const NAV_SECTIONS: Array<{ id: SectionId; label: string; group: string; ownerOnly?: boolean }> = [
   { id: 'dashboard', label: '1. Главная панель', group: 'Операционный контур' },
-  { id: 'clients', label: '2. Клиенты', group: 'Операционный контур' },
+  { id: 'clients', label: '2. Клиенты и статусы', group: 'Операционный контур' },
   { id: 'contracts', label: '3. Договоры и графики', group: 'Операционный контур' },
+  { id: 'whatsapp_contracts', label: 'Найти и отправить договор', group: 'Операционный контур' },
   { id: 'payments', label: '4. Платежи и распределение', group: 'Операционный контур' },
   { id: 'overdues', label: '5. Просрочки и контакты', group: 'Операционный контур' },
   { id: 'purchases', label: '6. Закупки и товары', group: 'Закупки и склад' },
@@ -125,6 +142,15 @@ export default function App() {
   const [backups, setBackups] = useState<BackupDTO[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogDTO[]>([]);
   const [reconciliation, setReconciliation] = useState<ReconciliationResultDTO | null>(null);
+  const [statusRules, setStatusRules] = useState<StatusRulesConfigDTO | null>(null);
+
+  // Client filter, search & sort state
+  const [clientStatusFilter, setClientStatusFilter] = useState<'all' | ClientPaymentStatus>('all');
+  const [clientSortBy, setClientSortBy] = useState<
+    'status_severity' | 'debt_desc' | 'overdue_desc' | 'name_asc'
+  >('status_severity');
+  const [viewingClientCardId, setViewingClientCardId] = useState<string | null>(null);
+  const [whatsappTargetContractId, setWhatsappTargetContractId] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [bannerNotice, setBannerNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(
@@ -257,8 +283,11 @@ export default function App() {
     status: 'active' | 'archived';
   } | null>(null);
 
-  const downloadProtectedFile = useCallback(
-    async (path: string, fallbackFilename: string) => {
+  const [previewingDocument, setPreviewingDocument] = useState<DocumentDTO | null>(null);
+  const [confirmDeleteContractDocId, setConfirmDeleteContractDocId] = useState<string | null>(null);
+
+  const fetchProtectedBlob = useCallback(
+    async (path: string): Promise<Blob> => {
       const headers: Record<string, string> = {};
       if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
       if (sessionToken) headers['X-Session-Token'] = sessionToken;
@@ -268,7 +297,7 @@ export default function App() {
         headers,
       });
       if (!res.ok) {
-        let errMsg = `Ошибка скачивания файла (${res.status})`;
+        let errMsg = `Ошибка загрузки файла (${res.status})`;
         try {
           const data = await res.json();
           if (data?.error) errMsg = data.error;
@@ -277,7 +306,14 @@ export default function App() {
         }
         throw new Error(errMsg);
       }
-      const blob = await res.blob();
+      return res.blob();
+    },
+    [csrfToken, sessionToken]
+  );
+
+  const downloadProtectedFile = useCallback(
+    async (path: string, fallbackFilename: string) => {
+      const blob = await fetchProtectedBlob(path);
       const objUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = objUrl;
@@ -287,7 +323,7 @@ export default function App() {
       document.body.removeChild(a);
       URL.revokeObjectURL(objUrl);
     },
-    [csrfToken, sessionToken]
+    [fetchProtectedBlob]
   );
 
   const apiFetch = useCallback(
@@ -354,6 +390,9 @@ export default function App() {
       setBackups(data.backups || []);
       setAuditLogs(data.auditLogs || []);
       setReconciliation(data.reconciliation || null);
+      if (data.statusRules) {
+        setStatusRules(data.statusRules);
+      }
     },
     [csrfToken, sessionToken]
   );
@@ -506,6 +545,7 @@ export default function App() {
 
   // Filtered lists by searchQuery
   const q = searchQuery.trim().toLowerCase();
+  const qDigits = q.replace(/\D/g, '');
   const filteredContracts = contracts.filter(
     (c) =>
       !q ||
@@ -513,9 +553,35 @@ export default function App() {
       c.clientName.toLowerCase().includes(q) ||
       c.itemTitle.toLowerCase().includes(q)
   );
-  const filteredClients = clients.filter(
-    (c) => !q || c.fullName.toLowerCase().includes(q) || c.phone.toLowerCase().includes(q)
-  );
+  const filteredClients = useMemo(() => {
+    const base = clients.filter((c) => {
+      if (clientStatusFilter !== 'all' && (c.paymentStatus || 'new') !== clientStatusFilter) {
+        return false;
+      }
+      if (!q) return true;
+      const nameMatch = c.fullName.toLowerCase().includes(q);
+      const phoneMatch =
+        c.phone.toLowerCase().includes(q) ||
+        (qDigits.length >= 3 && c.phone.replace(/\D/g, '').includes(qDigits));
+      return nameMatch || phoneMatch;
+    });
+
+    return [...base].sort((a, b) => {
+      if (clientSortBy === 'status_severity') {
+        const diff =
+          getClientStatusSortWeight(a.paymentStatus) - getClientStatusSortWeight(b.paymentStatus);
+        if (diff !== 0) return diff;
+        return (b.totalOverdueKopecks || 0) - (a.totalOverdueKopecks || 0);
+      }
+      if (clientSortBy === 'debt_desc') {
+        return (b.totalRemainingDebtKopecks || 0) - (a.totalRemainingDebtKopecks || 0);
+      }
+      if (clientSortBy === 'overdue_desc') {
+        return (b.totalOverdueKopecks || 0) - (a.totalOverdueKopecks || 0);
+      }
+      return a.fullName.localeCompare(b.fullName, 'ru');
+    });
+  }, [clients, clientStatusFilter, clientSortBy, q, qDigits]);
   const filteredPayments = payments.filter(
     (p) =>
       !q ||
@@ -829,12 +895,33 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setActiveSection('clients')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
+              activeSection === 'clients' ? 'text-slate-900 underline underline-offset-8' : ''
+            }`}
+          >
+            Клиенты
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveSection('contracts')}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
               activeSection === 'contracts' ? 'text-slate-900 underline underline-offset-8' : ''
             }`}
           >
             Договоры
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSection('whatsapp_contracts')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1 ${
+              activeSection === 'whatsapp_contracts'
+                ? 'text-emerald-800 underline underline-offset-8 font-semibold'
+                : 'text-emerald-700'
+            }`}
+          >
+            <MessageCircle className="w-3.5 h-3.5" />
+            <span>Найти и отправить договор</span>
           </button>
           <button
             type="button"
@@ -1427,85 +1514,221 @@ export default function App() {
                     </form>
                   )}
 
+                  {/* Filter & Sort Controls for Clients */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {(
+                          [
+                            { id: 'all', label: 'Все клиенты', count: clients.length },
+                            {
+                              id: 'vip',
+                              label: 'VIP',
+                              count: clients.filter((c) => c.paymentStatus === 'vip').length,
+                            },
+                            {
+                              id: 'reliable',
+                              label: 'Надёжный',
+                              count: clients.filter((c) => c.paymentStatus === 'reliable').length,
+                            },
+                            {
+                              id: 'watch',
+                              label: 'Под наблюдением',
+                              count: clients.filter((c) => c.paymentStatus === 'watch').length,
+                            },
+                            {
+                              id: 'complex',
+                              label: 'Сложный',
+                              count: clients.filter((c) => c.paymentStatus === 'complex').length,
+                            },
+                            {
+                              id: 'closed',
+                              label: 'Рассрочка закрыта',
+                              count: clients.filter((c) => c.paymentStatus === 'closed').length,
+                            },
+                            {
+                              id: 'new',
+                              label: 'Новый клиент',
+                              count: clients.filter((c) => (c.paymentStatus || 'new') === 'new')
+                                .length,
+                            },
+                          ] as Array<{ id: 'all' | ClientPaymentStatus; label: string; count: number }>
+                        ).map((tab) => (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => setClientStatusFilter(tab.id)}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                              clientStatusFilter === tab.id
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                            }`}
+                          >
+                            {tab.label} ({tab.count})
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs text-slate-500">Сортировка:</label>
+                        <select
+                          value={clientSortBy}
+                          onChange={(e) => setClientSortBy(e.target.value as any)}
+                          className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                        >
+                          <option value="status_severity">По статусу (проблемные сверху)</option>
+                          <option value="debt_desc">По сумме остатка долга (убыв.)</option>
+                          <option value="overdue_desc">По сумме просрочки (убыв.)</option>
+                          <option value="name_asc">По ФИО (А–Я)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">ФИО клиента</th>
-                          <th className="py-3 px-4 font-medium">Контакты и документ</th>
+                          <th className="py-3 px-4 font-medium">ФИО клиента и статус</th>
+                          <th className="py-3 px-4 font-medium">Телефон и быстрый звонок</th>
                           <th className="py-3 px-4 font-medium text-right">Активных договоров</th>
-                          <th className="py-3 px-4 font-medium text-right">Общий остаток долга</th>
-                          <th className="py-3 px-4 font-medium text-right">В т.ч. просрочено</th>
+                          <th className="py-3 px-4 font-medium text-right">Сумма оставшегося долга</th>
+                          <th className="py-3 px-4 font-medium text-right">Сумма просрочки</th>
+                          <th className="py-3 px-4 font-medium text-right">Ближайший платёж</th>
                           <th className="py-3 px-4 font-medium text-right">Действия</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {filteredClients.map((cl) => (
-                          <tr key={cl.id} className="hover:bg-slate-50/80">
-                            <td className="py-3 px-4">
-                              <div className="font-semibold text-slate-900">{cl.fullName}</div>
-                              <div className="text-slate-500 mt-0.5">{cl.address || '—'}</div>
-                            </td>
-                            <td className="py-3 px-4">
-                              <div className="font-mono text-slate-800">
-                                {cl.phone}
-                                {cl.secondaryPhone ? ` · ${cl.secondaryPhone}` : ''}
-                              </div>
-                              <div className="text-slate-500 mt-0.5">{cl.documentRef || '—'}</div>
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right">
-                              {cl.activeContractsCount}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
-                              {formatMoney(cl.totalDebtKopecks)}
-                            </td>
-                            <td
-                              className={`py-3 px-4 font-mono text-right font-medium ${
-                                cl.overdueDebtKopecks > 0 ? 'text-red-600' : 'text-slate-500'
-                              }`}
-                            >
-                              {formatMoney(cl.overdueDebtKopecks)}
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                {canWrite && (
+                        {filteredClients.map((cl) => {
+                          const statusMeta = getClientPaymentStatusMeta(cl.paymentStatus);
+                          const remainingDebt =
+                            cl.totalRemainingDebtKopecks ?? (cl as any).totalDebtKopecks ?? 0;
+                          const overdueDebt =
+                            cl.totalOverdueKopecks ?? (cl as any).overdueDebtKopecks ?? 0;
+                          return (
+                            <tr key={cl.id} className="hover:bg-slate-50/80">
+                              <td className="py-3 px-4">
+                                <div className="flex flex-wrap items-center gap-2">
                                   <button
                                     type="button"
-                                    onClick={() =>
-                                      setEditingClient({
-                                        id: cl.id,
-                                        fullName: cl.fullName,
-                                        phone: cl.phone,
-                                        secondaryPhone: cl.secondaryPhone || '',
-                                        documentRef: cl.documentRef || '',
-                                        address: cl.address || '',
-                                        notes: cl.notes || '',
-                                        status: cl.status,
-                                      })
-                                    }
-                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100"
+                                    onClick={() => setViewingClientCardId(cl.id)}
+                                    className="font-semibold text-slate-900 hover:underline text-left"
                                   >
-                                    Изменить
+                                    {cl.fullName}
                                   </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setSearchQuery(cl.fullName);
-                                    setActiveSection('contracts');
-                                  }}
-                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100"
-                                >
-                                  Договоры
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                                  <span
+                                    onClick={() => setViewingClientCardId(cl.id)}
+                                    title={cl.paymentStatusReason || statusMeta.description}
+                                    className={`px-2 py-0.5 text-[11px] font-medium border rounded-md inline-flex items-center gap-1 cursor-pointer ${statusMeta.badgeClass}`}
+                                  >
+                                    <span
+                                      className={`w-1.5 h-1.5 rounded-full ${statusMeta.dotClass}`}
+                                    />
+                                    <span>{statusMeta.label}</span>
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">
+                                  {cl.paymentStatusReason || cl.address || '—'}
+                                </div>
+                              </td>
+                              <td className="py-3 px-4">
+                                <div className="font-mono text-slate-800 mb-1">
+                                  {cl.phone}
+                                  {cl.secondaryPhone ? ` · ${cl.secondaryPhone}` : ''}
+                                </div>
+                                <QuickCallAndCopyBar
+                                  phone={cl.phone}
+                                  clientName={cl.fullName}
+                                  onNotice={(msg) => notify('success', msg)}
+                                  onError={(err) => notify('error', err)}
+                                />
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right">
+                                {cl.activeContractsCount ?? 0}
+                                {cl.completedContractsCount ? (
+                                  <div className="text-[10px] text-slate-400">
+                                    закрыто: {cl.completedContractsCount}
+                                  </div>
+                                ) : null}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
+                                {formatMoney(remainingDebt)}
+                              </td>
+                              <td
+                                className={`py-3 px-4 font-mono text-right font-medium ${
+                                  overdueDebt > 0 ? 'text-red-600' : 'text-slate-500'
+                                }`}
+                              >
+                                {formatMoney(overdueDebt)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right text-slate-700">
+                                {cl.nextPaymentDate ? formatDateRu(cl.nextPaymentDate) : '—'}
+                              </td>
+                              <td className="py-3 px-4 text-right">
+                                <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => setViewingClientCardId(cl.id)}
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-900 bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200"
+                                  >
+                                    Карточка и статус
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const firstCnt = contracts.find((c) => c.clientId === cl.id);
+                                      setWhatsappTargetContractId(firstCnt?.id || null);
+                                      setActiveSection('whatsapp_contracts');
+                                    }}
+                                    className="px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 inline-flex items-center gap-1"
+                                  >
+                                    <MessageCircle className="w-3.5 h-3.5" />
+                                    <span>WhatsApp</span>
+                                  </button>
+                                  {canWrite && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setEditingClient({
+                                          id: cl.id,
+                                          fullName: cl.fullName,
+                                          phone: cl.phone,
+                                          secondaryPhone: cl.secondaryPhone || '',
+                                          documentRef: cl.documentRef || '',
+                                          address: cl.address || '',
+                                          notes: cl.notes || '',
+                                          status: cl.status,
+                                        })
+                                      }
+                                      className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100"
+                                    >
+                                      Изменить
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
                 </div>
+              )}
+
+              {/* ==================== НАЙТИ И ОТПРАВИТЬ ДОГОВОР (WHATSAPP & CALLS) ==================== */}
+              {activeSection === 'whatsapp_contracts' && (
+                <FindAndSendContractSection
+                  clients={clients}
+                  contracts={contracts}
+                  documents={documents}
+                  initialSelectedContractId={whatsappTargetContractId}
+                  apiFetch={apiFetch}
+                  onRefresh={loadFullState}
+                  onOpenClientCard={(cl) => setViewingClientCardId(cl.id)}
+                  fetchProtectedBlob={fetchProtectedBlob}
+                  downloadProtectedFile={downloadProtectedFile}
+                />
               )}
 
               {/* ==================== 3. ДОГОВОРЫ И ГРАФИКИ ==================== */}
@@ -1517,72 +1740,221 @@ export default function App() {
                         Договоры продажи в рассрочку и графики платежей
                       </h1>
                       <p className="text-xs text-slate-500 mt-1">
-                        Каждый договор хранит зафиксированную версию правил рассрочки, историю версий графика и связанные документы.
+                        Каждый договор хранит зафиксированную версию правил рассрочки, историю версий графика и прикреплённые сканы/фотографии договора.
                       </p>
                     </div>
-                    {canWrite && (
+                    <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => setShowNewContractModal(true)}
-                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                        onClick={() => setActiveSection('whatsapp_contracts')}
+                        className="px-3.5 py-2 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5"
                       >
-                        <Plus className="w-4 h-4" />
-                        <span>Оформить новый договор</span>
+                        <MessageCircle className="w-4 h-4" />
+                        <span>Найти и отправить договор в WhatsApp</span>
                       </button>
-                    )}
+                      {canWrite && (
+                        <button
+                          type="button"
+                          onClick={() => setShowNewContractModal(true)}
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>Оформить новый договор</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div className="space-y-4">
-                    {filteredContracts.map((c) => (
-                      <div key={c.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-                        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-4">
-                          <div>
-                            <div className="flex items-center gap-2 text-sm">
-                              <span className="font-mono font-bold text-slate-900">
-                                {c.contractNumber}
-                              </span>
-                              <span className="text-slate-400">·</span>
-                              <span className="font-semibold text-slate-900">{c.clientName}</span>
-                              <span className="text-slate-400">·</span>
-                              <span className="text-xs text-slate-600">
-                                Статус: {translateContractStatus(c.status)}
-                              </span>
+                    {filteredContracts.map((c) => {
+                      const cStatusMeta = getClientPaymentStatusMeta(c.contractStatus);
+                      const contractDocs = documents.filter(
+                        (d) =>
+                          (d.contractId === c.id ||
+                            (d.entityType === 'contract' && d.entityId === c.id)) &&
+                          !d.isArchived
+                      );
+                      const attachedFilesCount = contractDocs.length;
+                      return (
+                        <div key={c.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-4">
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2 text-sm">
+                                <span className="font-mono font-bold text-slate-900">
+                                  {c.contractNumber}
+                                </span>
+                                <span className="text-slate-400">·</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setViewingClientCardId(c.clientId)}
+                                  className="font-semibold text-slate-900 hover:underline"
+                                >
+                                  {c.clientName}
+                                </button>
+                                <span
+                                  className={`px-2 py-0.5 text-[11px] font-medium border rounded-md inline-flex items-center gap-1 ${cStatusMeta.badgeClass}`}
+                                  title={c.contractStatusReason}
+                                >
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full ${cStatusMeta.dotClass}`}
+                                  />
+                                  <span>{cStatusMeta.label}</span>
+                                </span>
+                                <span className="text-slate-400">·</span>
+                                <span className="text-xs text-slate-600">
+                                  {translateContractStatus(c.status)}
+                                </span>
+                              </div>
+                              <div className="text-xs text-slate-600 mt-1">
+                                Товар: <strong>{c.itemTitle}</strong> · Оформлен:{' '}
+                                <span className="font-mono">{formatDateRu(c.startDate)}</span> · Срок:{' '}
+                                <span className="font-mono">{c.termMonths} мес.</span> · Версия графика:{' '}
+                                <span className="font-mono">v{c.currentScheduleVersion}</span> · Прикреплено файлов:{' '}
+                                <span className="font-mono font-semibold">{attachedFilesCount}</span>
+                              </div>
                             </div>
-                            <div className="text-xs text-slate-600 mt-1">
-                              Товар: <strong>{c.itemTitle}</strong> · Оформлен:{' '}
-                              <span className="font-mono">{formatDateRu(c.startDate)}</span> · Срок:{' '}
-                              <span className="font-mono">{c.termMonths} мес.</span> · Версия графика:{' '}
-                              <span className="font-mono">v{c.currentScheduleVersion}</span>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setWhatsappTargetContractId(c.id);
+                                  setActiveSection('whatsapp_contracts');
+                                }}
+                                className="px-3 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                                <span>Отправить в WhatsApp / Скан ({attachedFilesCount})</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEarlyPayoffContract(c)}
+                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                              >
+                                <Calculator className="w-3.5 h-3.5" />
+                                <span>Калькулятор досрочного погашения</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRestructureContract(c)}
+                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                              >
+                                <History className="w-3.5 h-3.5" />
+                                <span>История графика (v{c.currentScheduleVersion})</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setPrintTemplateModal({ contract: c, type: 'contract' })}
+                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                              >
+                                <Printer className="w-3.5 h-3.5" />
+                                <span>Печать договора</span>
+                              </button>
                             </div>
                           </div>
 
-                          <div className="flex flex-wrap items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setEarlyPayoffContract(c)}
-                              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
-                            >
-                              <Calculator className="w-3.5 h-3.5" />
-                              <span>Калькулятор досрочного погашения</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setRestructureContract(c)}
-                              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
-                            >
-                              <History className="w-3.5 h-3.5" />
-                              <span>История графика (v{c.currentScheduleVersion})</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setPrintTemplateModal({ contract: c, type: 'contract' })}
-                              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
-                            >
-                              <Printer className="w-3.5 h-3.5" />
-                              <span>Печать договора</span>
-                            </button>
+                        {/* Attached Photos / Scans of this Contract */}
+                        {contractDocs.length > 0 && (
+                          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+                            <div className="text-[11px] font-medium text-slate-700">
+                              Прикреплённые фото и сканы договора ({contractDocs.length}):
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {contractDocs.map((doc) => (
+                                <div
+                                  key={doc.id}
+                                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs flex items-center gap-2"
+                                >
+                                  <FileText className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+                                  <span
+                                    className="font-medium text-slate-900 truncate max-w-[220px]"
+                                    title={doc.originalFilename}
+                                  >
+                                    {doc.originalFilename}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewingDocument(doc)}
+                                    className="px-2 py-0.5 text-[11px] font-medium text-slate-700 bg-slate-100 rounded hover:bg-slate-200 inline-flex items-center gap-1"
+                                  >
+                                    <Eye className="w-3 h-3" />
+                                    <span>Просмотр</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      try {
+                                        await downloadProtectedFile(
+                                          `/api/v1/documents/${doc.id}/download`,
+                                          doc.originalFilename || `${doc.id}.bin`
+                                        );
+                                      } catch (err) {
+                                        notify(
+                                          'error',
+                                          err instanceof Error
+                                            ? err.message
+                                            : 'Ошибка скачивания файла'
+                                        );
+                                      }
+                                    }}
+                                    className="px-2 py-0.5 text-[11px] font-medium text-slate-700 border border-slate-300 rounded hover:bg-slate-100 inline-flex items-center gap-1"
+                                  >
+                                    <Download className="w-3 h-3" />
+                                    <span>Скачать</span>
+                                  </button>
+                                  {isOwner &&
+                                    (confirmDeleteContractDocId === doc.id ? (
+                                      <span className="inline-flex items-center gap-1 bg-red-50 border border-red-200 px-2 py-0.5 rounded">
+                                        <button
+                                          type="button"
+                                          onClick={async () => {
+                                            try {
+                                              await apiFetch(`/api/v1/documents/${doc.id}`, {
+                                                method: 'DELETE',
+                                              });
+                                              setConfirmDeleteContractDocId(null);
+                                              await loadFullState();
+                                              notify(
+                                                'success',
+                                                `Прикреплённое фото/файл «${doc.originalFilename}» удалено.`
+                                              );
+                                            } catch (err) {
+                                              notify(
+                                                'error',
+                                                err instanceof Error
+                                                  ? err.message
+                                                  : 'Ошибка удаления файла'
+                                              );
+                                            }
+                                          }}
+                                          className="text-[11px] font-semibold text-red-700 hover:underline"
+                                        >
+                                          Да, удалить
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setConfirmDeleteContractDocId(null)}
+                                          className="text-[11px] text-slate-600 hover:text-slate-900 ml-1"
+                                        >
+                                          Отмена
+                                        </button>
+                                      </span>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => setConfirmDeleteContractDocId(doc.id)}
+                                        className="px-2 py-0.5 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded hover:bg-red-100 inline-flex items-center gap-1"
+                                        title="Удалить прикреплённое фото / файл"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                        <span>Удалить</span>
+                                      </button>
+                                    ))}
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                        </div>
+                        )}
 
                         {/* Contract Financial Breakdown */}
                         <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs font-mono bg-slate-50 p-3.5 rounded-lg border border-slate-200">
@@ -1686,7 +2058,8 @@ export default function App() {
                           </table>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -2770,6 +3143,14 @@ export default function App() {
                               <div className="flex items-center justify-end gap-1.5">
                                 <button
                                   type="button"
+                                  onClick={() => setPreviewingDocument(d)}
+                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  <span>Просмотр</span>
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={async () => {
                                     try {
                                       await downloadProtectedFile(
@@ -3249,6 +3630,15 @@ export default function App() {
                       Изменение сроков, процентов наценки, первоначального взноса и правил округления применяется к новым договорам. Уже оформленные договоры сохраняют свои зафиксированные условия.
                     </p>
                   </div>
+
+                  {statusRules && (
+                    <StatusRulesConfigCard
+                      statusRules={statusRules}
+                      isOwner={isOwner}
+                      apiFetch={apiFetch}
+                      onRefresh={loadFullState}
+                    />
+                  )}
 
                   {/* Existing Installment Plans */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -3920,6 +4310,62 @@ export default function App() {
             await loadFullState();
             notify('success', 'Поступление зарегистрировано в кассе и реестре платежей.');
           }}
+        />
+      )}
+
+      {viewingClientCardId &&
+        (() => {
+          const targetClient = clients.find((c) => c.id === viewingClientCardId);
+          if (!targetClient) return null;
+          return (
+            <ClientDetailsModal
+              client={targetClient}
+              contracts={contracts}
+              documents={documents}
+              onClose={() => setViewingClientCardId(null)}
+              onRefresh={loadFullState}
+              apiFetch={apiFetch}
+              fetchProtectedBlob={fetchProtectedBlob}
+              downloadProtectedFile={downloadProtectedFile}
+              onOpenWhatsAppForContract={(contractId) => {
+                setWhatsappTargetContractId(contractId);
+                setActiveSection('whatsapp_contracts');
+              }}
+              onEditClient={(cl) => {
+                setViewingClientCardId(null);
+                setActiveSection('clients');
+                setEditingClient({
+                  id: cl.id,
+                  fullName: cl.fullName,
+                  phone: cl.phone,
+                  secondaryPhone: cl.secondaryPhone || '',
+                  documentRef: cl.documentRef || '',
+                  address: cl.address || '',
+                  notes: cl.notes || '',
+                  status: cl.status,
+                });
+              }}
+            />
+          );
+        })()}
+
+      {previewingDocument && (
+        <DocumentPreviewModal
+          doc={previewingDocument}
+          onClose={() => setPreviewingDocument(null)}
+          fetchProtectedBlob={fetchProtectedBlob}
+          downloadProtectedFile={downloadProtectedFile}
+          onDeleteDocument={
+            isOwner
+              ? async (doc) => {
+                  await apiFetch(`/api/v1/documents/${doc.id}`, {
+                    method: 'DELETE',
+                  });
+                  await loadFullState();
+                  notify('success', `Файл «${doc.originalFilename}» удалён.`);
+                }
+              : undefined
+          }
         />
       )}
 

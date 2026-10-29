@@ -39,7 +39,49 @@ import {
   removePrivateDocumentFile,
   writePrivateDocumentBuffer,
 } from '../services/storage';
-import { RoundingRule, ScheduleType, UserRole, UserStatus } from '../../shared/types';
+import {
+  RoundingRule,
+  ScheduleType,
+  StatusRulesConfigDTO,
+  UserRole,
+  UserStatus,
+} from '../../shared/types';
+import {
+  DEFAULT_STATUS_RULES,
+  buildContractWhatsAppMessage,
+  buildWhatsAppClickToChatUrl,
+  evaluateClientOverallStatus,
+  evaluateContractStatus,
+  formatTelHref,
+  formatWhatsAppPhoneDigits,
+} from '../../shared/clientStatus';
+
+export function getStatusRulesConfig(db: DatabaseSync): StatusRulesConfigDTO {
+  try {
+    const row = db
+      .prepare("SELECT * FROM status_rules_config WHERE id = 'default'")
+      .get() as Record<string, unknown> | undefined;
+    if (!row) return { ...DEFAULT_STATUS_RULES };
+    return {
+      gracePeriodDays: Number(row.grace_period_days ?? DEFAULT_STATUS_RULES.gracePeriodDays),
+      complexMinOverdueDays: Number(
+        row.complex_min_overdue_days ?? DEFAULT_STATUS_RULES.complexMinOverdueDays
+      ),
+      complexConsecutiveMissedCount: Number(
+        row.complex_consecutive_missed_count ?? DEFAULT_STATUS_RULES.complexConsecutiveMissedCount
+      ),
+      complexMinOverdueKopecks: Number(
+        row.complex_min_overdue_kopecks ?? DEFAULT_STATUS_RULES.complexMinOverdueKopecks
+      ),
+      reliableMaxPastLateCount: Number(
+        row.reliable_max_past_late_count ?? DEFAULT_STATUS_RULES.reliableMaxPastLateCount
+      ),
+      updatedAt: String(row.updated_at || DEFAULT_STATUS_RULES.updatedAt),
+    };
+  } catch {
+    return { ...DEFAULT_STATUS_RULES };
+  }
+}
 
 export interface AuthenticatedRequest extends Request {
   user?: {
@@ -834,6 +876,27 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       createdAt: String(s.created_at),
     }));
 
+    const statusRules = getStatusRulesConfig(db);
+
+    // Map of latest payment event_date per schedule_item_id for accurate historical late-payment detection
+    const paidDatesRaw = db
+      .prepare(
+        `
+        SELECT pa.schedule_item_id, MAX(p.event_date) as last_paid_event_date
+        FROM payment_allocations pa
+        JOIN payments p ON p.id = pa.payment_id
+        WHERE pa.status = 'active' AND p.status = 'confirmed'
+        GROUP BY pa.schedule_item_id
+      `
+      )
+      .all() as Array<{ schedule_item_id: string; last_paid_event_date: string }>;
+    const lastPaidDateByItem = new Map<string, string>();
+    for (const r of paidDatesRaw) {
+      if (r.schedule_item_id && r.last_paid_event_date) {
+        lastPaidDateByItem.set(String(r.schedule_item_id), String(r.last_paid_event_date));
+      }
+    }
+
     // Schedule items & versions
     const allScheduleItemsRaw = db
       .prepare('SELECT * FROM schedule_items ORDER BY schedule_version DESC, installment_number ASC')
@@ -868,13 +931,19 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const contractItems = allScheduleItemsRaw
         .filter((i) => String(i.contract_id) === cId)
         .map((i) => {
+          const itemId = String(i.id);
           const planned = Number(i.planned_kopecks);
           const paid = Number(i.paid_kopecks);
           const remaining = Math.max(0, planned - paid);
           const dueDate = String(i.due_date);
           const daysOverdue = remaining > 0 ? calculateDaysOverdue(dueDate, todayIso) : 0;
           let status = String(i.status);
-          if (Number(i.schedule_version) === currentVer && remaining > 0 && dueDate < todayIso) {
+          if (
+            Number(i.schedule_version) === currentVer &&
+            remaining > 0 &&
+            daysOverdue > statusRules.gracePeriodDays &&
+            dueDate < todayIso
+          ) {
             status = 'overdue';
           } else if (remaining === 0 && status !== 'superseded' && status !== 'waived') {
             status = 'paid';
@@ -882,7 +951,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             status = 'partial';
           }
           return {
-            id: String(i.id),
+            id: itemId,
             contractId: cId,
             scheduleVersion: Number(i.schedule_version),
             installmentNumber: Number(i.installment_number),
@@ -895,6 +964,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             daysOverdue,
             promisedDate: i.promised_date ? String(i.promised_date) : null,
             postponeReason: String(i.postpone_reason || ''),
+            lastPaidEventDate: lastPaidDateByItem.get(itemId) || null,
           };
         });
 
@@ -907,9 +977,22 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const overdueKopecks =
         c.status === 'active' || c.status === 'restructured'
           ? activeSchedule
-              .filter((i) => i.daysOverdue > 0)
+              .filter((i) => i.daysOverdue > statusRules.gracePeriodDays)
               .reduce((acc, i) => acc + i.remainingKopecks, 0)
           : 0;
+
+      const contractEval = evaluateContractStatus(
+        {
+          id: cId,
+          contractNumber: String(c.contract_number),
+          status: String(c.status),
+          currentScheduleVersion: currentVer,
+          remainingDebtKopecks,
+          overdueKopecks,
+          schedule: activeSchedule,
+        },
+        statusRules
+      );
 
       const scheduleHistory = allScheduleVersionsRaw
         .filter((sv) => String(sv.contract_id) === cId)
@@ -960,20 +1043,41 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         totalCollectedKopecks: downPayment + totalPaidOnScheduleKopecks,
         remainingDebtKopecks,
         overdueKopecks,
+        computedStatus: contractEval.status,
+        computedStatusLabel: contractEval.label,
+        computedStatusReason: contractEval.reason,
+        contractStatus: contractEval.status,
+        contractStatusLabel: contractEval.label,
+        contractStatusReason: contractEval.reason,
         schedule: activeSchedule,
         scheduleHistory,
       };
     });
 
-    // Clients with aggregated debt
+    // Clients with aggregated debt & automatic status calculation
     const clientsRaw = db
       .prepare('SELECT * FROM clients ORDER BY created_at DESC')
       .all() as Array<Record<string, unknown>>;
     const clients = clientsRaw.map((cl) => {
       const clientId = String(cl.id);
-      const clientContracts = contracts.filter(
-        (c) => c.clientId === clientId && (c.status === 'active' || c.status === 'restructured')
+      const allClientContracts = contracts.filter((c) => c.clientId === clientId);
+      const activeClientContracts = allClientContracts.filter(
+        (c) => c.status === 'active' || c.status === 'restructured'
       );
+      const overallEval = evaluateClientOverallStatus(
+        allClientContracts.map((c) => ({
+          id: c.id,
+          contractNumber: c.contractNumber,
+          status: c.status,
+          currentScheduleVersion: c.currentScheduleVersion,
+          remainingDebtKopecks: c.remainingDebtKopecks,
+          overdueKopecks: c.overdueKopecks,
+          schedule: c.schedule as any,
+        })),
+        statusRules
+      );
+      const totalDebtKopecks = activeClientContracts.reduce((sum, c) => sum + c.remainingDebtKopecks, 0);
+      const overdueDebtKopecks = activeClientContracts.reduce((sum, c) => sum + c.overdueKopecks, 0);
       return {
         id: clientId,
         fullName: String(cl.full_name),
@@ -984,9 +1088,19 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         notes: String(cl.notes || ''),
         status: String(cl.status) as 'active' | 'archived',
         createdAt: String(cl.created_at),
-        activeContractsCount: clientContracts.length,
-        totalDebtKopecks: clientContracts.reduce((sum, c) => sum + c.remainingDebtKopecks, 0),
-        overdueDebtKopecks: clientContracts.reduce((sum, c) => sum + c.overdueKopecks, 0),
+        activeContractsCount: activeClientContracts.length,
+        completedContractsCount: overallEval.completedContractsCount,
+        totalDebtKopecks,
+        overdueDebtKopecks,
+        totalRemainingDebtKopecks: totalDebtKopecks,
+        totalOverdueKopecks: overdueDebtKopecks,
+        nextPaymentDate: overallEval.nextPaymentDate,
+        nextPaymentAmountKopecks: overallEval.nextPaymentAmountKopecks,
+        maxDaysOverdue: overallEval.maxEffectiveDaysOverdue,
+        consecutiveOverdueCount: overallEval.consecutiveOverdueCount,
+        paymentStatus: overallEval.status,
+        paymentStatusLabel: overallEval.label,
+        paymentStatusReason: overallEval.reason,
       };
     });
 
@@ -1214,8 +1328,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     const docsRaw = db
       .prepare(
         `
-        SELECT d.id, d.entity_type, d.entity_id, d.doc_category, d.title,
-               d.original_filename, d.mime_type, d.size_bytes, d.sha256_hash, d.created_at,
+        SELECT d.id, d.entity_type, d.entity_id, d.client_id, d.contract_id,
+               d.doc_category, d.title, d.original_filename, d.mime_type,
+               d.size_bytes, d.sha256_hash, d.previous_document_id, d.replaced_by_id,
+               d.is_archived, d.created_at,
                COALESCE(u.email, 'system') as created_by_email
         FROM documents d
         LEFT JOIN users u ON u.id = d.created_by
@@ -1227,12 +1343,17 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       id: String(d.id),
       entityType: String(d.entity_type) as any,
       entityId: String(d.entity_id),
+      clientId: d.client_id ? String(d.client_id) : null,
+      contractId: d.contract_id ? String(d.contract_id) : null,
       docCategory: String(d.doc_category) as any,
       title: String(d.title),
       originalFilename: String(d.original_filename),
       mimeType: String(d.mime_type),
       sizeBytes: Number(d.size_bytes),
       sha256Hash: String(d.sha256_hash),
+      previousDocumentId: d.previous_document_id ? String(d.previous_document_id) : null,
+      replacedById: d.replaced_by_id ? String(d.replaced_by_id) : null,
+      isArchived: Boolean(d.is_archived),
       createdByEmail: String(d.created_by_email),
       createdAt: String(d.created_at),
     }));
@@ -1306,6 +1427,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
     res.json({
       plans,
+      statusRules,
       settingsHistory,
       clients,
       suppliers,
@@ -1322,6 +1444,109 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       reconciliation,
     });
   });
+
+  // Configurable Client Status Rules (Owner configurable, readable by authenticated staff)
+  router.get('/settings/status-rules', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+    res.json(getStatusRulesConfig(db));
+  });
+
+  router.put(
+    '/settings/status-rules',
+    requireAuth,
+    requireRoles(['owner']),
+    (req: AuthenticatedRequest, res: Response) => {
+      const {
+        gracePeriodDays,
+        complexMinOverdueDays,
+        complexConsecutiveMissedCount,
+        complexMinOverdueKopecks,
+        reliableMaxPastLateCount,
+        reason,
+      } = req.body as {
+        gracePeriodDays?: number;
+        complexMinOverdueDays?: number;
+        complexConsecutiveMissedCount?: number;
+        complexMinOverdueKopecks?: number;
+        reliableMaxPastLateCount?: number;
+        reason?: string;
+      };
+
+      const oldRules = getStatusRulesConfig(db);
+      const nextGrace = Math.max(0, Math.min(60, Math.trunc(Number(gracePeriodDays ?? oldRules.gracePeriodDays))));
+      const nextComplexDays = Math.max(
+        1,
+        Math.min(365, Math.trunc(Number(complexMinOverdueDays ?? oldRules.complexMinOverdueDays)))
+      );
+      const nextComplexMissed = Math.max(
+        1,
+        Math.min(24, Math.trunc(Number(complexConsecutiveMissedCount ?? oldRules.complexConsecutiveMissedCount)))
+      );
+      const nextComplexKopecks = Math.max(
+        100,
+        Math.trunc(Number(complexMinOverdueKopecks ?? oldRules.complexMinOverdueKopecks))
+      );
+      const nextReliablePast = Math.max(
+        1,
+        Math.min(24, Math.trunc(Number(reliableMaxPastLateCount ?? oldRules.reliableMaxPastLateCount)))
+      );
+      const now = new Date().toISOString();
+
+      withTransaction(db, () => {
+        db.prepare(`
+          INSERT INTO status_rules_config (
+            id, grace_period_days, complex_min_overdue_days,
+            complex_consecutive_missed_count, complex_min_overdue_kopecks,
+            reliable_max_past_late_count, updated_by, updated_at
+          ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            grace_period_days = excluded.grace_period_days,
+            complex_min_overdue_days = excluded.complex_min_overdue_days,
+            complex_consecutive_missed_count = excluded.complex_consecutive_missed_count,
+            complex_min_overdue_kopecks = excluded.complex_min_overdue_kopecks,
+            reliable_max_past_late_count = excluded.reliable_max_past_late_count,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+        `).run(
+          nextGrace,
+          nextComplexDays,
+          nextComplexMissed,
+          nextComplexKopecks,
+          nextReliablePast,
+          req.user!.id,
+          now
+        );
+
+        db.prepare(`
+          INSERT INTO settings_history (id, setting_type, entity_id, old_value_json, new_value_json, reason, changed_by, created_at)
+          VALUES (?, 'status_rules_updated', 'default', ?, ?, ?, ?, ?)
+        `).run(
+          crypto.randomUUID(),
+          JSON.stringify(oldRules),
+          JSON.stringify({
+            gracePeriodDays: nextGrace,
+            complexMinOverdueDays: nextComplexDays,
+            complexConsecutiveMissedCount: nextComplexMissed,
+            complexMinOverdueKopecks: nextComplexKopecks,
+            reliableMaxPastLateCount: nextReliablePast,
+          }),
+          (reason || 'Обновление критериев автоматического расчёта статусов клиентов').trim(),
+          req.user!.id,
+          now
+        );
+
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'STATUS_RULES_UPDATED',
+          entityType: 'settings',
+          entityId: 'status_rules_config',
+          summary: `Обновлены пороги статусов клиентов (льготный период: ${nextGrace} дн., порог «Сложный»: от ${nextComplexDays} дн. / ${nextComplexMissed} пропусков / ${formatRubles(nextComplexKopecks)}).`,
+        });
+      });
+
+      res.json(getStatusRulesConfig(db));
+    }
+  );
 
   // ==================== 3. INSTALLMENT SETTINGS (VERSIONED) ====================
 
@@ -1740,6 +1965,74 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     }
   );
 
+  router.get(
+    '/clients/check-duplicates',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      const rawPhone = String(req.query.phone || '').trim();
+      const rawFullName = String(req.query.fullName || '').trim();
+      const normalizedPhone = rawPhone ? normalizeRussianPhone(rawPhone) : null;
+
+      const allClients = db
+        .prepare('SELECT id, full_name, phone, secondary_phone, document_ref, address, status FROM clients ORDER BY full_name ASC')
+        .all() as Array<{
+          id: string;
+          full_name: string;
+          phone: string;
+          secondary_phone: string;
+          document_ref: string;
+          address: string;
+          status: string;
+        }>;
+
+      const exactPhoneMatches = normalizedPhone
+        ? allClients.filter(
+            (c) =>
+              normalizeRussianPhone(c.phone) === normalizedPhone ||
+              (c.secondary_phone && normalizeRussianPhone(c.secondary_phone) === normalizedPhone)
+          )
+        : [];
+
+      const nameTokens = rawFullName
+        .toLowerCase()
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 2);
+
+      const similarNameMatches =
+        nameTokens.length > 0
+          ? allClients.filter((c) => {
+              const lowerName = c.full_name.toLowerCase();
+              if (lowerName === rawFullName.toLowerCase()) return true;
+              const matchedTokens = nameTokens.filter((tok) => lowerName.includes(tok));
+              return matchedTokens.length >= Math.min(2, nameTokens.length);
+            })
+          : [];
+
+      res.json({
+        normalizedPhone,
+        exactPhoneMatches: exactPhoneMatches.map((c) => ({
+          id: c.id,
+          fullName: c.full_name,
+          phone: c.phone,
+          secondaryPhone: c.secondary_phone,
+          documentRef: c.document_ref,
+          address: c.address,
+          status: c.status,
+        })),
+        similarNameMatches: similarNameMatches.map((c) => ({
+          id: c.id,
+          fullName: c.full_name,
+          phone: c.phone,
+          secondaryPhone: c.secondary_phone,
+          documentRef: c.document_ref,
+          address: c.address,
+          status: c.status,
+        })),
+      });
+    }
+  );
+
   router.post(
     '/suppliers',
     requireAuth,
@@ -2036,7 +2329,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     (req: AuthenticatedRequest, res: Response) => {
       try {
         const {
+          idempotencyKey,
           clientId,
+          newClient,
           purchaseId,
           planId,
           itemTitle,
@@ -2056,8 +2351,19 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           collectDownPaymentNow,
           confirmedCalculation,
           notes,
+          attachments,
         } = req.body as {
+          idempotencyKey?: string;
           clientId?: string;
+          newClient?: {
+            fullName?: string;
+            phone?: string;
+            secondaryPhone?: string;
+            documentRef?: string;
+            address?: string;
+            notes?: string;
+            allowSimilarName?: boolean;
+          };
           purchaseId?: string | null;
           planId?: string | null;
           itemTitle?: string;
@@ -2077,7 +2383,31 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           collectDownPaymentNow?: boolean;
           confirmedCalculation?: boolean;
           notes?: string;
+          attachments?: Array<{
+            title?: string;
+            originalFilename: string;
+            mimeType?: string;
+            contentBase64: string;
+            docCategory?: string;
+          }>;
         };
+
+        // 0. Idempotency check against accidental double submission
+        const trimmedIdemKey = idempotencyKey ? String(idempotencyKey).trim() : '';
+        if (trimmedIdemKey) {
+          const existingContract = db
+            .prepare('SELECT id, contract_number, client_id FROM contracts WHERE idempotency_key = ?')
+            .get(trimmedIdemKey) as { id: string; contract_number: string; client_id: string } | undefined;
+          if (existingContract) {
+            res.status(200).json({
+              id: existingContract.id,
+              contractNumber: existingContract.contract_number,
+              clientId: existingContract.client_id,
+              idempotentReplay: true,
+            });
+            return;
+          }
+        }
 
         if (!confirmedCalculation) {
           res.status(400).json({
@@ -2086,9 +2416,153 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
-        if (!clientId || !itemTitle || !itemTitle.trim()) {
-          res.status(400).json({ error: 'Выберите клиента и укажите наименование товара.' });
+        if (!itemTitle || !itemTitle.trim()) {
+          res.status(400).json({ error: 'Укажите наименование товара.' });
           return;
+        }
+
+        // Validate client selection or inline newClient creation
+        let resolvedClientId = clientId ? String(clientId).trim() : '';
+        let createdNewClientData: {
+          id: string;
+          fullName: string;
+          phone: string;
+          secondaryPhone: string;
+          documentRef: string;
+          address: string;
+          notes: string;
+        } | null = null;
+
+        if (resolvedClientId) {
+          const existingClient = db
+            .prepare('SELECT id, full_name FROM clients WHERE id = ?')
+            .get(resolvedClientId) as { id: string; full_name: string } | undefined;
+          if (!existingClient) {
+            res.status(400).json({ error: 'Выбранный клиент не найден в базе данных.' });
+            return;
+          }
+        } else if (newClient) {
+          const rawName = (newClient.fullName || '').trim();
+          const rawPhone = (newClient.phone || '').trim();
+          if (!rawName || !rawPhone) {
+            res.status(400).json({
+              error: 'Для создания нового клиента укажите ФИО клиента и номер телефона.',
+            });
+            return;
+          }
+          const normalizedPhone = normalizeRussianPhone(rawPhone);
+          if (!normalizedPhone) {
+            res.status(400).json({
+              error: 'Укажите корректный российский номер телефона клиента (+7XXXXXXXXXX или 8XXXXXXXXXX).',
+            });
+            return;
+          }
+
+          // Check phone duplicate
+          const phoneDup = db
+            .prepare('SELECT id, full_name, phone, document_ref, address FROM clients WHERE phone = ? OR secondary_phone = ?')
+            .get(normalizedPhone, normalizedPhone) as
+            | { id: string; full_name: string; phone: string; document_ref: string; address: string }
+            | undefined;
+
+          if (phoneDup) {
+            res.status(409).json({
+              error: `Клиент с номером ${normalizedPhone} уже зарегистрирован («${phoneDup.full_name}»). Выберите существующего клиента, чтобы не создавать дубликат.`,
+              duplicateClient: {
+                id: phoneDup.id,
+                fullName: phoneDup.full_name,
+                phone: phoneDup.phone,
+                documentRef: phoneDup.document_ref,
+                address: phoneDup.address,
+              },
+            });
+            return;
+          }
+
+          // Check exact or close fullName duplicate unless allowSimilarName is explicitly passed
+          if (!newClient.allowSimilarName) {
+            const exactNameMatches = db
+              .prepare('SELECT id, full_name, phone, document_ref, address FROM clients WHERE LOWER(TRIM(full_name)) = LOWER(TRIM(?))')
+              .all(rawName) as Array<{
+                id: string;
+                full_name: string;
+                phone: string;
+                document_ref: string;
+                address: string;
+              }>;
+
+            if (exactNameMatches.length > 0) {
+              res.status(409).json({
+                error: `Найден клиент с таким же ФИО («${exactNameMatches[0].full_name}», тел. ${exactNameMatches[0].phone}). Выберите существующего клиента или подтвердите создание однофамильца.`,
+                similarClients: exactNameMatches.map((c) => ({
+                  id: c.id,
+                  fullName: c.full_name,
+                  phone: c.phone,
+                  documentRef: c.document_ref,
+                  address: c.address,
+                })),
+              });
+              return;
+            }
+          }
+
+          resolvedClientId = `cli_${crypto.randomUUID().slice(0, 8)}`;
+          const normalizedSecondary = newClient.secondaryPhone?.trim()
+            ? normalizeRussianPhone(newClient.secondaryPhone) || newClient.secondaryPhone.trim()
+            : '';
+
+          createdNewClientData = {
+            id: resolvedClientId,
+            fullName: rawName,
+            phone: normalizedPhone,
+            secondaryPhone: normalizedSecondary,
+            documentRef: (newClient.documentRef || '').trim(),
+            address: (newClient.address || '').trim(),
+            notes: (newClient.notes || '').trim(),
+          };
+        } else {
+          res.status(400).json({ error: 'Выберите существующего клиента или укажите ФИО и телефон нового клиента.' });
+          return;
+        }
+
+        // Validate optional attachments BEFORE opening DB transaction
+        const validatedAttachments: Array<{
+          id: string;
+          title: string;
+          originalFilename: string;
+          storedFilename: string;
+          detectedMime: string;
+          buffer: Buffer;
+          contentBase64: string;
+          docCategory: string;
+        }> = [];
+
+        if (Array.isArray(attachments) && attachments.length > 0) {
+          for (const att of attachments) {
+            if (!att.originalFilename || !att.contentBase64) {
+              res.status(400).json({ error: 'Прикреплённый файл договора повреждён или не содержит данных.' });
+              return;
+            }
+            const buffer = Buffer.from(att.contentBase64, 'base64');
+            const sigCheck = validateUploadedFileSignature(buffer, att.mimeType || '', att.originalFilename);
+            if (!sigCheck.valid || !sigCheck.detectedMime) {
+              res.status(400).json({
+                error: sigCheck.reason || `Файл «${att.originalFilename}» не прошёл проверку формата (разрешены JPEG, PNG, WebP, PDF).`,
+              });
+              return;
+            }
+            const ext = (att.originalFilename.split('.').pop() || 'bin').toLowerCase();
+            validatedAttachments.push({
+              id: `doc_${crypto.randomUUID().slice(0, 8)}`,
+              title: (att.title || `Договор (${att.originalFilename})`).trim(),
+              originalFilename: att.originalFilename.replace(/[^a-zA-Z0-9._\-\u0400-\u04FF ]/g, '_'),
+              storedFilename: `${crypto.randomUUID()}.${ext}`,
+              detectedMime: sigCheck.detectedMime,
+              buffer,
+              contentBase64: att.contentBase64,
+              docCategory: att.docCategory || 'contract_scan',
+            });
+          }
         }
 
         const calc = calculateContractAndSchedule({
@@ -2121,20 +2595,47 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const contractNumber = `ДГ-2026-${nextNum}`;
         const contractId = `cnt_${crypto.randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
+        const uploadedDocumentIds: string[] = [];
 
         withTransaction(db, () => {
+          if (createdNewClientData) {
+            db.prepare(`
+              INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            `).run(
+              createdNewClientData.id,
+              createdNewClientData.fullName,
+              createdNewClientData.phone,
+              createdNewClientData.secondaryPhone,
+              createdNewClientData.documentRef,
+              createdNewClientData.address,
+              createdNewClientData.notes,
+              now
+            );
+
+            recordAudit(db, {
+              actorUserId: req.user!.id,
+              actorEmail: req.user!.phone || req.user!.email,
+              action: 'CLIENT_CREATED_FROM_CONTRACT',
+              entityType: 'client',
+              entityId: createdNewClientData.id,
+              summary: `При оформлении договора ${contractNumber} создан новый клиент «${createdNewClientData.fullName}» (${createdNewClientData.phone}).`,
+            });
+          }
+
           db.prepare(`
             INSERT INTO contracts (
-              id, contract_number, client_id, purchase_id, plan_id, plan_version,
+              id, idempotency_key, contract_number, client_id, purchase_id, plan_id, plan_version,
               item_title, purchase_cost_kopecks, extra_cost_kopecks, total_cost_kopecks,
               markup_percent, sale_price_kopecks, down_payment_percent, down_payment_kopecks,
               financed_principal_kopecks, term_months, rounding_rule, schedule_type,
               start_date, current_schedule_version, status, notes, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?)
           `).run(
             contractId,
+            trimmedIdemKey || null,
             contractNumber,
-            clientId,
+            resolvedClientId,
             purchaseId || null,
             planId || null,
             planVersion,
@@ -2181,7 +2682,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
           if (purchaseId) {
             db.prepare(`UPDATE purchases SET handover_status = 'handed_over', client_id = ? WHERE id = ?`).run(
-              clientId,
+              resolvedClientId,
               purchaseId
             );
           }
@@ -2200,7 +2701,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             `).run(
               payId,
               `idem_dp_${contractId}`,
-              clientId,
+              resolvedClientId,
               contractId,
               dpAcc,
               dpMethod,
@@ -2236,22 +2737,194 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             );
           }
 
+          // Save any attached contract scans/photos atomically with the contract
+          for (const att of validatedAttachments) {
+            const { sha256 } = writePrivateDocumentBuffer(att.storedFilename, att.buffer);
+            db.prepare(`
+              INSERT INTO documents (
+                id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
+                stored_filename, mime_type, size_bytes, sha256_hash, content_base64, is_archived, created_by, created_at
+              ) VALUES (?, 'contract', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            `).run(
+              att.id,
+              contractId,
+              resolvedClientId,
+              contractId,
+              att.docCategory,
+              att.title,
+              att.originalFilename,
+              att.storedFilename,
+              att.detectedMime,
+              att.buffer.length,
+              sha256,
+              att.contentBase64,
+              req.user!.id,
+              now
+            );
+            uploadedDocumentIds.push(att.id);
+          }
+
           recordAudit(db, {
             actorUserId: req.user!.id,
             actorEmail: req.user!.email,
             action: 'CONTRACT_CREATED',
             entityType: 'contract',
             entityId: contractId,
-            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, взнос: ${formatRubles(calc.downPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес.).`,
+            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, взнос: ${formatRubles(calc.downPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес., файлов договора: ${uploadedDocumentIds.length}).`,
           });
         });
 
-        res.status(201).json({ id: contractId, contractNumber });
+        res.status(201).json({
+          id: contractId,
+          contractNumber,
+          clientId: resolvedClientId,
+          createdNewClient: Boolean(createdNewClientData),
+          documentIds: uploadedDocumentIds,
+        });
       } catch (err) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка оформления договора.' });
       }
     }
   );
+
+  // Prepare WhatsApp Click to Chat URL & verify client phone + attached contract documents
+  router.post(
+    '/contracts/:id/prepare-whatsapp',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const contractId = req.params.id;
+        const { customMessage, documentId } = (req.body || {}) as {
+          customMessage?: string;
+          documentId?: string;
+        };
+
+        const cRow = db
+          .prepare('SELECT * FROM contracts WHERE id = ?')
+          .get(contractId) as Record<string, unknown> | undefined;
+
+        if (!cRow) {
+          res.status(404).json({ error: 'Договор не найден.' });
+          return;
+        }
+
+        const clientRow = db
+          .prepare('SELECT id, full_name, phone, secondary_phone FROM clients WHERE id = ?')
+          .get(String(cRow.client_id)) as
+          | { id: string; full_name: string; phone: string; secondary_phone: string }
+          | undefined;
+
+        if (!clientRow) {
+          res.status(404).json({ error: 'Клиент по договору не найден.' });
+          return;
+        }
+
+        const normalizedPhone = normalizeRussianPhone(clientRow.phone);
+        if (!normalizedPhone) {
+          res.status(400).json({
+            error: `У клиента «${clientRow.full_name}» указан некорректный номер телефона (${clientRow.phone || 'пусто'}). Отредактируйте номер телефона перед отправкой в WhatsApp.`,
+          });
+          return;
+        }
+
+        const waDigits = normalizedPhone.replace(/^\+/, '');
+        const curVer = Number(cRow.current_schedule_version);
+        const items = db
+          .prepare('SELECT planned_kopecks, paid_kopecks FROM schedule_items WHERE contract_id = ? AND schedule_version = ?')
+          .all(contractId, curVer) as Array<{ planned_kopecks: number; paid_kopecks: number }>;
+
+        const remainingDebtKopecks = items.reduce(
+          (sum, it) => sum + Math.max(0, Number(it.planned_kopecks) - Number(it.paid_kopecks)),
+          0
+        );
+
+        const contractDocs = db
+          .prepare(
+            `SELECT id, title, original_filename, mime_type, size_bytes, created_at
+             FROM documents
+             WHERE (contract_id = ? OR (entity_type = 'contract' AND entity_id = ?))
+               AND COALESCE(is_archived, 0) = 0
+             ORDER BY created_at DESC`
+          )
+          .all(contractId, contractId) as Array<{
+            id: string;
+            title: string;
+            original_filename: string;
+            mime_type: string;
+            size_bytes: number;
+            created_at: string;
+          }>;
+
+        const selectedDoc = documentId
+          ? contractDocs.find((d) => d.id === documentId) || contractDocs[0] || null
+          : contractDocs[0] || null;
+
+        const defaultMessage = [
+          `Здравствуйте, ${clientRow.full_name}!`,
+          `Направляем информацию по вашему договору рассрочки № ${String(cRow.contract_number)} от ${String(cRow.start_date)}.`,
+          `Товар: ${String(cRow.item_title)}`,
+          `Цена продажи: ${formatRubles(Number(cRow.sale_price_kopecks))}`,
+          `Первоначальный взнос: ${formatRubles(Number(cRow.down_payment_kopecks))}`,
+          `Остаток к оплате: ${formatRubles(remainingDebtKopecks)}`,
+          selectedDoc
+            ? `Файл договора («${selectedDoc.original_filename}») прикреплён во вложении к сообщению.`
+            : `Пожалуйста, ознакомьтесь с условиями договора.`,
+        ].join('\n');
+
+        const finalMessage = (customMessage && customMessage.trim()) ? customMessage.trim() : defaultMessage;
+        const whatsappUrl = `https://wa.me/${waDigits}?text=${encodeURIComponent(finalMessage)}`;
+        const telHref = `tel:${normalizedPhone}`;
+
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'CONTRACT_WHATSAPP_PREPARED',
+          entityType: 'contract',
+          entityId: contractId,
+          summary: `Открыт чат WhatsApp для отправки договора ${String(cRow.contract_number)} клиенту «${clientRow.full_name}» (${normalizedPhone}). Статус: Чат открыт. Прикрепите договор и отправьте сообщение.`,
+        });
+
+        res.json({
+          contractId,
+          contractNumber: String(cRow.contract_number),
+          clientId: clientRow.id,
+          clientName: clientRow.full_name,
+          normalizedPhone,
+          whatsappUrl,
+          telHref,
+          messageText: finalMessage,
+          statusNotice: 'Чат открыт. Прикрепите договор и отправьте сообщение',
+          hasAttachedDocument: contractDocs.length > 0,
+          selectedDocument: selectedDoc
+            ? {
+                id: selectedDoc.id,
+                title: selectedDoc.title,
+                originalFilename: selectedDoc.original_filename,
+                mimeType: selectedDoc.mime_type,
+                sizeBytes: selectedDoc.size_bytes,
+                downloadUrl: `/api/v1/documents/${selectedDoc.id}/download`,
+                previewUrl: `/api/v1/documents/${selectedDoc.id}/preview`,
+              }
+            : null,
+          documents: contractDocs.map((d) => ({
+            id: d.id,
+            title: d.title,
+            originalFilename: d.original_filename,
+            mimeType: d.mime_type,
+            sizeBytes: d.size_bytes,
+            createdAt: d.created_at,
+            downloadUrl: `/api/v1/documents/${d.id}/download`,
+            previewUrl: `/api/v1/documents/${d.id}/preview`,
+          })),
+        });
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Ошибка подготовки отправки в WhatsApp.',
+        });
+      }
+    }
+  );
+
 
   // Restructure contract schedule (creates new version while preserving historical schedule version!)
   router.post(
@@ -3293,16 +3966,27 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     requireAuth,
     requireRoles(['owner', 'staff']),
     (req: AuthenticatedRequest, res: Response) => {
-      const { entityType, entityId, docCategory, title, originalFilename, mimeType, contentBase64 } =
-        req.body as {
-          entityType?: 'client' | 'contract' | 'purchase' | 'payment' | 'return';
-          entityId?: string;
-          docCategory?: string;
-          title?: string;
-          originalFilename?: string;
-          mimeType?: string;
-          contentBase64?: string;
-        };
+      const {
+        entityType,
+        entityId,
+        clientId: explicitClientId,
+        contractId: explicitContractId,
+        docCategory,
+        title,
+        originalFilename,
+        mimeType,
+        contentBase64,
+      } = req.body as {
+        entityType?: 'client' | 'contract' | 'purchase' | 'payment' | 'return';
+        entityId?: string;
+        clientId?: string;
+        contractId?: string;
+        docCategory?: string;
+        title?: string;
+        originalFilename?: string;
+        mimeType?: string;
+        contentBase64?: string;
+      };
 
       if (!entityType || !entityId || !title || !originalFilename || !contentBase64) {
         res.status(400).json({ error: 'Заполните обязательные реквизиты документа и выберите файл.' });
@@ -3324,6 +4008,21 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         return;
       }
 
+      let resolvedClientId: string | null = explicitClientId || null;
+      let resolvedContractId: string | null = explicitContractId || null;
+
+      if (entityType === 'contract') {
+        resolvedContractId = entityId;
+        if (!resolvedClientId) {
+          const cRow = db
+            .prepare('SELECT client_id FROM contracts WHERE id = ?')
+            .get(entityId) as { client_id: string } | undefined;
+          if (cRow) resolvedClientId = cRow.client_id;
+        }
+      } else if (entityType === 'client') {
+        resolvedClientId = entityId;
+      }
+
       const id = `doc_${crypto.randomUUID().slice(0, 8)}`;
       const storedFilename = `${crypto.randomUUID()}.${(originalFilename.split('.').pop() || 'bin').toLowerCase()}`;
       const { sha256 } = writePrivateDocumentBuffer(storedFilename, buffer);
@@ -3331,13 +4030,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
       db.prepare(`
         INSERT INTO documents (
-          id, entity_type, entity_id, doc_category, title, original_filename,
-          stored_filename, mime_type, size_bytes, sha256_hash, content_base64, created_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
+          stored_filename, mime_type, size_bytes, sha256_hash, content_base64, is_archived, created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `).run(
         id,
         entityType,
         entityId,
+        resolvedClientId,
+        resolvedContractId,
         docCategory || 'contract_scan',
         title.trim(),
         originalFilename.replace(/[^a-zA-Z0-9._\-\u0400-\u04FF ]/g, '_'),
@@ -3359,7 +4060,169 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         summary: `Загружен проверенный документ «${title.trim()}» (${sigCheck.detectedMime}, ${buffer.length} байт, SHA-256: ${sha256.slice(0, 12)}...).`,
       });
 
-      res.status(201).json({ id, sha256 });
+      res.status(201).json({
+        id,
+        sha256,
+        clientId: resolvedClientId,
+        contractId: resolvedContractId,
+        mimeType: sigCheck.detectedMime,
+        sizeBytes: buffer.length,
+        createdAt: now,
+      });
+    }
+  );
+
+  // Safe document replacement (preserves old document in archive instead of deleting it)
+  router.post(
+    '/documents/:id/replace',
+    requireAuth,
+    requireRoles(['owner', 'staff']),
+    (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const oldDocId = req.params.id;
+        const { title, originalFilename, mimeType, contentBase64, docCategory } = req.body as {
+          title?: string;
+          originalFilename?: string;
+          mimeType?: string;
+          contentBase64?: string;
+          docCategory?: string;
+        };
+
+        if (!originalFilename || !contentBase64) {
+          res.status(400).json({ error: 'Выберите новый файл для замены документа.' });
+          return;
+        }
+
+        const oldDoc = db
+          .prepare('SELECT * FROM documents WHERE id = ?')
+          .get(oldDocId) as Record<string, unknown> | undefined;
+
+        if (!oldDoc) {
+          res.status(404).json({ error: 'Заменяемый документ не найден.' });
+          return;
+        }
+
+        const buffer = Buffer.from(contentBase64, 'base64');
+        const sigCheck = validateUploadedFileSignature(buffer, mimeType || '', originalFilename);
+        if (!sigCheck.valid || !sigCheck.detectedMime) {
+          res.status(400).json({ error: sigCheck.reason || 'Недопустимый формат файла.' });
+          return;
+        }
+
+        const newId = `doc_${crypto.randomUUID().slice(0, 8)}`;
+        const storedFilename = `${crypto.randomUUID()}.${(originalFilename.split('.').pop() || 'bin').toLowerCase()}`;
+        const { sha256 } = writePrivateDocumentBuffer(storedFilename, buffer);
+        const now = new Date().toISOString();
+        const nextTitle = (title || String(oldDoc.title)).trim();
+
+        withTransaction(db, () => {
+          db.prepare(`
+            INSERT INTO documents (
+              id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
+              stored_filename, mime_type, size_bytes, sha256_hash, content_base64,
+              previous_document_id, replaced_by_id, is_archived, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
+          `).run(
+            newId,
+            String(oldDoc.entity_type),
+            String(oldDoc.entity_id),
+            oldDoc.client_id ? String(oldDoc.client_id) : null,
+            oldDoc.contract_id ? String(oldDoc.contract_id) : null,
+            docCategory || String(oldDoc.doc_category || 'contract_scan'),
+            nextTitle,
+            originalFilename.replace(/[^a-zA-Z0-9._\-\u0400-\u04FF ]/g, '_'),
+            storedFilename,
+            sigCheck.detectedMime,
+            buffer.length,
+            sha256,
+            contentBase64,
+            oldDocId,
+            req.user!.id,
+            now
+          );
+
+          db.prepare(`
+            UPDATE documents
+            SET replaced_by_id = ?, is_archived = 1
+            WHERE id = ?
+          `).run(newId, oldDocId);
+
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'DOCUMENT_REPLACED',
+            entityType: 'document',
+            entityId: newId,
+            summary: `Заменён документ «${String(oldDoc.title)}» (${oldDocId} переведён в архив без удаления) на новый файл «${originalFilename}» (${newId}).`,
+          });
+        });
+
+        res.status(201).json({
+          id: newId,
+          previousDocumentId: oldDocId,
+          sha256,
+          mimeType: sigCheck.detectedMime,
+          sizeBytes: buffer.length,
+          createdAt: now,
+        });
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Ошибка замены документа.',
+        });
+      }
+    }
+  );
+
+  // Private authenticated inline preview for images (JPEG/PNG/WebP) and PDF
+  router.get(
+    '/documents/:id/preview',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const docId = req.params.id;
+        const row = db
+          .prepare(
+            'SELECT id, title, original_filename, stored_filename, mime_type, size_bytes, sha256_hash, content_base64 FROM documents WHERE id = ?'
+          )
+          .get(docId) as
+          | {
+              id: string;
+              title: string;
+              original_filename: string;
+              stored_filename: string;
+              mime_type: string;
+              size_bytes: number;
+              sha256_hash: string;
+              content_base64: string;
+            }
+          | undefined;
+
+        if (!row) {
+          res.status(404).json({ error: 'Документ не найден.' });
+          return;
+        }
+
+        const buffer = readPrivateDocumentBuffer(
+          row.stored_filename,
+          row.content_base64,
+          row.sha256_hash
+        );
+
+        const safeName = row.original_filename.replace(/["\\\r\n]/g, '_');
+        res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+        res.setHeader('Content-Length', String(buffer.length));
+        res.setHeader(
+          'Content-Disposition',
+          `inline; filename="${encodeURIComponent(safeName)}"`
+        );
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Cache-Control', 'private, no-store');
+        res.send(buffer);
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Ошибка предпросмотра защищённого файла.',
+        });
+      }
     }
   );
 

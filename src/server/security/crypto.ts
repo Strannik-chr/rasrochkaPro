@@ -248,12 +248,12 @@ export function validateUploadedFileSignature(
   }
 
   const ext = (originalFilename.split('.').pop() || '').toLowerCase();
-  const allowedExts = new Set(['pdf', 'png', 'jpg', 'jpeg', 'txt', 'csv']);
+  const allowedExts = new Set(['pdf', 'png', 'jpg', 'jpeg', 'webp', 'txt', 'csv']);
   if (!allowedExts.has(ext)) {
     return {
       valid: false,
       detectedMime: '',
-      reason: `Недопустимое расширение файла (.${ext}). Разрешены только PDF, PNG, JPG, JPEG, TXT, CSV.`,
+      reason: `Недопустимое расширение файла (.${ext}). Разрешены только PDF, PNG, JPG, JPEG, WEBP, TXT, CSV.`,
     };
   }
 
@@ -273,6 +273,20 @@ export function validateUploadedFileSignature(
   if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
     return { valid: true, detectedMime: 'image/jpeg' };
   }
+  // WebP: RIFF (52 49 46 46) at 0..3 and WEBP (57 45 42 50) at 8..11
+  if (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer[8] === 0x57 &&
+    buffer[9] === 0x45 &&
+    buffer[10] === 0x42 &&
+    buffer[11] === 0x50
+  ) {
+    return { valid: true, detectedMime: 'image/webp' };
+  }
 
   if ((ext === 'txt' || ext === 'csv') && (declaredMime.startsWith('text/') || declaredMime === 'application/csv')) {
     // Reject HTML or script tags masquerading as text
@@ -286,6 +300,6 @@ export function validateUploadedFileSignature(
   return {
     valid: false,
     detectedMime: '',
-    reason: 'Сигнатура содержимого файла (magic bytes) не соответствует разрешённым форматам (PDF, PNG, JPEG).',
+    reason: 'Сигнатура содержимого файла (magic bytes) не соответствует разрешённым форматам (PDF, PNG, JPEG, WEBP).',
   };
 }

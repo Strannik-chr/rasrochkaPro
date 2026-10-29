@@ -1,8 +1,63 @@
 import express, { Request, Response, NextFunction } from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { createServer as createViteServer } from 'vite';
 import { getDb } from './src/server/db/database';
 import { createApiRouter } from './src/server/routes/api';
+
+function ensurePersistentProductionSecrets(): void {
+  const storagePath =
+    process.env.SQLITE_STORAGE_PATH || path.resolve(process.cwd(), 'data', 'installment_ledger.sqlite');
+  if (storagePath === ':memory:') return;
+
+  const dataDir = path.dirname(storagePath);
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  }
+
+  const secretsFile = path.join(dataDir, '.server_secrets.json');
+  let stored: { sessionSecret?: string; backupEncryptionKey?: string } = {};
+  if (fs.existsSync(secretsFile)) {
+    try {
+      stored = JSON.parse(fs.readFileSync(secretsFile, 'utf8'));
+    } catch {
+      stored = {};
+    }
+  }
+
+  let updated = false;
+
+  if (
+    !process.env.SESSION_SECRET ||
+    process.env.SESSION_SECRET === 'REPLACE_WITH_32_BYTE_HEX_SECRET_IN_PRODUCTION'
+  ) {
+    if (!stored.sessionSecret) {
+      stored.sessionSecret = crypto.randomBytes(32).toString('hex');
+      updated = true;
+    }
+    process.env.SESSION_SECRET = stored.sessionSecret;
+  }
+
+  if (
+    !process.env.BACKUP_ENCRYPTION_KEY ||
+    process.env.BACKUP_ENCRYPTION_KEY === 'REPLACE_WITH_64_HEX_CHARS_256_BIT_AES_GCM_KEY'
+  ) {
+    if (!stored.backupEncryptionKey) {
+      stored.backupEncryptionKey = crypto.randomBytes(32).toString('hex');
+      updated = true;
+    }
+    process.env.BACKUP_ENCRYPTION_KEY = stored.backupEncryptionKey;
+  }
+
+  if (updated) {
+    try {
+      fs.writeFileSync(secretsFile, JSON.stringify(stored, null, 2), { encoding: 'utf8', mode: 0o600 });
+    } catch {
+      // ignore if read-only
+    }
+  }
+}
 
 function getAllowedOrigins(): Set<string> {
   const raw = [
@@ -18,6 +73,9 @@ function getAllowedOrigins(): Set<string> {
 }
 
 export async function createAppServer(customDbPath?: string) {
+  if (!customDbPath || customDbPath !== ':memory:') {
+    ensurePersistentProductionSecrets();
+  }
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -93,22 +151,7 @@ async function startServer() {
   const port = Number(process.env.PORT || 3000);
   const isProd = process.env.NODE_ENV === 'production';
 
-  if (isProd) {
-    if (
-      !process.env.SESSION_SECRET ||
-      process.env.SESSION_SECRET === 'REPLACE_WITH_32_BYTE_HEX_SECRET_IN_PRODUCTION'
-    ) {
-      console.error('CRITICAL: Refusing to start in production with placeholder SESSION_SECRET.');
-      process.exit(1);
-    }
-    if (
-      !process.env.BACKUP_ENCRYPTION_KEY ||
-      process.env.BACKUP_ENCRYPTION_KEY === 'REPLACE_WITH_64_HEX_CHARS_256_BIT_AES_GCM_KEY'
-    ) {
-      console.error('CRITICAL: Refusing to start in production with placeholder BACKUP_ENCRYPTION_KEY.');
-      process.exit(1);
-    }
-  }
+  ensurePersistentProductionSecrets();
 
   const { app } = await createAppServer();
 

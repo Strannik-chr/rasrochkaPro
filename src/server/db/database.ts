@@ -318,6 +318,8 @@ function initializeSchema(db: DatabaseSync): void {
       id TEXT PRIMARY KEY,
       entity_type TEXT NOT NULL CHECK (entity_type IN ('client', 'contract', 'purchase', 'payment', 'return')),
       entity_id TEXT NOT NULL,
+      client_id TEXT,
+      contract_id TEXT,
       doc_category TEXT NOT NULL CHECK (doc_category IN ('contract_scan', 'receipt', 'transfer_proof', 'handover_act', 'return_act', 'photo', 'generated_template')),
       title TEXT NOT NULL,
       original_filename TEXT NOT NULL,
@@ -326,8 +328,22 @@ function initializeSchema(db: DatabaseSync): void {
       size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0 AND size_bytes <= 10485760),
       sha256_hash TEXT NOT NULL,
       content_base64 TEXT NOT NULL DEFAULT '',
+      previous_document_id TEXT,
+      replaced_by_id TEXT,
+      is_archived INTEGER NOT NULL DEFAULT 0,
       created_by TEXT,
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS status_rules_config (
+      id TEXT PRIMARY KEY,
+      grace_period_days INTEGER NOT NULL DEFAULT 0 CHECK (grace_period_days >= 0 AND grace_period_days <= 60),
+      complex_min_overdue_days INTEGER NOT NULL DEFAULT 15 CHECK (complex_min_overdue_days >= 1 AND complex_min_overdue_days <= 365),
+      complex_consecutive_missed_count INTEGER NOT NULL DEFAULT 2 CHECK (complex_consecutive_missed_count >= 1 AND complex_consecutive_missed_count <= 24),
+      complex_min_overdue_kopecks INTEGER NOT NULL DEFAULT 3000000 CHECK (complex_min_overdue_kopecks >= 100),
+      reliable_max_past_late_count INTEGER NOT NULL DEFAULT 3 CHECK (reliable_max_past_late_count >= 1 AND reliable_max_past_late_count <= 24),
+      updated_by TEXT,
+      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS backups (
@@ -355,7 +371,97 @@ function initializeSchema(db: DatabaseSync): void {
       metadata_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version TEXT PRIMARY KEY,
+      description TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
   `);
+}
+
+function recordMigration(db: DatabaseSync, version: string, description: string): void {
+  db.prepare(`
+    INSERT OR IGNORE INTO schema_migrations (version, description, applied_at)
+    VALUES (?, ?, ?)
+  `).run(version, description, new Date().toISOString());
+}
+
+/**
+ * Ensures all uploaded contract photos/scans and documents are present BOTH in SQLite
+ * (`documents.content_base64`) AND on disk (`PRIVATE_STORAGE_DIR` / `data/uploads`).
+ * If a container update/redeploy wiped ephemeral disk folders, files are automatically
+ * restored from the database. If legacy files exist on disk without `content_base64`,
+ * they are automatically backed up into the database.
+ */
+export function syncDocumentsBetweenDbAndDisk(db: DatabaseSync): {
+  restoredToDiskCount: number;
+  backedUpToDbCount: number;
+} {
+  let restoredToDiskCount = 0;
+  let backedUpToDbCount = 0;
+
+  try {
+    const uploadsDir =
+      process.env.PRIVATE_STORAGE_DIR ||
+      process.env.LOCAL_UPLOADS_DIR ||
+      path.resolve(process.cwd(), 'data', 'uploads');
+    const legacyUploadsDir = path.resolve(process.cwd(), 'uploads');
+
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o700 });
+    }
+
+    const docs = db
+      .prepare('SELECT id, stored_filename, content_base64, sha256_hash FROM documents')
+      .all() as Array<{
+      id: string;
+      stored_filename: string;
+      content_base64: string;
+      sha256_hash: string;
+    }>;
+
+    for (const doc of docs) {
+      const safeName = path.basename(doc.stored_filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
+      if (!safeName) continue;
+
+      const targetPath = path.join(uploadsDir, safeName);
+      const legacyPath = path.join(legacyUploadsDir, safeName);
+      const existsInTarget = fs.existsSync(targetPath);
+      const existsInLegacy = !existsInTarget && fs.existsSync(legacyPath);
+
+      if (!existsInTarget && doc.content_base64) {
+        // Restore missing physical file from DB content_base64
+        const buf = Buffer.from(doc.content_base64, 'base64');
+        fs.writeFileSync(targetPath, buf, { mode: 0o600 });
+        restoredToDiskCount++;
+      } else if (!existsInTarget && existsInLegacy) {
+        // Copy from legacy ./uploads to persistent ./data/uploads and ensure DB has content_base64
+        const buf = fs.readFileSync(legacyPath);
+        fs.writeFileSync(targetPath, buf, { mode: 0o600 });
+        restoredToDiskCount++;
+        if (!doc.content_base64) {
+          db.prepare('UPDATE documents SET content_base64 = ? WHERE id = ?').run(
+            buf.toString('base64'),
+            doc.id
+          );
+          backedUpToDbCount++;
+        }
+      } else if (existsInTarget && !doc.content_base64) {
+        // Backfill DB content_base64 from physical file so DB is 100% self-contained
+        const buf = fs.readFileSync(targetPath);
+        db.prepare('UPDATE documents SET content_base64 = ? WHERE id = ?').run(
+          buf.toString('base64'),
+          doc.id
+        );
+        backedUpToDbCount++;
+      }
+    }
+  } catch {
+    // Non-fatal in restricted or in-memory test environments
+  }
+
+  return { restoredToDiskCount, backedUpToDbCount };
 }
 
 function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
@@ -374,7 +480,63 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     db.exec("ALTER TABLE sessions ADD COLUMN last_active_at TEXT NOT NULL DEFAULT '';");
   }
 
-  // Normalize all existing user phone numbers to canonical +7XXXXXXXXXX and migrate legacy statuses safely
+  const docCols = db.prepare('PRAGMA table_info(documents)').all() as Array<{ name: string }>;
+  const docColNames = new Set(docCols.map((c) => c.name));
+  if (!docColNames.has('client_id')) {
+    db.exec('ALTER TABLE documents ADD COLUMN client_id TEXT;');
+  }
+  if (!docColNames.has('contract_id')) {
+    db.exec('ALTER TABLE documents ADD COLUMN contract_id TEXT;');
+  }
+  if (!docColNames.has('previous_document_id')) {
+    db.exec('ALTER TABLE documents ADD COLUMN previous_document_id TEXT;');
+  }
+  if (!docColNames.has('replaced_by_id')) {
+    db.exec('ALTER TABLE documents ADD COLUMN replaced_by_id TEXT;');
+  }
+  if (!docColNames.has('is_archived')) {
+    db.exec('ALTER TABLE documents ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;');
+  }
+
+  // Backfill client_id / contract_id on existing documents if missing
+  db.exec(`
+    UPDATE documents
+    SET contract_id = entity_id
+    WHERE entity_type = 'contract' AND (contract_id IS NULL OR contract_id = '');
+  `);
+  db.exec(`
+    UPDATE documents
+    SET client_id = entity_id
+    WHERE entity_type = 'client' AND (client_id IS NULL OR client_id = '');
+  `);
+  db.exec(`
+    UPDATE documents
+    SET client_id = (SELECT c.client_id FROM contracts c WHERE c.id = documents.contract_id)
+    WHERE contract_id IS NOT NULL AND (client_id IS NULL OR client_id = '');
+  `);
+
+  const contractCols = db.prepare('PRAGMA table_info(contracts)').all() as Array<{ name: string }>;
+  const contractColNames = new Set(contractCols.map((c) => c.name));
+  if (!contractColNames.has('idempotency_key')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN idempotency_key TEXT;');
+  }
+
+  // Ensure default status_rules_config row exists without overwriting existing admin customizations
+  const rulesRow = db
+    .prepare("SELECT id FROM status_rules_config WHERE id = 'default'")
+    .get() as { id: string } | undefined;
+  if (!rulesRow) {
+    db.prepare(`
+      INSERT INTO status_rules_config (
+        id, grace_period_days, complex_min_overdue_days,
+        complex_consecutive_missed_count, complex_min_overdue_kopecks,
+        reliable_max_past_late_count, updated_by, updated_at
+      ) VALUES ('default', 0, 15, 2, 3000000, 3, 'system', ?)
+    `).run(new Date().toISOString());
+  }
+
+  // Non-destructively normalize only legacy user phone numbers that are not yet in E.164 format (+7XXXXXXXXXX).
+  // Never overwrite existing users' passwords, names, roles, or valid phone numbers on app updates.
   const existingUsers = db
     .prepare('SELECT id, email, phone, status FROM users')
     .all() as Array<{ id: string; email: string; phone: string; status: string }>;
@@ -383,49 +545,54 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     withTransaction(db, () => {
       let fallbackCounter = 10;
       for (const u of existingUsers) {
-        let canonical = normalizeRussianPhone(u.phone);
-        if (!canonical) {
-          if (u.id === 'usr_owner_01') canonical = '+79285550101';
-          else if (u.id === 'usr_staff_01') canonical = '+79285550102';
-          else if (u.id === 'usr_pending_01') canonical = '+79285550109';
+        const canonical = normalizeRussianPhone(u.phone);
+        const isStatusValid = u.status === 'active' || u.status === 'blocked';
+        if (canonical && canonical === u.phone && isStatusValid) {
+          // Already valid — do not touch this user row
+          continue;
+        }
+        let resolvedPhone = canonical;
+        if (!resolvedPhone) {
+          if (u.id === 'usr_owner_01') resolvedPhone = '+79285550101';
+          else if (u.id === 'usr_staff_01') resolvedPhone = '+79285550102';
+          else if (u.id === 'usr_pending_01') resolvedPhone = '+79285550109';
           else {
-            canonical = `+792855501${String(fallbackCounter).padStart(2, '0')}`;
+            resolvedPhone = `+792855501${String(fallbackCounter).padStart(2, '0')}`;
             fallbackCounter += 1;
           }
         }
-        const nextStatus =
-          u.status === 'active' || u.status === 'blocked' ? u.status : 'blocked';
+        const nextStatus = isStatusValid ? u.status : 'blocked';
         db.prepare('UPDATE users SET phone = ?, status = ? WHERE id = ?').run(
-          canonical,
+          resolvedPhone,
           nextStatus,
           u.id
         );
-      }
-
-      // Ensure owner account usr_owner_01 has canonical phone +79285550101 and known owner credentials
-      const ownerRow = db
-        .prepare("SELECT id, email, phone FROM users WHERE id = 'usr_owner_01'")
-        .get() as { id: string; email: string; phone: string } | undefined;
-      if (ownerRow && (ownerRow.email !== 'mo@rassrochka.ru' || ownerRow.phone !== '+79285550101')) {
-        db.prepare(
-          `UPDATE users
-           SET email = 'mo@rassrochka.ru',
-               full_name = 'Мо (Владелец)',
-               phone = '+79285550101',
-               password_hash = ?,
-               role = 'owner',
-               status = 'active',
-               must_change_password = 0,
-               failed_login_attempts = 0,
-               locked_until = NULL
-           WHERE id = 'usr_owner_01'`
-        ).run(hashPassword('MoOwner!2026'));
       }
     });
   }
 
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_contract ON documents(contract_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_client ON documents(client_id);');
+
+  // Record applied non-destructive schema migrations
+  recordMigration(db, '001_initial_schema', 'Базовая схема финансового учёта рассрочки');
+  recordMigration(db, '002_auth_hardening', 'Защита сессий, rate-limiting и аудит безопасности');
+  recordMigration(db, '003_phone_auth_rbac', 'Вход по номеру телефона и ролевая модель RBAC');
+  recordMigration(
+    db,
+    '004_client_statuses_documents_whatsapp',
+    'Статусы клиентов и договоров, версии документов, идемпотентность и WhatsApp'
+  );
+  recordMigration(
+    db,
+    '005_non_destructive_storage_sync',
+    'Двойное хранение и автовосстановление фотографий и сканов договоров между БД и диском'
+  );
+
+  // Sync documents/photos between SQLite and disk so nothing is ever lost after updates
+  syncDocumentsBetweenDbAndDisk(db);
 }
 
 function seedInitialDataIfEmpty(db: DatabaseSync): void {

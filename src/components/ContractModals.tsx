@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   ClientDTO,
   ContractDTO,
@@ -10,12 +10,29 @@ import {
 } from '../shared/types';
 import {
   formatDateRu,
+  formatFileSize,
   formatMoney,
+  getClientPaymentStatusMeta,
   parseRublesInputToKopecks,
   translateRoundingRule,
   translateScheduleStatus,
 } from '../utils/format';
-import { X, Calculator, Check, AlertTriangle, Printer, History } from 'lucide-react';
+import { normalizePhoneE164 } from '../shared/clientStatus';
+import {
+  X,
+  Calculator,
+  Check,
+  AlertTriangle,
+  Printer,
+  History,
+  UserPlus,
+  UserCheck,
+  Search,
+  Paperclip,
+  Camera,
+  FileText,
+  Trash2,
+} from 'lucide-react';
 
 interface NewContractModalProps {
   clients: ClientDTO[];
@@ -25,6 +42,16 @@ interface NewContractModalProps {
   onClose: () => void;
   onSubmit: (payload: Record<string, unknown>) => Promise<void>;
   apiFetch: (path: string, options?: RequestInit) => Promise<any>;
+}
+
+interface PendingContractAttachment {
+  id: string;
+  title: string;
+  originalFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  contentBase64: string;
+  previewDataUrl?: string;
 }
 
 export const NewContractModal: React.FC<NewContractModalProps> = ({
@@ -39,7 +66,29 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   const activePlans = plans.filter((p) => p.isActive);
   const defaultPlan = activePlans[0] || plans[0];
 
+  const [idempotencyKey] = useState(
+    () => `idem_contract_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
+  );
+
+  // Client selection / inline creation state
+  const [clientMode, setClientMode] = useState<'existing' | 'new'>(
+    clients.length > 0 ? 'existing' : 'new'
+  );
   const [clientId, setClientId] = useState(clients[0]?.id || '');
+  const [clientNameQuery, setClientNameQuery] = useState(clients[0]?.fullName || '');
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  // Inline new client fields
+  const [newClientPhone, setNewClientPhone] = useState('+7 ');
+  const [newClientSecondaryPhone, setNewClientSecondaryPhone] = useState('');
+  const [newClientDocumentRef, setNewClientDocumentRef] = useState('');
+  const [newClientAddress, setNewClientAddress] = useState('');
+  const [newClientNotes, setNewClientNotes] = useState('');
+  const [allowSimilarName, setAllowSimilarName] = useState(false);
+
+  // Contract attachments state (JPEG, PNG, WebP, PDF)
+  const [attachments, setAttachments] = useState<PendingContractAttachment[]>([]);
+
   const [purchaseId, setPurchaseId] = useState<string>('');
   const [planId, setPlanId] = useState<string>(defaultPlan?.id || '');
   const [itemTitle, setItemTitle] = useState('');
@@ -61,10 +110,124 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   const [downPaymentMethod, setDownPaymentMethod] = useState<'cash' | 'bank_transfer'>('cash');
   const [notes, setNotes] = useState('');
 
-  const [previewResult, setPreviewResult] = useState< any | null >(null);
+  const [previewResult, setPreviewResult] = useState<any | null>(null);
   const [previewConfirmed, setPreviewConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  const selectedExistingClient = useMemo(
+    () => clients.find((c) => c.id === clientId) || null,
+    [clients, clientId]
+  );
+
+  // Live autocomplete matches by ФИО or phone
+  const matchingClients = useMemo(() => {
+    const q = clientNameQuery.trim().toLowerCase();
+    const qDigits = q.replace(/\D/g, '');
+    if (!q) return clients.slice(0, 8);
+    return clients
+      .filter((c) => {
+        const nameMatch = c.fullName.toLowerCase().includes(q);
+        const phoneMatch =
+          c.phone.toLowerCase().includes(q) ||
+          (qDigits.length >= 3 && c.phone.replace(/\D/g, '').includes(qDigits));
+        return nameMatch || phoneMatch;
+      })
+      .slice(0, 8);
+  }, [clients, clientNameQuery]);
+
+  // Duplicate detection when creating a new client
+  const duplicateCheck = useMemo(() => {
+    if (clientMode !== 'new') {
+      return { exactPhoneDuplicate: null as ClientDTO | null, similarNameClients: [] as ClientDTO[] };
+    }
+    const normalizedPhone = normalizePhoneE164(newClientPhone);
+    const exactPhoneDuplicate = normalizedPhone
+      ? clients.find(
+          (c) =>
+            normalizePhoneE164(c.phone) === normalizedPhone ||
+            (c.secondaryPhone && normalizePhoneE164(c.secondaryPhone) === normalizedPhone)
+        ) || null
+      : null;
+
+    const rawName = clientNameQuery.trim().toLowerCase();
+    const tokens = rawName.split(/\s+/).filter((t) => t.length >= 2);
+    const similarNameClients =
+      tokens.length > 0
+        ? clients.filter((c) => {
+            if (exactPhoneDuplicate && c.id === exactPhoneDuplicate.id) return false;
+            const cName = c.fullName.toLowerCase();
+            if (cName === rawName) return true;
+            const matched = tokens.filter((tok) => cName.includes(tok));
+            return matched.length >= Math.min(2, tokens.length);
+          })
+        : [];
+
+    return { exactPhoneDuplicate, similarNameClients };
+  }, [clientMode, newClientPhone, clientNameQuery, clients]);
+
+  const handleSelectExistingClient = (cl: ClientDTO) => {
+    setClientMode('existing');
+    setClientId(cl.id);
+    setClientNameQuery(cl.fullName);
+    setShowSuggestions(false);
+    setError(null);
+  };
+
+  const handleSwitchToNewClient = () => {
+    setClientMode('new');
+    setClientId('');
+    setShowSuggestions(false);
+    setAllowSimilarName(false);
+    setError(null);
+  };
+
+  const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    setError(null);
+
+    const allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'pdf'];
+    const newItems: PendingContractAttachment[] = [];
+
+    for (let i = 0; i < fileList.length; i++) {
+      const file = fileList[i];
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+      if (!allowedExtensions.includes(ext)) {
+        setError(
+          `Файл «${file.name}» не поддерживается. Разрешены форматы: JPEG, PNG, WebP и PDF.`
+        );
+        continue;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setError(`Файл «${file.name}» превышает максимальный размер 10 МБ.`);
+        continue;
+      }
+
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Ошибка чтения файла'));
+        reader.readAsDataURL(file);
+      });
+
+      const base64Part = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      newItems.push({
+        id: `att_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
+        title: `Скан/фото договора (${file.name})`,
+        originalFilename: file.name,
+        mimeType: file.type || (ext === 'pdf' ? 'application/pdf' : `image/${ext === 'jpg' ? 'jpeg' : ext}`),
+        sizeBytes: file.size,
+        contentBase64: base64Part,
+        previewDataUrl: file.type.startsWith('image/') ? dataUrl : undefined,
+      });
+    }
+
+    if (newItems.length > 0) {
+      setAttachments((prev) => [...prev, ...newItems]);
+    }
+    e.target.value = '';
+  };
 
   const handleSelectPlan = (selectedId: string) => {
     setPlanId(selectedId);
@@ -88,7 +251,10 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
       setDeliveryRubles(String(found.deliveryCostKopecks / 100));
       setOtherRubles(String(found.otherCostKopecks / 100));
       if (found.clientId) {
-        setClientId(found.clientId);
+        const cl = clients.find((c) => c.id === found.clientId);
+        if (cl) {
+          handleSelectExistingClient(cl);
+        }
       }
     }
   };
@@ -136,11 +302,48 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
       setError('Необходимо проверить и подтвердить расчёт и график платежей перед активацией договора.');
       return;
     }
+
+    if (clientMode === 'existing' && !clientId) {
+      setError('Выберите существующего клиента из списка совпадений или переключитесь на создание нового клиента.');
+      return;
+    }
+
+    if (clientMode === 'new') {
+      if (!clientNameQuery.trim()) {
+        setError('Введите ФИО клиента (фамилию, имя и отчество).');
+        return;
+      }
+      const normPhone = normalizePhoneE164(newClientPhone);
+      if (!normPhone) {
+        setError('Введите корректный номер телефона нового клиента в формате +7XXXXXXXXXX.');
+        return;
+      }
+      if (duplicateCheck.exactPhoneDuplicate) {
+        setError(
+          `Клиент с номером ${normPhone} уже существует («${duplicateCheck.exactPhoneDuplicate.fullName}»). Выберите его ниже, чтобы не создавать дубликат.`
+        );
+        return;
+      }
+    }
+
     setSubmitting(true);
     setError(null);
     try {
       await onSubmit({
-        clientId,
+        idempotencyKey,
+        clientId: clientMode === 'existing' ? clientId : undefined,
+        newClient:
+          clientMode === 'new'
+            ? {
+                fullName: clientNameQuery.trim(),
+                phone: newClientPhone.trim(),
+                secondaryPhone: newClientSecondaryPhone.trim(),
+                documentRef: newClientDocumentRef.trim(),
+                address: newClientAddress.trim(),
+                notes: newClientNotes.trim(),
+                allowSimilarName,
+              }
+            : undefined,
         purchaseId: purchaseId || null,
         planId: planId || null,
         itemTitle,
@@ -158,6 +361,13 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
         downPaymentMethod,
         confirmedCalculation: previewConfirmed,
         notes,
+        attachments: attachments.map((att) => ({
+          title: att.title,
+          originalFilename: att.originalFilename,
+          mimeType: att.mimeType,
+          contentBase64: att.contentBase64,
+          docCategory: 'contract_scan',
+        })),
       });
       onClose();
     } catch (err) {
@@ -176,7 +386,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
               Оформление договора продажи в рассрочку
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Условия тарифа фиксируются в договоре и не меняются при последующем редактировании настроек
+              Введите ФИО клиента (выберите существующего или создайте нового прямо в форме) и прикрепите скан/фото договора
             </p>
           </div>
           <button
@@ -196,24 +406,288 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
         )}
 
         <form onSubmit={handleCreate} className="mt-5 space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">Клиент *</label>
-              <select
-                value={clientId}
-                onChange={(e) => setClientId(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                required
-              >
-                {clients.map((cl) => (
-                  <option key={cl.id} value={cl.id}>
-                    {cl.fullName} ({cl.phone})
-                  </option>
-                ))}
-              </select>
+          {/* Client Selection / Inline Creation Block */}
+          <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Search className="w-4 h-4 text-slate-700" />
+                <span className="text-xs font-semibold text-slate-900">
+                  ФИО клиента (поиск по базе или создание нового клиента) *
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClientMode('existing');
+                    if (!clientId && clients[0]) {
+                      handleSelectExistingClient(clients[0]);
+                    }
+                  }}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-lg border flex items-center gap-1 ${
+                    clientMode === 'existing'
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                >
+                  <UserCheck className="w-3.5 h-3.5" />
+                  <span>Выбрать из базы ({clients.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSwitchToNewClient}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-lg border flex items-center gap-1 ${
+                    clientMode === 'new'
+                      ? 'bg-emerald-700 text-white border-emerald-700'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                  }`}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>+ Новый клиент в договоре</span>
+                </button>
+              </div>
             </div>
 
-            <div>
+            <div className="relative">
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                ФИО клиента (Фамилия Имя Отчество) *
+              </label>
+              <input
+                type="text"
+                value={clientNameQuery}
+                onFocus={() => setShowSuggestions(true)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setClientNameQuery(val);
+                  setShowSuggestions(true);
+                  if (clientMode === 'existing') {
+                    const exact = clients.find(
+                      (c) => c.fullName.toLowerCase() === val.trim().toLowerCase()
+                    );
+                    if (exact) {
+                      setClientId(exact.id);
+                    } else {
+                      setClientId('');
+                    }
+                  }
+                }}
+                placeholder="Начните вводить фамилию, имя, отчество или телефон клиента..."
+                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                required
+              />
+
+              {/* Autocomplete dropdown */}
+              {showSuggestions && clientNameQuery.trim().length > 0 && (
+                <div className="mt-1 border border-slate-200 rounded-lg bg-white shadow-sm max-h-52 overflow-y-auto divide-y divide-slate-100">
+                  {matchingClients.length > 0 ? (
+                    matchingClients.map((cl) => {
+                      const stMeta = getClientPaymentStatusMeta(cl.paymentStatus);
+                      const isSelected = clientMode === 'existing' && clientId === cl.id;
+                      return (
+                        <div
+                          key={cl.id}
+                          onClick={() => handleSelectExistingClient(cl)}
+                          className={`px-3 py-2 text-xs flex items-center justify-between cursor-pointer hover:bg-slate-50 ${
+                            isSelected ? 'bg-emerald-50/70' : ''
+                          }`}
+                        >
+                          <div>
+                            <div className="font-medium text-slate-900 flex items-center gap-2">
+                              <span>{cl.fullName}</span>
+                              <span
+                                className={`px-2 py-0.5 text-[10px] font-medium border rounded-md ${stMeta.badgeClass}`}
+                              >
+                                {stMeta.label}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                              Тел: {cl.phone}
+                              {cl.documentRef ? ` · Паспорт: ${cl.documentRef}` : ''}
+                              {typeof cl.activeContractsCount === 'number'
+                                ? ` · Активных договоров: ${cl.activeContractsCount}`
+                                : ''}
+                            </div>
+                          </div>
+                          <span className="text-[11px] font-medium text-emerald-700">
+                            {isSelected ? 'Выбран ✓' : 'Выбрать'}
+                          </span>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="p-3 text-xs text-slate-600 flex items-center justify-between">
+                      <span>Совпадений по «{clientNameQuery}» в базе не найдено.</span>
+                      {clientMode !== 'new' && (
+                        <button
+                          type="button"
+                          onClick={handleSwitchToNewClient}
+                          className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-700 rounded-lg hover:bg-emerald-800"
+                        >
+                          Создать клиента «{clientNameQuery.trim()}»
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Selected existing client summary */}
+            {clientMode === 'existing' && selectedExistingClient && (
+              <div className="p-3 bg-white border border-slate-200 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div>
+                  <div className="font-semibold text-slate-900 flex items-center gap-2">
+                    <span>Выбран существующий клиент: {selectedExistingClient.fullName}</span>
+                    <span
+                      className={`px-2 py-0.5 text-[10px] font-medium border rounded-md ${
+                        getClientPaymentStatusMeta(selectedExistingClient.paymentStatus).badgeClass
+                      }`}
+                    >
+                      {getClientPaymentStatusMeta(selectedExistingClient.paymentStatus).label}
+                    </span>
+                  </div>
+                  <div className="text-slate-500 mt-0.5 font-mono">
+                    Телефон: {selectedExistingClient.phone} · Паспорт:{' '}
+                    {selectedExistingClient.documentRef || 'не указан'} · Остаток долга:{' '}
+                    {formatMoney(selectedExistingClient.totalRemainingDebtKopecks || 0)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSuggestions((v) => !v)}
+                  className="px-2.5 py-1 text-xs text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                >
+                  Сменить клиента
+                </button>
+              </div>
+            )}
+
+            {/* Inline New Client Form */}
+            {clientMode === 'new' && (
+              <div className="p-3.5 bg-white border border-emerald-200 rounded-lg space-y-3">
+                <div className="text-xs font-semibold text-emerald-900">
+                  Регистрация нового клиента одновременно с оформлением договора
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Основной телефон клиента (WhatsApp / звонки) *
+                    </label>
+                    <input
+                      type="tel"
+                      value={newClientPhone}
+                      onChange={(e) => setNewClientPhone(e.target.value)}
+                      placeholder="+7 928 000-00-00"
+                      className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                      required={clientMode === 'new'}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Дополнительный телефон (опционально)
+                    </label>
+                    <input
+                      type="tel"
+                      value={newClientSecondaryPhone}
+                      onChange={(e) => setNewClientSecondaryPhone(e.target.value)}
+                      placeholder="+7 928 111-22-33"
+                      className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Паспортные данные / документ (опционально)
+                    </label>
+                    <input
+                      type="text"
+                      value={newClientDocumentRef}
+                      onChange={(e) => setNewClientDocumentRef(e.target.value)}
+                      placeholder="Серия и номер паспорта"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Адрес проживания (опционально)
+                    </label>
+                    <input
+                      type="text"
+                      value={newClientAddress}
+                      onChange={(e) => setNewClientAddress(e.target.value)}
+                      placeholder="Город, улица, дом"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                {/* Duplicate phone warning */}
+                {duplicateCheck.exactPhoneDuplicate && (
+                  <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="font-semibold">
+                        Внимание: клиент с этим номером телефона уже есть в базе!
+                      </div>
+                      <div className="mt-0.5">
+                        {duplicateCheck.exactPhoneDuplicate.fullName} (
+                        {duplicateCheck.exactPhoneDuplicate.phone})
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleSelectExistingClient(duplicateCheck.exactPhoneDuplicate!)
+                      }
+                      className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                    >
+                      Выбрать существующего клиента
+                    </button>
+                  </div>
+                )}
+
+                {/* Similar name warning */}
+                {!duplicateCheck.exactPhoneDuplicate &&
+                  duplicateCheck.similarNameClients.length > 0 && (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 space-y-2">
+                      <div className="font-semibold">
+                        Найдены похожие клиенты по ФИО — проверьте, чтобы не создать дубликат:
+                      </div>
+                      <div className="space-y-1">
+                        {duplicateCheck.similarNameClients.map((sim) => (
+                          <div
+                            key={sim.id}
+                            className="flex items-center justify-between bg-white px-2.5 py-1.5 rounded border border-amber-200"
+                          >
+                            <span>
+                              <strong>{sim.fullName}</strong> · тел. {sim.phone}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleSelectExistingClient(sim)}
+                              className="px-2.5 py-1 text-[11px] font-medium text-white bg-slate-900 rounded hover:bg-slate-800"
+                            >
+                              Выбрать этого клиента
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <label className="flex items-center gap-2 pt-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={allowSimilarName}
+                          onChange={(e) => setAllowSimilarName(e.target.checked)}
+                          className="rounded border-amber-400"
+                        />
+                        <span>Это другой человек (однофамилец), создать новую карточку</span>
+                      </label>
+                    </div>
+                  )}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="md:col-span-2">
               <label className="block text-xs font-medium text-slate-700 mb-1">
                 Связать с целевой закупкой (опционально)
               </label>
@@ -232,6 +706,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   ))}
               </select>
             </div>
+
 
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -394,6 +869,90 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                 className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
               />
             </div>
+          </div>
+
+          {/* Contract Photo / Scan Attachment Section */}
+          <div className="p-4 border border-slate-200 rounded-xl bg-white space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Paperclip className="w-4 h-4 text-slate-700" />
+                <div>
+                  <div className="text-xs font-semibold text-slate-900">
+                    Прикрепить договор (фото с телефона, скан или PDF)
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Поддерживаются форматы JPEG, PNG, WebP и PDF (до 10 МБ). Можно прикрепить несколько страниц.
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="px-3 py-1.5 text-xs font-medium text-slate-800 bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200 cursor-pointer flex items-center gap-1.5">
+                  <Paperclip className="w-3.5 h-3.5" />
+                  <span>Прикрепить договор</span>
+                  <input
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf"
+                    multiple
+                    onChange={handleFilesSelected}
+                    className="hidden"
+                  />
+                </label>
+                <label className="px-3 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 cursor-pointer flex items-center gap-1.5">
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>Сфотографировать</span>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    capture="environment"
+                    onChange={handleFilesSelected}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            </div>
+
+            {attachments.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                {attachments.map((att) => (
+                  <div
+                    key={att.id}
+                    className="p-2.5 border border-slate-200 rounded-lg bg-slate-50 flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      {att.previewDataUrl ? (
+                        <img
+                          src={att.previewDataUrl}
+                          alt={att.originalFilename}
+                          className="w-11 h-11 rounded object-cover border border-slate-200 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-11 h-11 rounded bg-slate-200 flex items-center justify-center shrink-0">
+                          <FileText className="w-5 h-5 text-slate-600" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-slate-900 truncate">
+                          {att.originalFilename}
+                        </div>
+                        <div className="text-[11px] text-slate-500 font-mono">
+                          {formatFileSize(att.sizeBytes)} · {att.mimeType}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAttachments((prev) => prev.filter((item) => item.id !== att.id))
+                      }
+                      className="p-1.5 text-slate-400 hover:text-red-600 rounded"
+                      title="Удалить файл из вложений"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Detailed Server Calculation Preview */}
