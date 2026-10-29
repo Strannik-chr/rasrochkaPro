@@ -142,11 +142,26 @@ export function reconcileFinance(db: DatabaseSync): ReconciliationResultDTO {
       )
       .get(c.id, c.current_schedule_version) as { total_planned: number };
 
+    const priorPaidRow = db
+      .prepare(
+        `
+        SELECT COALESCE(SUM(paid_kopecks), 0) as prior_paid
+        FROM schedule_items
+        WHERE contract_id = ? AND schedule_version < ?
+      `
+      )
+      .get(c.id, c.current_schedule_version) as { prior_paid: number };
+
     const expectedPrincipal = c.financed_principal_kopecks - c.closing_discount_kopecks;
-    if (schedSum.total_planned !== expectedPrincipal && schedSum.total_planned !== c.financed_principal_kopecks) {
+    const expectedRemainingAfterPrior = Math.max(0, expectedPrincipal - priorPaidRow.prior_paid);
+    if (
+      schedSum.total_planned !== expectedPrincipal &&
+      schedSum.total_planned !== c.financed_principal_kopecks &&
+      schedSum.total_planned !== expectedRemainingAfterPrior
+    ) {
       schedulesConsistent = false;
       discrepancies.push(
-        `Договор ${c.contract_number}: сумма текущего графика (${schedSum.total_planned} коп.) не совпадает с остатком по договору (${expectedPrincipal} коп.).`
+        `Договор ${c.contract_number}: сумма текущего графика (${schedSum.total_planned} коп.) не совпадает с остатком по договору (${expectedRemainingAfterPrior} коп.).`
       );
     }
   }

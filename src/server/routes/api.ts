@@ -997,11 +997,16 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
       const activeSchedule = contractItems.filter((i) => i.scheduleVersion === currentVer);
-      const totalPaidOnScheduleKopecks = activeSchedule.reduce((acc, i) => acc + i.paidKopecks, 0);
       const remainingDebtKopecks =
         c.status === 'completed' || c.status === 'returned' || c.status === 'cancelled'
           ? 0
           : activeSchedule.reduce((acc, i) => acc + i.remainingKopecks, 0);
+      const financedPrincipal = Number(c.financed_principal_kopecks);
+      const closingDiscount = Number(c.closing_discount_kopecks || 0);
+      const totalPaidOnScheduleKopecks = Math.max(
+        activeSchedule.reduce((acc, i) => acc + i.paidKopecks, 0),
+        financedPrincipal - closingDiscount - remainingDebtKopecks
+      );
       const overdueKopecks =
         c.status === 'active' || c.status === 'restructured'
           ? activeSchedule
@@ -2968,10 +2973,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           reason?: string;
         };
 
-        if (!reason || !reason.trim()) {
-          res.status(400).json({ error: 'Укажите основание (причину) изменения графика платежей.' });
-          return;
-        }
+        const effectiveReason = (reason && reason.trim()) || 'Обновление графика с учётом внесённых платежей';
 
         const cRow = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId) as
           | Record<string, unknown>
@@ -2988,26 +2990,36 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           )
           .all(contractId, currentVer) as Array<Record<string, unknown>>;
 
-        const totalPaidSoFar = currentItems.reduce((sum, i) => sum + Number(i.paid_kopecks), 0);
+        const remainingPrincipal = currentItems.reduce(
+          (sum, i) => sum + Math.max(0, Number(i.planned_kopecks) - Number(i.paid_kopecks)),
+          0
+        );
         const financedPrincipal = Number(cRow.financed_principal_kopecks);
-        const remainingPrincipal = financedPrincipal - totalPaidSoFar;
+        const totalPaidSoFar = Math.max(0, financedPrincipal - remainingPrincipal);
 
         if (remainingPrincipal <= 0) {
           res.status(400).json({ error: 'Остаток долга по договору уже равен 0.' });
           return;
         }
 
-        const newMonthsCount = Math.max(1, Math.min(60, Math.trunc(Number(additionalMonths || 4))));
+        const unpaidCurrentItems = currentItems.filter(
+          (i) => Number(i.planned_kopecks) > Number(i.paid_kopecks)
+        );
+        const autoRemainingMonths = Math.max(1, unpaidCurrentItems.length);
+        const newMonthsCount =
+          additionalMonths && Number(additionalMonths) > 0
+            ? Math.max(1, Math.min(60, Math.trunc(Number(additionalMonths))))
+            : autoRemainingMonths;
+
         const baseDate = nextStartDate || new Date().toISOString().slice(0, 10);
         const newVer = currentVer + 1;
         const now = new Date().toISOString();
 
         withTransaction(db, () => {
-          // Historical version items remain untouched in schedule_items with schedule_version = currentVer
           db.prepare(`
             INSERT INTO schedule_versions (id, contract_id, version, change_reason, created_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
-          `).run(`sv_${contractId}_v${newVer}`, contractId, newVer, reason.trim(), req.user!.id, now);
+          `).run(`sv_${contractId}_v${newVer}`, contractId, newVer, effectiveReason, req.user!.id, now);
 
           const insertItem = db.prepare(`
             INSERT INTO schedule_items (
@@ -3016,52 +3028,43 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
           `);
 
-          let instNumber = 1;
-          // Carry over already paid portion as locked historical row #1 in the new schedule if totalPaidSoFar > 0
-          if (totalPaidSoFar > 0) {
-            insertItem.run(
-              `si_${contractId}_v${newVer}_paid`,
-              contractId,
-              newVer,
-              instNumber++,
-              String(cRow.start_date),
-              String(cRow.start_date),
-              totalPaidSoFar,
-              totalPaidSoFar,
-              'paid',
-              'Оплачено до реструктуризации'
-            );
-          }
-
           const regPayment = Math.floor(remainingPrincipal / newMonthsCount);
           let accum = 0;
           for (let m = 0; m < newMonthsCount; m++) {
             const isLast = m === newMonthsCount - 1;
             const amount = isLast ? remainingPrincipal - accum : regPayment;
             accum += amount;
-            const dueDate = calculateContractAndSchedule({
-              purchaseCostKopecks: amount,
-              deliveryCostKopecks: 0,
-              otherCostKopecks: 0,
-              markupPercent: 0,
-              downPaymentPercent: 0,
-              termMonths: m + 1,
-              roundingRule: 'kopeck',
-              scheduleType: 'equal',
-              startDate: baseDate,
-            }).schedule[m].dueDate;
 
+            // Use existing unpaid due_date if no custom nextStartDate was forced and unpaid item exists
+            let dueDate: string;
+            if (!nextStartDate && unpaidCurrentItems[m]?.due_date) {
+              dueDate = String(unpaidCurrentItems[m].due_date);
+            } else {
+              dueDate = calculateContractAndSchedule({
+                purchaseCostKopecks: amount,
+                deliveryCostKopecks: 0,
+                otherCostKopecks: 0,
+                markupPercent: 0,
+                downPaymentPercent: 0,
+                termMonths: m + 1,
+                roundingRule: 'kopeck',
+                scheduleType: 'equal',
+                startDate: baseDate,
+              }).schedule[m].dueDate;
+            }
+
+            const instNumber = m + 1;
             insertItem.run(
               `si_${contractId}_v${newVer}_${instNumber}`,
               contractId,
               newVer,
-              instNumber++,
+              instNumber,
               dueDate,
               dueDate,
               amount,
               0,
               'pending',
-              reason.trim()
+              effectiveReason
             );
           }
 
@@ -3077,13 +3080,18 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             action: 'CONTRACT_RESTRUCTURED',
             entityType: 'contract',
             entityId: contractId,
-            summary: `Реструктурирован график договора ${String(cRow.contract_number)}: создана версия графика v${newVer} (предыдущая версия v${currentVer} сохранена в истории). Основание: ${reason.trim()}.`,
+            summary: `Обновлён график договора ${String(cRow.contract_number)}: создана версия графика v${newVer} на ${newMonthsCount} мес. для остатка ${formatRubles(remainingPrincipal)} (оплачено ранее: ${formatRubles(totalPaidSoFar)}).`,
           });
         });
 
-        res.json({ ok: true, newScheduleVersion: newVer });
+        res.json({
+          ok: true,
+          newScheduleVersion: newVer,
+          remainingMonths: newMonthsCount,
+          remainingDebtKopecks: remainingPrincipal,
+        });
       } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка реструктуризации.' });
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка обновления графика.' });
       }
     }
   );

@@ -1336,29 +1336,42 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
   apiFetch,
   onSuccess,
 }) => {
-  const [additionalMonths, setAdditionalMonths] = useState('4');
-  const [nextStartDate, setNextStartDate] = useState(new Date().toISOString().slice(0, 10));
-  const [reason, setReason] = useState('Согласованная реструктуризация остатка долга по заявлению клиента');
+  const [reason, setReason] = useState('Обновление графика с учётом внесённых платежей');
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const activeScheduleItems = contract.schedule || [];
+  const unpaidItems = activeScheduleItems.filter((i) => i.remainingKopecks > 0);
+  const remainingMonthsCount = unpaidItems.length;
+  const completedMonthsCount = Math.max(0, contract.termMonths - remainingMonthsCount);
+  const monthlyPaymentRemaining =
+    remainingMonthsCount > 0
+      ? Math.floor(contract.remainingDebtKopecks / remainingMonthsCount)
+      : 0;
+
+  const activeVersionMeta = contract.scheduleHistory.find(
+    (v) => v.version === contract.currentScheduleVersion
+  );
 
   const handleRestructure = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setNotice(null);
     try {
       await apiFetch(`/api/v1/contracts/${contract.id}/restructure`, {
         method: 'POST',
         body: JSON.stringify({
-          additionalMonths: Number(additionalMonths),
-          nextStartDate,
-          reason,
+          reason: reason.trim() || 'Обновление графика с учётом внесённых платежей',
         }),
       });
       await onSuccess();
-      onClose();
+      setNotice(
+        `Утверждён новый график v${contract.currentScheduleVersion + 1}: старый график заменён, осталось платить ${remainingMonthsCount} мес. на сумму ${formatMoney(contract.remainingDebtKopecks)}.`
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка реструктуризации');
+      setError(err instanceof Error ? err.message : 'Ошибка обновления графика');
     } finally {
       setLoading(false);
     }
@@ -1366,16 +1379,16 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto space-y-5">
         <div className="flex items-center justify-between pb-4 border-b border-slate-200">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <History className="w-5 h-5 text-slate-700" />
             <div>
               <h2 className="text-lg font-semibold text-slate-900">
-                История версий графика и реструктуризация · {contract.contractNumber}
+                График платежей по договору · {contract.contractNumber}
               </h2>
               <p className="text-xs text-slate-500">
-                Активная версия графика: v{contract.currentScheduleVersion} · Исторические версии не перезаписываются
+                Клиент: {contract.clientName} · Товар: {contract.itemTitle} · Текущая версия: v{contract.currentScheduleVersion}
               </p>
             </div>
           </div>
@@ -1384,108 +1397,149 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
           </button>
         </div>
 
-        {/* Version History */}
-        <div className="mt-4 space-y-4">
-          {contract.scheduleHistory.map((ver) => (
-            <div key={ver.id} className="border border-slate-200 rounded-xl p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100 text-xs">
-                <div className="font-semibold text-slate-900">
-                  Версия графика v{ver.version}{' '}
-                  {ver.version === contract.currentScheduleVersion ? '· (Действующая)' : '· (Архивная)'}
-                </div>
-                <div className="text-slate-500">
-                  Основание: {ver.changeReason} · Автор: {ver.createdByEmail} · {formatDateRu(ver.createdAt)}
-                </div>
-              </div>
-              <div className="mt-2 overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr className="text-slate-500 border-b border-slate-100">
-                      <th className="py-1.5 pr-3">№</th>
-                      <th className="py-1.5 pr-3">Срок оплаты</th>
-                      <th className="py-1.5 pr-3 text-right">План</th>
-                      <th className="py-1.5 pr-3 text-right">Оплачено</th>
-                      <th className="py-1.5">Статус</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 font-mono">
-                    {ver.items.map((item) => (
-                      <tr key={item.id}>
-                        <td className="py-1 pr-3">#{item.installmentNumber}</td>
-                        <td className="py-1 pr-3">{formatDateRu(item.dueDate)}</td>
-                        <td className="py-1 pr-3 text-right">{formatMoney(item.plannedKopecks)}</td>
-                        <td className="py-1 pr-3 text-right">{formatMoney(item.paidKopecks)}</td>
-                        <td className="py-1 font-sans text-slate-600">
-                          {translateScheduleStatus(item.status)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+        {/* Summary KPI cards: how many months left & how much left */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs">
+          <div>
+            <div className="text-slate-500">Осталось месяцев платить</div>
+            <div className="text-base font-bold font-mono text-slate-900 mt-0.5">
+              {remainingMonthsCount} мес.{' '}
+              <span className="text-xs font-normal text-slate-500">из {contract.termMonths}</span>
             </div>
-          ))}
+          </div>
+          <div>
+            <div className="text-slate-500">Закрыто месяцев</div>
+            <div className="text-base font-bold font-mono text-emerald-700 mt-0.5">
+              {completedMonthsCount} мес.
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500">Всего уже выплачено</div>
+            <div className="text-base font-bold font-mono text-emerald-700 mt-0.5">
+              {formatMoney(contract.totalPaidOnScheduleKopecks)}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500">Осталось выплатить</div>
+            <div className="text-base font-bold font-mono text-slate-900 mt-0.5">
+              {formatMoney(contract.remainingDebtKopecks)}
+            </div>
+          </div>
         </div>
 
-        {/* Create new schedule version (Owner only) */}
+        {notice && (
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 font-medium">
+            {notice}
+          </div>
+        )}
+
+        {/* Active Schedule Only */}
+        <div className="border border-slate-200 rounded-xl p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100 text-xs">
+            <div className="font-semibold text-slate-900">
+              Действующий график (v{contract.currentScheduleVersion}) · Осталось платежей: {remainingMonthsCount} мес.
+            </div>
+            {activeVersionMeta && (
+              <div className="text-slate-500">
+                {activeVersionMeta.changeReason} · {formatDateRu(activeVersionMeta.createdAt)}
+              </div>
+            )}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="text-slate-500 border-b border-slate-100">
+                  <th className="py-2 pr-3">№</th>
+                  <th className="py-2 pr-3">Срок оплаты</th>
+                  <th className="py-2 pr-3 text-right">Сумма по графику</th>
+                  <th className="py-2 pr-3 text-right">Внесено</th>
+                  <th className="py-2 pr-3 text-right">Осталось</th>
+                  <th className="py-2">Статус</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-mono">
+                {activeScheduleItems.map((item) => (
+                  <tr
+                    key={item.id}
+                    className={item.status === 'paid' ? 'bg-emerald-50/40 text-slate-500' : ''}
+                  >
+                    <td className="py-2 pr-3 font-semibold text-slate-900">
+                      #{item.installmentNumber}
+                    </td>
+                    <td className="py-2 pr-3">{formatDateRu(item.dueDate)}</td>
+                    <td className="py-2 pr-3 text-right">{formatMoney(item.plannedKopecks)}</td>
+                    <td className="py-2 pr-3 text-right text-emerald-700">
+                      {formatMoney(item.paidKopecks)}
+                    </td>
+                    <td className="py-2 pr-3 text-right font-semibold text-slate-900">
+                      {formatMoney(item.remainingKopecks)}
+                    </td>
+                    <td className="py-2 font-sans">
+                      <span
+                        className={
+                          item.status === 'paid'
+                            ? 'text-emerald-700 font-medium'
+                            : item.daysOverdue > 0
+                              ? 'text-red-600 font-medium'
+                              : 'text-slate-700'
+                        }
+                      >
+                        {translateScheduleStatus(item.status)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Approve new schedule version removing already paid months */}
         {isOwner && contract.remainingDebtKopecks > 0 && (
-          <form onSubmit={handleRestructure} className="mt-6 pt-4 border-t border-slate-200 space-y-4">
-            <h3 className="text-sm font-semibold text-slate-900">
-              Создать новую версию графика (v{contract.currentScheduleVersion + 1}) для остатка{' '}
-              {formatMoney(contract.remainingDebtKopecks)}
-            </h3>
+          <form onSubmit={handleRestructure} className="pt-4 border-t border-slate-200 space-y-4">
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-xs">
+              <div className="font-semibold text-slate-900">
+                Обновить график с учётом оплаченных месяцев (будет создана версия v{contract.currentScheduleVersion + 1})
+              </div>
+              <div className="text-slate-600">
+                Старый график заменится на новый: оплаченные месяцы будут убраны, а оставшийся долг{' '}
+                <strong className="font-mono text-slate-900">
+                  {formatMoney(contract.remainingDebtKopecks)}
+                </strong>{' '}
+                автоматически распределится на оставшиеся{' '}
+                <strong className="font-mono text-slate-900">{remainingMonthsCount} мес.</strong> (по{' '}
+                <strong className="font-mono text-slate-900">
+                  {formatMoney(monthlyPaymentRemaining)}
+                </strong>{' '}
+                в месяц).
+              </div>
+            </div>
+
             {error && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
                 {error}
               </div>
             )}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  На сколько месяцев распределить остаток
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="36"
-                  value={additionalMonths}
-                  onChange={(e) => setAdditionalMonths(e.target.value)}
-                  className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Базовая дата нового графика
-                </label>
-                <input
-                  type="date"
-                  value={nextStartDate}
-                  onChange={(e) => setNextStartDate(e.target.value)}
-                  className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Основание реструктуризации *
-                </label>
-                <input
-                  type="text"
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                  required
-                />
-              </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">
+                Примечание / основание обновления графика
+              </label>
+              <input
+                type="text"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                required
+              />
             </div>
+
             <div className="flex justify-end gap-3">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg"
+                className="px-4 py-2 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
               >
-                Отмена
+                Закрыть
               </button>
               <button
                 type="submit"
@@ -1493,8 +1547,8 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
                 className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
               >
                 {loading
-                  ? 'Сохранение...'
-                  : `Утвердить новую версию графика v${contract.currentScheduleVersion + 1}`}
+                  ? 'Обновление графика...'
+                  : `Утвердить новый график (${remainingMonthsCount} мес. · ${formatMoney(contract.remainingDebtKopecks)})`}
               </button>
             </div>
           </form>

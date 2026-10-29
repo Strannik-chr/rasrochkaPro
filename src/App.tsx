@@ -4288,7 +4288,7 @@ export default function App() {
 
       {restructureContract && (
         <RestructureScheduleModal
-          contract={restructureContract}
+          contract={contracts.find((c) => c.id === restructureContract.id) || restructureContract}
           isOwner={isOwner}
           onClose={() => setRestructureContract(null)}
           apiFetch={apiFetch}
@@ -4296,7 +4296,7 @@ export default function App() {
             await loadFullState();
             notify(
               'success',
-              'Создана новая версия графика платежей. Предыдущая версия сохранена в истории.'
+              'График договора обновлён с учётом выплаченных месяцев.'
             );
           }}
         />
