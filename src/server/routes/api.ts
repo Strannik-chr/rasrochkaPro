@@ -294,13 +294,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     return { rawToken, csrfToken };
   }
 
-  // Attach session from HttpOnly cookie OR in-memory X-Session-Token header (for browsers blocking 3P cookies in iframes)
+  // Attach session from HttpOnly cookie OR in-memory X-Session-Token header OR token query parameter
   router.use((req: AuthenticatedRequest, _res: Response, next: NextFunction) => {
     const cookies = parseCookies(req.headers.cookie);
     const headerToken = req.headers['x-session-token'];
+    const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
     const rawToken =
       cookies[SESSION_COOKIE_NAME] ||
-      (Array.isArray(headerToken) ? headerToken[0] : headerToken);
+      (Array.isArray(headerToken) ? headerToken[0] : headerToken) ||
+      queryToken;
 
     if (rawToken && typeof rawToken === 'string') {
       const tokenHash = sha256Hex(rawToken);
@@ -392,6 +394,32 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
   function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
     if (!req.user) {
+      if (req.method === 'GET' && req.headers.accept && req.headers.accept.includes('text/html')) {
+        res.status(401).send(`<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=/">
+  <title>РассрочкаПро — Перенаправление</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 32px; max-width: 440px; text-align: center; }
+    h2 { margin: 0 0 12px; font-size: 20px; color: #f1f5f9; }
+    p { color: #94a3b8; font-size: 14px; line-height: 1.5; margin-bottom: 24px; }
+    a { display: inline-block; background: #2563eb; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 8px; font-weight: 500; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Возврат в приложение</h2>
+    <p>Для доступа требуется авторизация в системе. Перенаправляем вас обратно в систему «РассрочкаПро»...</p>
+    <a href="/">Перейти на главную страницу</a>
+  </div>
+  <script>window.location.replace('/');</script>
+</body>
+</html>`);
+        return;
+      }
       res.status(401).json({ error: 'Требуется вход в систему.' });
       return;
     }
@@ -3366,6 +3394,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           eventDate,
           notes,
           allocations,
+          autoAllocate,
         } = req.body as {
           idempotencyKey?: string;
           clientId?: string;
@@ -3376,6 +3405,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           eventDate?: string;
           notes?: string;
           allocations?: Array<{ scheduleItemId: string; amountKopecks: number }>;
+          autoAllocate?: boolean;
         };
 
         if (!idempotencyKey || !idempotencyKey.trim()) {
@@ -3408,6 +3438,42 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const requestedAllocs = Array.isArray(allocations)
           ? allocations.filter((a) => a && Number(a.amountKopecks) > 0)
           : [];
+
+        // Automatic sequential allocation across schedule if requested and contractId is specified
+        if (autoAllocate && contractId && requestedAllocs.length === 0) {
+          const cRow = db
+            .prepare('SELECT current_schedule_version FROM contracts WHERE id = ?')
+            .get(contractId) as { current_schedule_version: number } | undefined;
+          if (cRow) {
+            const curVer = Number(cRow.current_schedule_version);
+            const unpaidItems = db
+              .prepare(
+                `SELECT id, installment_number, planned_kopecks, paid_kopecks
+                 FROM schedule_items
+                 WHERE contract_id = ? AND schedule_version = ? AND planned_kopecks > paid_kopecks
+                 ORDER BY installment_number ASC`
+              )
+              .all(contractId, curVer) as Array<{
+                id: string;
+                installment_number: number;
+                planned_kopecks: number;
+                paid_kopecks: number;
+              }>;
+
+            let remainingAmount = amount;
+            for (const item of unpaidItems) {
+              if (remainingAmount <= 0) break;
+              const need = Number(item.planned_kopecks) - Number(item.paid_kopecks);
+              const allocAmt = Math.min(need, remainingAmount);
+              requestedAllocs.push({
+                scheduleItemId: item.id,
+                amountKopecks: allocAmt,
+              });
+              remainingAmount -= allocAmt;
+            }
+          }
+        }
+
         const totalRequestedAlloc = requestedAllocs.reduce((sum, a) => sum + Number(a.amountKopecks), 0);
 
         if (totalRequestedAlloc > amount) {
@@ -3538,9 +3604,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     (req: AuthenticatedRequest, res: Response) => {
       try {
         const paymentId = req.params.id;
-        const { contractId, allocations } = req.body as {
+        const { contractId, allocations, autoAllocate } = req.body as {
           contractId?: string;
           allocations?: Array<{ scheduleItemId: string; amountKopecks: number }>;
+          autoAllocate?: boolean;
         };
 
         const payRow = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId) as
@@ -3551,9 +3618,45 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
+        const effectiveContractId = contractId || (payRow.contract_id ? String(payRow.contract_id) : undefined);
         const requestedAllocs = Array.isArray(allocations)
           ? allocations.filter((a) => a && Number(a.amountKopecks) > 0)
           : [];
+
+        if (autoAllocate && effectiveContractId && requestedAllocs.length === 0) {
+          const cRow = db
+            .prepare('SELECT current_schedule_version FROM contracts WHERE id = ?')
+            .get(effectiveContractId) as { current_schedule_version: number } | undefined;
+          if (cRow) {
+            const curVer = Number(cRow.current_schedule_version);
+            const unpaidItems = db
+              .prepare(
+                `SELECT id, installment_number, planned_kopecks, paid_kopecks
+                 FROM schedule_items
+                 WHERE contract_id = ? AND schedule_version = ? AND planned_kopecks > paid_kopecks
+                 ORDER BY installment_number ASC`
+              )
+              .all(effectiveContractId, curVer) as Array<{
+                id: string;
+                installment_number: number;
+                planned_kopecks: number;
+                paid_kopecks: number;
+              }>;
+
+            let remainingAmount = Number(payRow.unallocated_kopecks);
+            for (const item of unpaidItems) {
+              if (remainingAmount <= 0) break;
+              const need = Number(item.planned_kopecks) - Number(item.paid_kopecks);
+              const allocAmt = Math.min(need, remainingAmount);
+              requestedAllocs.push({
+                scheduleItemId: item.id,
+                amountKopecks: allocAmt,
+              });
+              remainingAmount -= allocAmt;
+            }
+          }
+        }
+
         if (requestedAllocs.length === 0) {
           res.status(400).json({ error: 'Выберите хотя бы один платёж графика и укажите сумму распределения.' });
           return;

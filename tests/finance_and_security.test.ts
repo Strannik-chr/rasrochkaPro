@@ -676,6 +676,41 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     });
     assert.equal(validAllocRes.status, 200);
 
+    // 4b. Автоматическое каскадное распределение платежа (15 000 ₽ при графике по 7 000 ₽ в месяц)
+    // Регистрируем платеж 15 000 ₽ с флагом autoAllocate: true
+    const autoPayRes = await apiCall('/api/v1/payments', {
+      method: 'POST',
+      sessionToken: staffToken,
+      csrfToken: staffCsrf,
+      body: {
+        idempotencyKey: 'idem_auto_alloc_test_15000',
+        clientId: createdClientId,
+        contractId: newContractId,
+        accountId: 'acc_bank_main',
+        paymentMethod: 'bank_transfer',
+        amountKopecks: 1500000, // 15 000 ₽
+        eventDate: '2026-10-29',
+        notes: 'Автораспределение 15 000 ₽ по графику',
+        autoAllocate: true,
+      },
+    });
+    assert.equal(autoPayRes.status, 201);
+
+    // Проверяем состояние графика договора: платеж распределился по цепочке
+    const stateAfterAutoPay = await apiCall('/api/v1/state', {
+      sessionToken: ownerToken,
+    });
+    const contractAfterAuto = stateAfterAutoPay.data.contracts.find(
+      (c: { id: string }) => c.id === newContractId
+    );
+    assert.ok(contractAfterAuto);
+    // Первый платеж получил 10 000 ₽ ранее + остаток до полного закрытия (14 583,34 ₽)
+    assert.equal(contractAfterAuto.schedule[0].status, 'paid');
+    // Второй платеж получил оставшуюся часть суммы от 15 000 ₽
+    assert.ok(contractAfterAuto.schedule[1].paidKopecks > 0);
+    // Общая внесенная сумма по графику договора увеличилась ровно на 10 000 ₽ + 15 000 ₽
+    assert.equal(contractAfterAuto.totalPaidOnScheduleKopecks, 1000000 + 1500000);
+
     // 5. Private Document Upload, Authenticated Download & Owner Delete
     const validPdfBytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF', 'utf8');
     const uploadRes = await apiCall('/api/v1/documents/upload', {

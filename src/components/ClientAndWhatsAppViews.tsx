@@ -13,7 +13,7 @@ import {
   getClientPaymentStatusMeta,
   parseRublesInputToKopecks,
 } from '../utils/format';
-import { formatTelHref, normalizePhoneE164 } from '../shared/clientStatus';
+import { buildDirectWhatsAppUrl, formatTelHref, normalizePhoneE164 } from '../shared/clientStatus';
 import {
   Phone,
   Copy,
@@ -241,6 +241,7 @@ export const QuickCallAndCopyBar: React.FC<QuickCallAndCopyBarProps> = ({
   const [copied, setCopied] = useState(false);
   const telHref = formatTelHref(phone);
   const normalized = normalizePhoneE164(phone);
+  const waHref = buildDirectWhatsAppUrl(phone);
 
   const handleCallClick = (e: React.MouseEvent) => {
     if (!telHref || !normalized) {
@@ -252,6 +253,19 @@ export const QuickCallAndCopyBar: React.FC<QuickCallAndCopyBarProps> = ({
     }
     onNotice?.(
       `Вызов передан в телефонное приложение для номера ${normalized}. Статус звонка зависит от вашего устройства.`
+    );
+  };
+
+  const handleWhatsAppClick = (e: React.MouseEvent) => {
+    if (!waHref || !normalized) {
+      e.preventDefault();
+      onError?.(
+        `Некорректный или пустой номер телефона для WhatsApp у клиента «${clientName}» (${phone || 'не указан'}). Проверьте номер.`
+      );
+      return;
+    }
+    onNotice?.(
+      `Открыт чат WhatsApp с клиентом «${clientName}» (${normalized}).`
     );
   };
 
@@ -273,6 +287,21 @@ export const QuickCallAndCopyBar: React.FC<QuickCallAndCopyBarProps> = ({
 
   return (
     <div className="inline-flex items-center gap-1.5 flex-wrap">
+      <a
+        href={waHref || '#'}
+        target={waHref ? '_blank' : undefined}
+        rel={waHref ? 'noopener noreferrer' : undefined}
+        onClick={handleWhatsAppClick}
+        className={`px-2.5 py-1 text-xs font-medium rounded-lg border inline-flex items-center gap-1.5 transition-colors ${
+          waHref
+            ? 'bg-emerald-600 text-white border-emerald-700 hover:bg-emerald-700 shadow-xs'
+            : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+        }`}
+        title={waHref ? `Написать в WhatsApp (${normalized})` : 'Номер телефона некорректен'}
+      >
+        <MessageCircle className="w-3.5 h-3.5" />
+        <span>Написать в WhatsApp</span>
+      </a>
       <a
         href={telHref || '#'}
         onClick={handleCallClick}

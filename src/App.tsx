@@ -45,6 +45,7 @@ import {
   QuickCallAndCopyBar,
   StatusRulesConfigCard,
 } from './components/ClientAndWhatsAppViews';
+import { buildDirectWhatsAppUrl } from './shared/clientStatus';
 import { ManualAllocationModal, NewPaymentModal } from './components/PaymentAllocateModal';
 import { AuthGateModal } from './components/AuthGateModal';
 import {
@@ -1193,30 +1194,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Unallocated payments alert & Overdue attention table */}
-                  {financialMetrics.totalUnallocatedPaymentsKopecks > 0 && (
-                    <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
-                      <div>
-                        <h3 className="text-sm font-semibold text-slate-900">
-                          Поступления от клиентов, ожидающие ручного распределения
-                        </h3>
-                        <p className="text-xs text-slate-600 mt-0.5">
-                          Найдены платежи с нераспределённым остатком на сумму{' '}
-                          <span className="font-mono font-semibold text-amber-700">
-                            {formatMoney(financialMetrics.totalUnallocatedPaymentsKopecks)}
-                          </span>
-                          . Система не списывает старейший долг автоматически без вашего выбора.
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setActiveSection('payments')}
-                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap"
-                      >
-                        Перейти к ручному распределению
-                      </button>
-                    </div>
-                  )}
+
 
                   {/* Active Contracts Overview Table */}
                   <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -1251,58 +1229,73 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {filteredContracts.map((c) => (
-                            <tr key={c.id} className="hover:bg-slate-50/80">
-                              <td className="py-3 px-4">
-                                <div className="font-mono font-semibold text-slate-900">
-                                  {c.contractNumber}
-                                </div>
-                                <div className="text-slate-500 mt-0.5">
-                                  {formatDateRu(c.startDate)} · {c.termMonths} мес. · Наценка{' '}
-                                  {c.markupPercent}%
-                                </div>
-                              </td>
-                              <td className="py-3 px-4">
-                                <div className="font-medium text-slate-900">{c.clientName}</div>
-                                <div className="text-slate-500 mt-0.5">{c.itemTitle}</div>
-                              </td>
-                              <td className="py-3 px-4 font-mono text-right text-slate-700">
-                                {formatMoney(c.totalCostKopecks)}
-                              </td>
-                              <td className="py-3 px-4 font-mono text-right font-medium text-slate-900">
-                                {formatMoney(c.salePriceKopecks)}
-                              </td>
-                              <td className="py-3 px-4 font-mono text-right text-emerald-700">
-                                {formatMoney(c.totalCollectedKopecks)}
-                              </td>
-                              <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
-                                {formatMoney(c.remainingDebtKopecks)}
-                                {c.overdueKopecks > 0 && (
-                                  <div className="text-[11px] text-red-600 font-normal">
-                                    Просрочено: {formatMoney(c.overdueKopecks)}
+                          {filteredContracts.map((c) => {
+                            const waDirectUrl = buildDirectWhatsAppUrl(c.clientPhone);
+                            return (
+                              <tr key={c.id} className="hover:bg-slate-50/80">
+                                <td className="py-3 px-4">
+                                  <div className="font-mono font-semibold text-slate-900">
+                                    {c.contractNumber}
                                   </div>
-                                )}
-                              </td>
-                              <td className="py-3 px-4 text-right">
-                                <div className="flex items-center justify-end gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => setEarlyPayoffContract(c)}
-                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
-                                  >
-                                    Досрочное
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setRestructureContract(c)}
-                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
-                                  >
-                                    График (v{c.currentScheduleVersion})
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
+                                  <div className="text-slate-500 mt-0.5">
+                                    {formatDateRu(c.startDate)} · {c.termMonths} мес. · Наценка{' '}
+                                    {c.markupPercent}%
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="font-medium text-slate-900">{c.clientName}</div>
+                                  <div className="text-slate-500 mt-0.5">{c.itemTitle}</div>
+                                </td>
+                                <td className="py-3 px-4 font-mono text-right text-slate-700">
+                                  {formatMoney(c.totalCostKopecks)}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-right font-medium text-slate-900">
+                                  {formatMoney(c.salePriceKopecks)}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-right text-emerald-700">
+                                  {formatMoney(c.totalCollectedKopecks)}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
+                                  {formatMoney(c.remainingDebtKopecks)}
+                                  {c.overdueKopecks > 0 && (
+                                    <div className="text-[11px] text-red-600 font-normal">
+                                      Просрочено: {formatMoney(c.overdueKopecks)}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                    {waDirectUrl && (
+                                      <a
+                                        href={waDirectUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-600 border border-emerald-700 rounded-lg hover:bg-emerald-700 inline-flex items-center gap-1 whitespace-nowrap"
+                                        title={`Написать клиенту ${c.clientName} в WhatsApp`}
+                                      >
+                                        <MessageCircle className="w-3.5 h-3.5" />
+                                        <span>Написать</span>
+                                      </a>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => setEarlyPayoffContract(c)}
+                                      className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
+                                    >
+                                      Досрочное
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setRestructureContract(c)}
+                                      className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
+                                    >
+                                      График (v{c.currentScheduleVersion})
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -1681,9 +1674,10 @@ export default function App() {
                                       setActiveSection('whatsapp_contracts');
                                     }}
                                     className="px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 inline-flex items-center gap-1"
+                                    title="Найти договор и отправить скан в WhatsApp"
                                   >
-                                    <MessageCircle className="w-3.5 h-3.5" />
-                                    <span>WhatsApp</span>
+                                    <FileText className="w-3.5 h-3.5" />
+                                    <span>Договор в WA</span>
                                   </button>
                                   {canWrite && (
                                     <button
@@ -1815,6 +1809,17 @@ export default function App() {
                             </div>
 
                             <div className="flex flex-wrap items-center gap-2">
+                              {buildDirectWhatsAppUrl(c.clientPhone) && (
+                                <a
+                                  href={buildDirectWhatsAppUrl(c.clientPhone)!}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 border border-emerald-700 rounded-lg hover:bg-emerald-700 flex items-center gap-1.5"
+                                >
+                                  <MessageCircle className="w-3.5 h-3.5" />
+                                  <span>Написать в WhatsApp</span>
+                                </a>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => {
@@ -1823,8 +1828,8 @@ export default function App() {
                                 }}
                                 className="px-3 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5"
                               >
-                                <MessageCircle className="w-3.5 h-3.5" />
-                                <span>Отправить в WhatsApp / Скан ({attachedFilesCount})</span>
+                                <FileText className="w-3.5 h-3.5" />
+                                <span>Отправить договор / Скан ({attachedFilesCount})</span>
                               </button>
                               <button
                                 type="button"
@@ -2064,16 +2069,16 @@ export default function App() {
                 </div>
               )}
 
-              {/* ==================== 4. ПЛАТЕЖИ И РУЧНОЕ РАСПРЕДЕЛЕНИЕ ==================== */}
+              {/* ==================== 4. ПЛАТЕЖИ И РАСПРЕДЕЛЕНИЕ ==================== */}
               {activeSection === 'payments' && (
                 <div className="space-y-6">
                   <div className="flex flex-wrap items-center justify-between gap-4">
                     <div>
                       <h1 className="text-2xl font-bold text-slate-900">
-                        Платежи клиентов и ручное распределение
+                        Платежи клиентов и распределение (авто и ручное)
                       </h1>
                       <p className="text-xs text-slate-500 mt-1">
-                        Частичные платежи и переводы без указания договора распределяются строго вручную по выбранным строкам графика.
+                        Автоматическое распределение по графику (закрытие месяцев по очереди) либо ручное направление сумм на выбранные платежи.
                       </p>
                     </div>
                     {canWrite && (
@@ -2153,9 +2158,9 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => setAllocatingPayment(p)}
-                                    className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap"
+                                    className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap flex items-center gap-1.5"
                                   >
-                                    Распределить вручную
+                                    <span>Распределить</span>
                                   </button>
                                 )}
                                 {p.status === 'confirmed' && !p.isDownPayment && isOwner && (
@@ -2317,14 +2322,22 @@ export default function App() {
                         className="bg-white border border-slate-200 rounded-xl p-5 space-y-3"
                       >
                         <div className="flex flex-wrap items-start justify-between gap-4">
-                          <div>
+                          <div className="space-y-1.5">
                             <div className="text-sm font-semibold text-slate-900">
                               {o.clientName} · <span className="font-mono">{o.clientPhone}</span>
                             </div>
-                            <div className="text-xs text-slate-600 mt-0.5">
+                            <div className="text-xs text-slate-600">
                               Договор <span className="font-mono font-medium">{o.contractNumber}</span>{' '}
                               · Товар: {o.itemTitle} · Платёж №{o.installmentNumber} от{' '}
                               <span className="font-mono">{formatDateRu(o.dueDate)}</span>
+                            </div>
+                            <div className="pt-0.5">
+                              <QuickCallAndCopyBar
+                                phone={o.clientPhone}
+                                clientName={o.clientName}
+                                onNotice={(msg) => notify('success', msg)}
+                                onError={(err) => notify('error', err)}
+                              />
                             </div>
                           </div>
 
@@ -2889,13 +2902,24 @@ export default function App() {
                         onChange={(e) => setPeriodTo(e.target.value)}
                         className="px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg"
                       />
-                      <a
-                        href={`/api/v1/reports/export/csv?from=${periodFrom}&to=${periodTo}`}
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await downloadProtectedFile(
+                              `/api/v1/reports/export/csv?from=${periodFrom}&to=${periodTo}`,
+                              `report_${periodFrom}_${periodTo}.csv`
+                            );
+                            notify('success', 'Отчёт CSV успешно скачан.');
+                          } catch (err) {
+                            notify('error', 'Ошибка скачивания отчёта: ' + (err instanceof Error ? err.message : 'Неизвестная ошибка'));
+                          }
+                        }}
                         className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
                       >
                         <Download className="w-3.5 h-3.5" />
                         <span>Экспорт Excel / CSV (безопасный)</span>
-                      </a>
+                      </button>
                       <button
                         type="button"
                         onClick={() => window.print()}

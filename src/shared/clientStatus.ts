@@ -100,7 +100,20 @@ export function buildWhatsAppClickToChatUrl(rawPhone: unknown, messageText: stri
   const digits = formatWhatsAppPhoneDigits(rawPhone);
   if (!digits) return null;
   const cleanText = (messageText || '').trim();
+  if (!cleanText) return `https://wa.me/${digits}`;
   return `https://wa.me/${digits}?text=${encodeURIComponent(cleanText)}`;
+}
+
+/**
+ * Builds a direct WhatsApp chat URL (`https://wa.me/7XXXXXXXXXX`) to open a chat with the client immediately.
+ */
+export function buildDirectWhatsAppUrl(rawPhone: unknown, messageText?: string): string | null {
+  const digits = formatWhatsAppPhoneDigits(rawPhone);
+  if (!digits) return null;
+  const cleanText = (messageText || '').trim();
+  return cleanText
+    ? `https://wa.me/${digits}?text=${encodeURIComponent(cleanText)}`
+    : `https://wa.me/${digits}`;
 }
 
 /**
