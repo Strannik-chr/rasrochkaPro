@@ -92,6 +92,42 @@ export interface ClientDTO {
   paymentStatus?: ClientPaymentStatus;
   paymentStatusLabel?: string;
   paymentStatusReason?: string;
+  guarantorContracts?: GuarantorContractHistoryDTO[];
+  guarantorActiveCount?: number;
+}
+
+export interface ContractGuarantorDTO {
+  id: string;
+  contractId: string;
+  clientId: string;
+  guarantorOrder: number;
+  fullName: string;
+  phone: string;
+  secondaryPhone: string;
+  documentRef: string;
+  address: string;
+  notes: string;
+  signedGuaranteeReceived: boolean;
+  createdAt: string;
+  documents?: DocumentDTO[];
+}
+
+export interface GuarantorContractHistoryDTO {
+  id: string;
+  contractId: string;
+  contractNumber: string;
+  itemTitle: string;
+  borrowerClientId: string;
+  borrowerName: string;
+  borrowerPhone: string;
+  salePriceKopecks: number;
+  remainingDebtKopecks: number;
+  overdueKopecks: number;
+  status: ContractStatus;
+  startDate: string;
+  guarantorOrder: number;
+  notes: string;
+  signedGuaranteeReceived: boolean;
 }
 
 export interface SupplierDTO {
@@ -196,6 +232,10 @@ export interface ContractDTO {
   contractStatus?: ClientPaymentStatus;
   contractStatusLabel?: string;
   contractStatusReason?: string;
+  clientDocumentRef?: string;
+  clientAddress?: string;
+  clientSecondaryPhone?: string;
+  guarantors: ContractGuarantorDTO[];
   schedule: ScheduleItemDTO[];
   scheduleHistory: ScheduleVersionDTO[];
 }
@@ -306,6 +346,8 @@ export interface DocumentDTO {
   previousDocumentId?: string | null;
   replacedById?: string | null;
   isArchived?: boolean;
+  guarantorClientId?: string | null;
+  guarantorDocType?: string;
   createdByEmail: string;
   createdAt: string;
 }

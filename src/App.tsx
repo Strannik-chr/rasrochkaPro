@@ -286,6 +286,7 @@ export default function App() {
 
   const [previewingDocument, setPreviewingDocument] = useState<DocumentDTO | null>(null);
   const [confirmDeleteContractDocId, setConfirmDeleteContractDocId] = useState<string | null>(null);
+  const [confirmRemoveGuarantorId, setConfirmRemoveGuarantorId] = useState<string | null>(null);
 
   const fetchProtectedBlob = useCallback(
     async (path: string): Promise<Blob> => {
@@ -552,7 +553,15 @@ export default function App() {
       !q ||
       c.contractNumber.toLowerCase().includes(q) ||
       c.clientName.toLowerCase().includes(q) ||
-      c.itemTitle.toLowerCase().includes(q)
+      c.clientPhone.toLowerCase().includes(q) ||
+      (qDigits.length >= 3 && c.clientPhone.replace(/\D/g, '').includes(qDigits)) ||
+      c.itemTitle.toLowerCase().includes(q) ||
+      (c.guarantors || []).some(
+        (g) =>
+          g.fullName.toLowerCase().includes(q) ||
+          g.phone.toLowerCase().includes(q) ||
+          (qDigits.length >= 3 && g.phone.replace(/\D/g, '').includes(qDigits))
+      )
   );
   const filteredClients = useMemo(() => {
     const base = clients.filter((c) => {
@@ -1619,6 +1628,15 @@ export default function App() {
                                     />
                                     <span>{statusMeta.label}</span>
                                   </span>
+                                  {(cl.guarantorContracts?.length || 0) > 0 && (
+                                    <span
+                                      onClick={() => setViewingClientCardId(cl.id)}
+                                      title="Клиент выступает поручителем по договорам других заёмщиков"
+                                      className="px-2 py-0.5 text-[11px] font-medium bg-indigo-50 text-indigo-800 border border-indigo-200 rounded-md cursor-pointer"
+                                    >
+                                      Поручитель: {cl.guarantorContracts?.length} дог.
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">
                                   {cl.paymentStatusReason || cl.address || '—'}
@@ -1857,6 +1875,154 @@ export default function App() {
                               </button>
                             </div>
                           </div>
+
+                        {/* Guarantors of this Contract */}
+                        {c.guarantors && c.guarantors.length > 0 && (
+                          <div className="p-3.5 bg-indigo-50/40 border border-indigo-200 rounded-lg space-y-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs font-semibold text-slate-900">
+                                Поручители по договору ({c.guarantors.length}):
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                              {c.guarantors.map((g) => (
+                                <div
+                                  key={g.id}
+                                  className="p-3 bg-white border border-slate-200 rounded-lg text-xs space-y-1.5"
+                                >
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="px-2 py-0.5 bg-slate-900 text-white font-semibold rounded text-[11px]">
+                                        Поручитель №{g.guarantorOrder}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => setViewingClientCardId(g.clientId)}
+                                        className="font-semibold text-slate-900 hover:underline text-left"
+                                      >
+                                        {g.fullName}
+                                      </button>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                      <span
+                                        className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
+                                          g.signedGuaranteeReceived
+                                            ? 'bg-emerald-100 text-emerald-800'
+                                            : 'bg-amber-100 text-amber-800'
+                                        }`}
+                                      >
+                                        {g.signedGuaranteeReceived
+                                          ? 'Поручительство подписано'
+                                          : 'Без отметки о подписи'}
+                                      </span>
+                                      {canWrite &&
+                                        (confirmRemoveGuarantorId === g.id ? (
+                                          <span className="inline-flex items-center gap-1 bg-red-50 border border-red-200 px-2 py-0.5 rounded">
+                                            <button
+                                              type="button"
+                                              onClick={async () => {
+                                                try {
+                                                  await apiFetch(
+                                                    `/api/v1/contracts/${c.id}/guarantors/${g.id}`,
+                                                    { method: 'DELETE' }
+                                                  );
+                                                  setConfirmRemoveGuarantorId(null);
+                                                  await loadFullState();
+                                                  notify(
+                                                    'success',
+                                                    `Поручитель «${g.fullName}» откреплён от договора.`
+                                                  );
+                                                } catch (err) {
+                                                  notify(
+                                                    'error',
+                                                    err instanceof Error
+                                                      ? err.message
+                                                      : 'Ошибка удаления поручителя'
+                                                  );
+                                                }
+                                              }}
+                                              className="text-[11px] font-semibold text-red-700 hover:underline"
+                                            >
+                                              Да, открепить
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setConfirmRemoveGuarantorId(null)}
+                                              className="text-[11px] text-slate-500 hover:text-slate-800"
+                                            >
+                                              Отмена
+                                            </button>
+                                          </span>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => setConfirmRemoveGuarantorId(g.id)}
+                                            className="p-1 text-slate-400 hover:text-red-600 rounded"
+                                            title="Убрать поручителя из договора"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                          </button>
+                                        ))}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                                    <div className="font-mono text-slate-700">
+                                      Тел.: {g.phone}
+                                      {g.secondaryPhone ? ` · Доп.: ${g.secondaryPhone}` : ''}
+                                    </div>
+                                    <QuickCallAndCopyBar
+                                      phone={g.phone}
+                                      clientName={g.fullName}
+                                      onNotice={(msg) => notify('success', msg)}
+                                      onError={(err) => notify('error', err)}
+                                    />
+                                  </div>
+
+                                  {(g.documentRef || g.address) && (
+                                    <div className="text-[11px] text-slate-600">
+                                      {g.documentRef ? `Паспорт: ${g.documentRef}` : ''}
+                                      {g.documentRef && g.address ? ' · ' : ''}
+                                      {g.address ? `Адрес: ${g.address}` : ''}
+                                    </div>
+                                  )}
+
+                                  {g.notes && (
+                                    <div className="text-[11px] text-slate-500 italic">
+                                      Примечание: {g.notes}
+                                    </div>
+                                  )}
+
+                                  {g.documents && g.documents.length > 0 && (
+                                    <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1.5">
+                                      {g.documents.map((gDoc) => (
+                                        <div
+                                          key={gDoc.id}
+                                          className="px-2 py-1 bg-slate-50 border border-slate-200 rounded text-[11px] inline-flex items-center gap-1.5"
+                                        >
+                                          <FileText className="w-3 h-3 text-slate-500" />
+                                          <span
+                                            className="truncate max-w-[150px]"
+                                            title={gDoc.title || gDoc.originalFilename}
+                                          >
+                                            {gDoc.originalFilename}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() => setPreviewingDocument(gDoc)}
+                                            className="text-slate-700 hover:text-slate-900 font-medium"
+                                          >
+                                            Просмотр
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                         {/* Attached Photos / Scans of this Contract */}
                         {contractDocs.length > 0 && (

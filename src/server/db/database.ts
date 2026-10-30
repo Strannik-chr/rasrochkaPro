@@ -207,6 +207,18 @@ function initializeSchema(db: DatabaseSync): void {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS contract_guarantors (
+      id TEXT PRIMARY KEY,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+      client_id TEXT NOT NULL REFERENCES clients(id),
+      guarantor_order INTEGER NOT NULL DEFAULT 1 CHECK (guarantor_order > 0),
+      notes TEXT NOT NULL DEFAULT '',
+      signed_guarantee_received INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(contract_id, client_id)
+    );
+
     CREATE TABLE IF NOT EXISTS schedule_versions (
       id TEXT PRIMARY KEY,
       contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
@@ -331,6 +343,8 @@ function initializeSchema(db: DatabaseSync): void {
       previous_document_id TEXT,
       replaced_by_id TEXT,
       is_archived INTEGER NOT NULL DEFAULT 0,
+      guarantor_client_id TEXT,
+      guarantor_doc_type TEXT NOT NULL DEFAULT '',
       created_by TEXT,
       created_at TEXT NOT NULL
     );
@@ -497,6 +511,12 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
   if (!docColNames.has('is_archived')) {
     db.exec('ALTER TABLE documents ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;');
   }
+  if (!docColNames.has('guarantor_client_id')) {
+    db.exec('ALTER TABLE documents ADD COLUMN guarantor_client_id TEXT;');
+  }
+  if (!docColNames.has('guarantor_doc_type')) {
+    db.exec("ALTER TABLE documents ADD COLUMN guarantor_doc_type TEXT NOT NULL DEFAULT '';");
+  }
 
   // Backfill client_id / contract_id on existing documents if missing
   db.exec(`
@@ -575,6 +595,9 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
   db.exec('CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_contract ON documents(contract_id);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_client ON documents(client_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_guarantor_client ON documents(guarantor_client_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_contract_guarantors_contract ON contract_guarantors(contract_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_contract_guarantors_client ON contract_guarantors(client_id);');
 
   // Record applied non-destructive schema migrations
   recordMigration(db, '001_initial_schema', 'Базовая схема финансового учёта рассрочки');
@@ -589,6 +612,11 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     db,
     '005_non_destructive_storage_sync',
     'Двойное хранение и автовосстановление фотографий и сканов договоров между БД и диском'
+  );
+  recordMigration(
+    db,
+    '006_contract_guarantors',
+    'Поддержка одного или нескольких поручителей по договору рассрочки и документов поручителей'
   );
 
   // Sync documents/photos between SQLite and disk so nothing is ever lost after updates
@@ -1332,6 +1360,7 @@ export function inspectDatabaseRecords(db: DatabaseSync): DatabaseInventoryRepor
     'suppliers',
     'purchases',
     'contracts',
+    'contract_guarantors',
     'schedule_versions',
     'schedule_items',
     'overdue_contacts',
@@ -1397,6 +1426,7 @@ export function cleanResetOperationalData(
     db.exec('DELETE FROM overdue_contacts;');
     db.exec('DELETE FROM schedule_items;');
     db.exec('DELETE FROM schedule_versions;');
+    db.exec('DELETE FROM contract_guarantors;');
     db.exec('DELETE FROM contracts;');
     db.exec('DELETE FROM purchases;');
     db.exec('DELETE FROM suppliers;');

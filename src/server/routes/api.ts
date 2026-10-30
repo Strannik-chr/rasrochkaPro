@@ -941,11 +941,62 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       )
       .all() as Array<Record<string, unknown>>;
 
+    // Documents (loaded early so we can attach guarantor documents to contract guarantors)
+    const docsRaw = db
+      .prepare(
+        `
+        SELECT d.id, d.entity_type, d.entity_id, d.client_id, d.contract_id,
+               d.doc_category, d.title, d.original_filename, d.mime_type,
+               d.size_bytes, d.sha256_hash, d.previous_document_id, d.replaced_by_id,
+               d.is_archived, d.guarantor_client_id, d.guarantor_doc_type, d.created_at,
+               COALESCE(u.email, 'system') as created_by_email
+        FROM documents d
+        LEFT JOIN users u ON u.id = d.created_by
+        ORDER BY d.created_at DESC
+      `
+      )
+      .all() as Array<Record<string, unknown>>;
+    const documents = docsRaw.map((d) => ({
+      id: String(d.id),
+      entityType: String(d.entity_type) as any,
+      entityId: String(d.entity_id),
+      clientId: d.client_id ? String(d.client_id) : null,
+      contractId: d.contract_id ? String(d.contract_id) : null,
+      docCategory: String(d.doc_category) as any,
+      title: String(d.title),
+      originalFilename: String(d.original_filename),
+      mimeType: String(d.mime_type),
+      sizeBytes: Number(d.size_bytes),
+      sha256Hash: String(d.sha256_hash),
+      previousDocumentId: d.previous_document_id ? String(d.previous_document_id) : null,
+      replacedById: d.replaced_by_id ? String(d.replaced_by_id) : null,
+      isArchived: Boolean(d.is_archived),
+      guarantorClientId: d.guarantor_client_id ? String(d.guarantor_client_id) : null,
+      guarantorDocType: String(d.guarantor_doc_type || ''),
+      createdByEmail: String(d.created_by_email),
+      createdAt: String(d.created_at),
+    }));
+
+    // Contract Guarantors (many-to-many between contracts and clients)
+    const allGuarantorsRaw = db
+      .prepare(
+        `
+        SELECT cg.*, cl.full_name, cl.phone, cl.secondary_phone, cl.document_ref, cl.address
+        FROM contract_guarantors cg
+        JOIN clients cl ON cl.id = cg.client_id
+        ORDER BY cg.guarantor_order ASC, cg.created_at ASC
+      `
+      )
+      .all() as Array<Record<string, unknown>>;
+
     // Contracts
     const contractsRaw = db
       .prepare(
         `
-        SELECT c.*, cl.full_name as client_name, cl.phone as client_phone
+        SELECT c.*, cl.full_name as client_name, cl.phone as client_phone,
+               cl.secondary_phone as client_secondary_phone,
+               cl.document_ref as client_document_ref,
+               cl.address as client_address
         FROM contracts c
         JOIN clients cl ON cl.id = c.client_id
         ORDER BY c.created_at DESC
@@ -1043,12 +1094,42 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const salePrice = Number(c.sale_price_kopecks);
       const downPayment = Number(c.down_payment_kopecks);
 
+      const contractGuarantors = allGuarantorsRaw
+        .filter((g) => String(g.contract_id) === cId)
+        .map((g) => {
+          const gClientId = String(g.client_id);
+          const gDocs = documents.filter(
+            (d) =>
+              !d.isArchived &&
+              ((d.contractId === cId && d.guarantorClientId === gClientId) ||
+                (d.entityType === 'client' && d.entityId === gClientId))
+          );
+          return {
+            id: String(g.id),
+            contractId: cId,
+            clientId: gClientId,
+            guarantorOrder: Number(g.guarantor_order),
+            fullName: String(g.full_name),
+            phone: String(g.phone),
+            secondaryPhone: String(g.secondary_phone || ''),
+            documentRef: String(g.document_ref || ''),
+            address: String(g.address || ''),
+            notes: String(g.notes || ''),
+            signedGuaranteeReceived: Boolean(g.signed_guarantee_received),
+            createdAt: String(g.created_at),
+            documents: gDocs,
+          };
+        });
+
       return {
         id: cId,
         contractNumber: String(c.contract_number),
         clientId: String(c.client_id),
         clientName: String(c.client_name),
         clientPhone: String(c.client_phone),
+        clientSecondaryPhone: String(c.client_secondary_phone || ''),
+        clientDocumentRef: String(c.client_document_ref || ''),
+        clientAddress: String(c.client_address || ''),
         purchaseId: c.purchase_id ? String(c.purchase_id) : null,
         planId: c.plan_id ? String(c.plan_id) : null,
         planVersion: Number(c.plan_version),
@@ -1082,12 +1163,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         contractStatus: contractEval.status,
         contractStatusLabel: contractEval.label,
         contractStatusReason: contractEval.reason,
+        guarantors: contractGuarantors,
         schedule: activeSchedule,
         scheduleHistory,
       };
     });
 
-    // Clients with aggregated debt & automatic status calculation
+    // Clients with aggregated debt & automatic status calculation (strictly separated from guarantor participation)
     const clientsRaw = db
       .prepare('SELECT * FROM clients ORDER BY created_at DESC')
       .all() as Array<Record<string, unknown>>;
@@ -1111,6 +1193,34 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       );
       const totalDebtKopecks = activeClientContracts.reduce((sum, c) => sum + c.remainingDebtKopecks, 0);
       const overdueDebtKopecks = activeClientContracts.reduce((sum, c) => sum + c.overdueKopecks, 0);
+
+      // Contracts where this person participates as a Guarantor (NOT primary borrower)
+      const guarantorContracts = contracts
+        .filter((c) => c.guarantors.some((g) => g.clientId === clientId))
+        .map((c) => {
+          const gEntry = c.guarantors.find((g) => g.clientId === clientId)!;
+          return {
+            id: gEntry.id,
+            contractId: c.id,
+            contractNumber: c.contractNumber,
+            itemTitle: c.itemTitle,
+            borrowerClientId: c.clientId,
+            borrowerName: c.clientName,
+            borrowerPhone: c.clientPhone,
+            salePriceKopecks: c.salePriceKopecks,
+            remainingDebtKopecks: c.remainingDebtKopecks,
+            overdueKopecks: c.overdueKopecks,
+            status: c.status,
+            startDate: c.startDate,
+            guarantorOrder: gEntry.guarantorOrder,
+            notes: gEntry.notes,
+            signedGuaranteeReceived: gEntry.signedGuaranteeReceived,
+          };
+        });
+      const guarantorActiveCount = guarantorContracts.filter(
+        (gc) => gc.status === 'active' || gc.status === 'restructured'
+      ).length;
+
       return {
         id: clientId,
         fullName: String(cl.full_name),
@@ -1134,6 +1244,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         paymentStatus: overallEval.status,
         paymentStatusLabel: overallEval.label,
         paymentStatusReason: overallEval.reason,
+        guarantorContracts,
+        guarantorActiveCount,
       };
     });
 
@@ -1357,39 +1469,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       createdAt: String(l.created_at),
     }));
 
-    // Documents
-    const docsRaw = db
-      .prepare(
-        `
-        SELECT d.id, d.entity_type, d.entity_id, d.client_id, d.contract_id,
-               d.doc_category, d.title, d.original_filename, d.mime_type,
-               d.size_bytes, d.sha256_hash, d.previous_document_id, d.replaced_by_id,
-               d.is_archived, d.created_at,
-               COALESCE(u.email, 'system') as created_by_email
-        FROM documents d
-        LEFT JOIN users u ON u.id = d.created_by
-        ORDER BY d.created_at DESC
-      `
-      )
-      .all() as Array<Record<string, unknown>>;
-    const documents = docsRaw.map((d) => ({
-      id: String(d.id),
-      entityType: String(d.entity_type) as any,
-      entityId: String(d.entity_id),
-      clientId: d.client_id ? String(d.client_id) : null,
-      contractId: d.contract_id ? String(d.contract_id) : null,
-      docCategory: String(d.doc_category) as any,
-      title: String(d.title),
-      originalFilename: String(d.original_filename),
-      mimeType: String(d.mime_type),
-      sizeBytes: Number(d.size_bytes),
-      sha256Hash: String(d.sha256_hash),
-      previousDocumentId: d.previous_document_id ? String(d.previous_document_id) : null,
-      replacedById: d.replaced_by_id ? String(d.replaced_by_id) : null,
-      isArchived: Boolean(d.is_archived),
-      createdByEmail: String(d.created_by_email),
-      createdAt: String(d.created_at),
-    }));
+    // Documents already loaded above for contract_guarantors mapping
 
     // Owner-only data: Users, Backups, Audit logs
     let usersList: unknown[] = [];
@@ -2365,6 +2445,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           idempotencyKey,
           clientId,
           newClient,
+          clientUpdates,
+          guarantors,
           purchaseId,
           planId,
           itemTitle,
@@ -2390,6 +2472,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           clientId?: string;
           newClient?: {
             fullName?: string;
+            lastName?: string;
+            firstName?: string;
+            middleName?: string;
             phone?: string;
             secondaryPhone?: string;
             documentRef?: string;
@@ -2397,6 +2482,44 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             notes?: string;
             allowSimilarName?: boolean;
           };
+          clientUpdates?: {
+            secondaryPhone?: string;
+            documentRef?: string;
+            address?: string;
+          };
+          guarantors?: Array<{
+            clientId?: string;
+            newClient?: {
+              fullName?: string;
+              lastName?: string;
+              firstName?: string;
+              middleName?: string;
+              phone?: string;
+              secondaryPhone?: string;
+              documentRef?: string;
+              address?: string;
+              notes?: string;
+              allowSimilarName?: boolean;
+            };
+            fullName?: string;
+            lastName?: string;
+            firstName?: string;
+            middleName?: string;
+            phone?: string;
+            secondaryPhone?: string;
+            documentRef?: string;
+            address?: string;
+            notes?: string;
+            signedGuaranteeReceived?: boolean;
+            allowSimilarName?: boolean;
+            attachments?: Array<{
+              title?: string;
+              originalFilename: string;
+              mimeType?: string;
+              contentBase64: string;
+              guarantorDocType?: string;
+            }>;
+          }>;
           purchaseId?: string | null;
           planId?: string | null;
           itemTitle?: string;
@@ -2456,6 +2579,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
         // Validate client selection or inline newClient creation
         let resolvedClientId = clientId ? String(clientId).trim() : '';
+        let resolvedPrimaryPhone = '';
         let createdNewClientData: {
           id: string;
           fullName: string;
@@ -2468,14 +2592,21 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
         if (resolvedClientId) {
           const existingClient = db
-            .prepare('SELECT id, full_name FROM clients WHERE id = ?')
-            .get(resolvedClientId) as { id: string; full_name: string } | undefined;
+            .prepare('SELECT id, full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ?')
+            .get(resolvedClientId) as
+            | { id: string; full_name: string; phone: string; secondary_phone: string; document_ref: string; address: string }
+            | undefined;
           if (!existingClient) {
             res.status(400).json({ error: 'Выбранный клиент не найден в базе данных.' });
             return;
           }
+          resolvedPrimaryPhone = normalizeRussianPhone(existingClient.phone) || existingClient.phone.trim();
         } else if (newClient) {
-          const rawName = (newClient.fullName || '').trim();
+          const composedName = [newClient.lastName, newClient.firstName, newClient.middleName]
+            .map((s) => (s || '').trim())
+            .filter(Boolean)
+            .join(' ');
+          const rawName = (newClient.fullName || composedName || '').trim();
           const rawPhone = (newClient.phone || '').trim();
           if (!rawName || !rawPhone) {
             res.status(400).json({
@@ -2540,6 +2671,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           }
 
           resolvedClientId = `cli_${crypto.randomUUID().slice(0, 8)}`;
+          resolvedPrimaryPhone = normalizedPhone;
           const normalizedSecondary = newClient.secondaryPhone?.trim()
             ? normalizeRussianPhone(newClient.secondaryPhone) || newClient.secondaryPhone.trim()
             : '';
@@ -2558,7 +2690,237 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
-        // Validate optional attachments BEFORE opening DB transaction
+        // Validate optional guarantors (0, 1, 2, 3, ... up to 15) BEFORE opening DB transaction
+        const requestedGuarantors = Array.isArray(guarantors) ? guarantors : [];
+        if (requestedGuarantors.length > 15) {
+          res.status(400).json({
+            error: 'Превышено допустимое количество поручителей по одному договору (максимум 15).',
+          });
+          return;
+        }
+
+        const seenGuarantorClientIds = new Set<string>();
+        const seenGuarantorPhones = new Set<string>();
+        const validatedGuarantors: Array<{
+          guarantorRowId: string;
+          guarantorOrder: number;
+          resolvedGuarantorClientId: string;
+          createdNewGuarantorClient: {
+            id: string;
+            fullName: string;
+            phone: string;
+            secondaryPhone: string;
+            documentRef: string;
+            address: string;
+            notes: string;
+          } | null;
+          updateExistingGuarantorFields: {
+            secondaryPhone?: string;
+            documentRef?: string;
+            address?: string;
+          } | null;
+          notes: string;
+          signedGuaranteeReceived: boolean;
+          attachments: Array<{
+            id: string;
+            title: string;
+            originalFilename: string;
+            storedFilename: string;
+            detectedMime: string;
+            buffer: Buffer;
+            contentBase64: string;
+            docCategory: string;
+            guarantorDocType: string;
+          }>;
+        }> = [];
+
+        for (let idx = 0; idx < requestedGuarantors.length; idx++) {
+          const g = requestedGuarantors[idx];
+          const gLabel = `Поручитель №${idx + 1}`;
+          const explicitGClientId = g.clientId ? String(g.clientId).trim() : '';
+          let resolvedGClientId = '';
+          let resolvedGPhone = '';
+          let createdNewGClient: {
+            id: string;
+            fullName: string;
+            phone: string;
+            secondaryPhone: string;
+            documentRef: string;
+            address: string;
+            notes: string;
+          } | null = null;
+          let updateExistingGFields: {
+            secondaryPhone?: string;
+            documentRef?: string;
+            address?: string;
+          } | null = null;
+
+          if (explicitGClientId) {
+            const existingG = db
+              .prepare('SELECT id, full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ?')
+              .get(explicitGClientId) as
+              | { id: string; full_name: string; phone: string; secondary_phone: string; document_ref: string; address: string }
+              | undefined;
+            if (!existingG) {
+              res.status(400).json({ error: `${gLabel}: выбранный поручитель не найден в базе.` });
+              return;
+            }
+            resolvedGClientId = existingG.id;
+            resolvedGPhone = normalizeRussianPhone(existingG.phone) || existingG.phone.trim();
+
+            const srcObj = g.newClient || g;
+            if (srcObj.documentRef !== undefined || srcObj.address !== undefined || srcObj.secondaryPhone !== undefined) {
+              updateExistingGFields = {
+                secondaryPhone: srcObj.secondaryPhone,
+                documentRef: srcObj.documentRef,
+                address: srcObj.address,
+              };
+            }
+          } else {
+            const srcObj = g.newClient || g;
+            const composedGName = [srcObj.lastName, srcObj.firstName, srcObj.middleName]
+              .map((s) => (s || '').trim())
+              .filter(Boolean)
+              .join(' ');
+            const rawGName = (srcObj.fullName || composedGName || '').trim();
+            const rawGPhone = (srcObj.phone || '').trim();
+
+            if (!rawGName || !rawGPhone) {
+              res.status(400).json({
+                error: `${gLabel}: укажите ФИО и основной номер телефона поручителя.`,
+              });
+              return;
+            }
+
+            const normalizedGPhone = normalizeRussianPhone(rawGPhone);
+            if (!normalizedGPhone) {
+              res.status(400).json({
+                error: `${gLabel}: укажите корректный российский номер телефона (+7XXXXXXXXXX или 8XXXXXXXXXX).`,
+              });
+              return;
+            }
+
+            if (normalizedGPhone === resolvedPrimaryPhone) {
+              res.status(400).json({
+                error: `${gLabel}: основной плательщик не может быть поручителем по собственному договору (совпадает телефон ${normalizedGPhone}).`,
+              });
+              return;
+            }
+
+            const existingByPhone = db
+              .prepare('SELECT id, full_name, phone, document_ref, address FROM clients WHERE phone = ? OR secondary_phone = ?')
+              .get(normalizedGPhone, normalizedGPhone) as
+              | { id: string; full_name: string; phone: string; document_ref: string; address: string }
+              | undefined;
+
+            if (existingByPhone) {
+              res.status(409).json({
+                error: `${gLabel}: человек с номером ${normalizedGPhone} уже зарегистрирован в базе («${existingByPhone.full_name}»). Выберите его из базы, чтобы не создавать дубликат.`,
+                duplicateGuarantorClient: {
+                  guarantorIndex: idx,
+                  id: existingByPhone.id,
+                  fullName: existingByPhone.full_name,
+                  phone: existingByPhone.phone,
+                  documentRef: existingByPhone.document_ref,
+                  address: existingByPhone.address,
+                },
+              });
+              return;
+            }
+
+            resolvedGClientId = `cli_${crypto.randomUUID().slice(0, 8)}`;
+            resolvedGPhone = normalizedGPhone;
+            const normSecPhone = srcObj.secondaryPhone?.trim()
+              ? normalizeRussianPhone(srcObj.secondaryPhone) || srcObj.secondaryPhone.trim()
+              : '';
+
+            createdNewGClient = {
+              id: resolvedGClientId,
+              fullName: rawGName,
+              phone: normalizedGPhone,
+              secondaryPhone: normSecPhone,
+              documentRef: (srcObj.documentRef || '').trim(),
+              address: (srcObj.address || '').trim(),
+              notes: (g.notes || srcObj.notes || '').trim(),
+            };
+          }
+
+          if (resolvedGClientId === resolvedClientId) {
+            res.status(400).json({
+              error: `${gLabel}: основной плательщик не может выступать поручителем по собственному договору.`,
+            });
+            return;
+          }
+
+          if (seenGuarantorClientIds.has(resolvedGClientId) || (resolvedGPhone && seenGuarantorPhones.has(resolvedGPhone))) {
+            res.status(400).json({
+              error: `${gLabel}: один и тот же человек не может быть добавлен поручителем дважды в один договор.`,
+            });
+            return;
+          }
+
+          seenGuarantorClientIds.add(resolvedGClientId);
+          if (resolvedGPhone) {
+            seenGuarantorPhones.add(resolvedGPhone);
+          }
+
+          const gAttachments: Array<{
+            id: string;
+            title: string;
+            originalFilename: string;
+            storedFilename: string;
+            detectedMime: string;
+            buffer: Buffer;
+            contentBase64: string;
+            docCategory: string;
+            guarantorDocType: string;
+          }> = [];
+
+          if (Array.isArray(g.attachments) && g.attachments.length > 0) {
+            for (const att of g.attachments) {
+              if (!att.originalFilename || !att.contentBase64) {
+                res.status(400).json({ error: `${gLabel}: прикреплённый файл повреждён или пуст.` });
+                return;
+              }
+              const buffer = Buffer.from(att.contentBase64, 'base64');
+              const sigCheck = validateUploadedFileSignature(buffer, att.mimeType || '', att.originalFilename);
+              if (!sigCheck.valid || !sigCheck.detectedMime) {
+                res.status(400).json({
+                  error:
+                    sigCheck.reason ||
+                    `${gLabel}: файл «${att.originalFilename}» не прошёл проверку формата (разрешены JPEG, PNG, WebP, PDF).`,
+                });
+                return;
+              }
+              const ext = (att.originalFilename.split('.').pop() || 'bin').toLowerCase();
+              const safeDocCategory = sigCheck.detectedMime.startsWith('image/') ? 'photo' : 'contract_scan';
+              gAttachments.push({
+                id: `doc_${crypto.randomUUID().slice(0, 8)}`,
+                title: (att.title || `Документ поручителя №${idx + 1} (${att.originalFilename})`).trim(),
+                originalFilename: att.originalFilename.replace(/[^a-zA-Z0-9._\-\u0400-\u04FF ]/g, '_'),
+                storedFilename: `${crypto.randomUUID()}.${ext}`,
+                detectedMime: sigCheck.detectedMime,
+                buffer,
+                contentBase64: att.contentBase64,
+                docCategory: safeDocCategory,
+                guarantorDocType: (att.guarantorDocType || 'passport').trim(),
+              });
+            }
+          }
+
+          validatedGuarantors.push({
+            guarantorRowId: `cg_${crypto.randomUUID().slice(0, 8)}`,
+            guarantorOrder: idx + 1,
+            resolvedGuarantorClientId: resolvedGClientId,
+            createdNewGuarantorClient: createdNewGClient,
+            updateExistingGuarantorFields: updateExistingGFields,
+            notes: (g.notes || '').trim(),
+            signedGuaranteeReceived: Boolean(g.signedGuaranteeReceived),
+            attachments: gAttachments,
+          });
+        }
+
+        // Validate optional contract attachments BEFORE opening DB transaction
         const validatedAttachments: Array<{
           id: string;
           title: string;
@@ -2593,7 +2955,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               detectedMime: sigCheck.detectedMime,
               buffer,
               contentBase64: att.contentBase64,
-              docCategory: att.docCategory || 'contract_scan',
+              docCategory: 'contract_scan',
             });
           }
         }
@@ -2629,12 +2991,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const contractId = `cnt_${crypto.randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
         const uploadedDocumentIds: string[] = [];
+        const createdGuarantorIds: string[] = [];
 
         withTransaction(db, () => {
           if (createdNewClientData) {
             db.prepare(`
-              INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+              INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_by, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
             `).run(
               createdNewClientData.id,
               createdNewClientData.fullName,
@@ -2643,6 +3006,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               createdNewClientData.documentRef,
               createdNewClientData.address,
               createdNewClientData.notes,
+              req.user!.id,
               now
             );
 
@@ -2654,6 +3018,28 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               entityId: createdNewClientData.id,
               summary: `При оформлении договора ${contractNumber} создан новый клиент «${createdNewClientData.fullName}» (${createdNewClientData.phone}).`,
             });
+          } else if (clientUpdates && resolvedClientId) {
+            // Optional inline updates to existing primary client's passport/address/secondaryPhone
+            const cur = db
+              .prepare('SELECT secondary_phone, document_ref, address FROM clients WHERE id = ?')
+              .get(resolvedClientId) as
+              | { secondary_phone: string; document_ref: string; address: string }
+              | undefined;
+            if (cur) {
+              const nextSec =
+                clientUpdates.secondaryPhone !== undefined
+                  ? clientUpdates.secondaryPhone.trim()
+                  : cur.secondary_phone;
+              const nextDoc =
+                clientUpdates.documentRef !== undefined
+                  ? clientUpdates.documentRef.trim()
+                  : cur.document_ref;
+              const nextAddr =
+                clientUpdates.address !== undefined ? clientUpdates.address.trim() : cur.address;
+              db.prepare(
+                'UPDATE clients SET secondary_phone = ?, document_ref = ?, address = ? WHERE id = ?'
+              ).run(nextSec, nextDoc, nextAddr, resolvedClientId);
+            }
           }
 
           db.prepare(`
@@ -2689,6 +3075,98 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             req.user!.id,
             now
           );
+
+          // Save guarantors and their documents atomically
+          for (const gItem of validatedGuarantors) {
+            if (gItem.createdNewGuarantorClient) {
+              const gc = gItem.createdNewGuarantorClient;
+              db.prepare(`
+                INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+              `).run(
+                gc.id,
+                gc.fullName,
+                gc.phone,
+                gc.secondaryPhone,
+                gc.documentRef,
+                gc.address,
+                gc.notes,
+                req.user!.id,
+                now
+              );
+
+              recordAudit(db, {
+                actorUserId: req.user!.id,
+                actorEmail: req.user!.phone || req.user!.email,
+                action: 'GUARANTOR_CLIENT_CREATED',
+                entityType: 'client',
+                entityId: gc.id,
+                summary: `При оформлении договора ${contractNumber} создана карточка поручителя «${gc.fullName}» (${gc.phone}).`,
+              });
+            } else if (gItem.updateExistingGuarantorFields) {
+              const curG = db
+                .prepare('SELECT secondary_phone, document_ref, address FROM clients WHERE id = ?')
+                .get(gItem.resolvedGuarantorClientId) as
+                | { secondary_phone: string; document_ref: string; address: string }
+                | undefined;
+              if (curG) {
+                const upd = gItem.updateExistingGuarantorFields;
+                db.prepare(
+                  'UPDATE clients SET secondary_phone = ?, document_ref = ?, address = ? WHERE id = ?'
+                ).run(
+                  upd.secondaryPhone !== undefined ? upd.secondaryPhone.trim() : curG.secondary_phone,
+                  upd.documentRef !== undefined ? upd.documentRef.trim() : curG.document_ref,
+                  upd.address !== undefined ? upd.address.trim() : curG.address,
+                  gItem.resolvedGuarantorClientId
+                );
+              }
+            }
+
+            db.prepare(`
+              INSERT INTO contract_guarantors (
+                id, contract_id, client_id, guarantor_order, notes, signed_guarantee_received, created_by, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              gItem.guarantorRowId,
+              contractId,
+              gItem.resolvedGuarantorClientId,
+              gItem.guarantorOrder,
+              gItem.notes,
+              gItem.signedGuaranteeReceived ? 1 : 0,
+              req.user!.id,
+              now
+            );
+            createdGuarantorIds.push(gItem.guarantorRowId);
+
+            for (const gAtt of gItem.attachments) {
+              const { sha256 } = writePrivateDocumentBuffer(gAtt.storedFilename, gAtt.buffer);
+              db.prepare(`
+                INSERT INTO documents (
+                  id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
+                  stored_filename, mime_type, size_bytes, sha256_hash, content_base64,
+                  is_archived, guarantor_client_id, guarantor_doc_type, created_by, created_at
+                ) VALUES (?, 'contract', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+              `).run(
+                gAtt.id,
+                contractId,
+                gItem.resolvedGuarantorClientId,
+                contractId,
+                gAtt.docCategory,
+                gAtt.title,
+                gAtt.originalFilename,
+                gAtt.storedFilename,
+                gAtt.detectedMime,
+                gAtt.buffer.length,
+                sha256,
+                gAtt.contentBase64,
+                gItem.resolvedGuarantorClientId,
+                gAtt.guarantorDocType,
+                req.user!.id,
+                now
+              );
+              uploadedDocumentIds.push(gAtt.id);
+            }
+          }
 
           db.prepare(`
             INSERT INTO schedule_versions (id, contract_id, version, change_reason, created_by, created_at)
@@ -2803,7 +3281,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             action: 'CONTRACT_CREATED',
             entityType: 'contract',
             entityId: contractId,
-            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, взнос: ${formatRubles(calc.downPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес., файлов договора: ${uploadedDocumentIds.length}).`,
+            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, взнос: ${formatRubles(calc.downPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес., поручителей: ${createdGuarantorIds.length}, файлов: ${uploadedDocumentIds.length}).`,
           });
         });
 
@@ -2812,10 +3290,271 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           contractNumber,
           clientId: resolvedClientId,
           createdNewClient: Boolean(createdNewClientData),
+          guarantorIds: createdGuarantorIds,
           documentIds: uploadedDocumentIds,
         });
       } catch (err) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка оформления договора.' });
+      }
+    }
+  );
+
+  // Add a guarantor to an existing contract
+  router.post(
+    '/contracts/:id/guarantors',
+    requireAuth,
+    requireRoles(['owner', 'staff']),
+    (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const contractId = req.params.id;
+        const cRow = db
+          .prepare('SELECT id, contract_number, client_id FROM contracts WHERE id = ?')
+          .get(contractId) as { id: string; contract_number: string; client_id: string } | undefined;
+
+        if (!cRow) {
+          res.status(404).json({ error: 'Договор не найден.' });
+          return;
+        }
+
+        const {
+          clientId,
+          newClient,
+          fullName,
+          lastName,
+          firstName,
+          middleName,
+          phone,
+          secondaryPhone,
+          documentRef,
+          address,
+          notes,
+          signedGuaranteeReceived,
+        } = (req.body || {}) as {
+          clientId?: string;
+          newClient?: {
+            fullName?: string;
+            lastName?: string;
+            firstName?: string;
+            middleName?: string;
+            phone?: string;
+            secondaryPhone?: string;
+            documentRef?: string;
+            address?: string;
+            notes?: string;
+          };
+          fullName?: string;
+          lastName?: string;
+          firstName?: string;
+          middleName?: string;
+          phone?: string;
+          secondaryPhone?: string;
+          documentRef?: string;
+          address?: string;
+          notes?: string;
+          signedGuaranteeReceived?: boolean;
+        };
+
+        let resolvedGuarantorClientId = clientId ? String(clientId).trim() : '';
+        let createdNewG: {
+          id: string;
+          fullName: string;
+          phone: string;
+          secondaryPhone: string;
+          documentRef: string;
+          address: string;
+          notes: string;
+        } | null = null;
+
+        if (resolvedGuarantorClientId) {
+          const ex = db.prepare('SELECT id FROM clients WHERE id = ?').get(resolvedGuarantorClientId) as
+            | { id: string }
+            | undefined;
+          if (!ex) {
+            res.status(400).json({ error: 'Выбранный поручитель не найден в базе данных.' });
+            return;
+          }
+        } else {
+          const src = newClient || {
+            fullName,
+            lastName,
+            firstName,
+            middleName,
+            phone,
+            secondaryPhone,
+            documentRef,
+            address,
+            notes,
+          };
+          const composed = [src.lastName, src.firstName, src.middleName]
+            .map((s) => (s || '').trim())
+            .filter(Boolean)
+            .join(' ');
+          const rawName = (src.fullName || composed || '').trim();
+          const rawPhone = (src.phone || '').trim();
+          if (!rawName || !rawPhone) {
+            res.status(400).json({ error: 'Укажите ФИО и телефон поручителя.' });
+            return;
+          }
+          const normPhone = normalizeRussianPhone(rawPhone);
+          if (!normPhone) {
+            res.status(400).json({ error: 'Укажите корректный российский номер телефона поручителя.' });
+            return;
+          }
+          const dup = db
+            .prepare('SELECT id, full_name, phone FROM clients WHERE phone = ? OR secondary_phone = ?')
+            .get(normPhone, normPhone) as { id: string; full_name: string; phone: string } | undefined;
+          if (dup) {
+            res.status(409).json({
+              error: `Человек с номером ${normPhone} уже есть в базе («${dup.full_name}»). Выберите его из базы.`,
+              duplicateClient: dup,
+            });
+            return;
+          }
+          resolvedGuarantorClientId = `cli_${crypto.randomUUID().slice(0, 8)}`;
+          createdNewG = {
+            id: resolvedGuarantorClientId,
+            fullName: rawName,
+            phone: normPhone,
+            secondaryPhone: src.secondaryPhone?.trim()
+              ? normalizeRussianPhone(src.secondaryPhone) || src.secondaryPhone.trim()
+              : '',
+            documentRef: (src.documentRef || '').trim(),
+            address: (src.address || '').trim(),
+            notes: (notes || src.notes || '').trim(),
+          };
+        }
+
+        if (resolvedGuarantorClientId === cRow.client_id) {
+          res.status(400).json({
+            error: 'Основной плательщик не может быть добавлен как поручитель по собственному договору.',
+          });
+          return;
+        }
+
+        const existingLink = db
+          .prepare('SELECT id FROM contract_guarantors WHERE contract_id = ? AND client_id = ?')
+          .get(contractId, resolvedGuarantorClientId) as { id: string } | undefined;
+        if (existingLink) {
+          res.status(400).json({
+            error: 'Этот человек уже добавлен поручителем в данный договор.',
+          });
+          return;
+        }
+
+        const maxOrderRow = db
+          .prepare('SELECT COALESCE(MAX(guarantor_order), 0) as max_ord FROM contract_guarantors WHERE contract_id = ?')
+          .get(contractId) as { max_ord: number };
+        const nextOrder = Number(maxOrderRow.max_ord || 0) + 1;
+        const guarantorId = `cg_${crypto.randomUUID().slice(0, 8)}`;
+        const now = new Date().toISOString();
+
+        withTransaction(db, () => {
+          if (createdNewG) {
+            db.prepare(`
+              INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_by, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            `).run(
+              createdNewG.id,
+              createdNewG.fullName,
+              createdNewG.phone,
+              createdNewG.secondaryPhone,
+              createdNewG.documentRef,
+              createdNewG.address,
+              createdNewG.notes,
+              req.user!.id,
+              now
+            );
+          }
+
+          db.prepare(`
+            INSERT INTO contract_guarantors (
+              id, contract_id, client_id, guarantor_order, notes, signed_guarantee_received, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            guarantorId,
+            contractId,
+            resolvedGuarantorClientId,
+            nextOrder,
+            (notes || '').trim(),
+            signedGuaranteeReceived ? 1 : 0,
+            req.user!.id,
+            now
+          );
+
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'CONTRACT_GUARANTOR_ADDED',
+            entityType: 'contract',
+            entityId: contractId,
+            summary: `К договору ${cRow.contract_number} добавлен Поручитель №${nextOrder} (client_id=${resolvedGuarantorClientId}).`,
+          });
+        });
+
+        res.status(201).json({
+          id: guarantorId,
+          contractId,
+          clientId: resolvedGuarantorClientId,
+          guarantorOrder: nextOrder,
+        });
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка добавления поручителя.' });
+      }
+    }
+  );
+
+  // Remove a guarantor link from a contract (never deletes the person record from clients)
+  router.delete(
+    '/contracts/:id/guarantors/:guarantorId',
+    requireAuth,
+    requireRoles(['owner', 'staff']),
+    (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const { id: contractId, guarantorId } = req.params;
+        const row = db
+          .prepare(
+            `SELECT cg.id, cg.client_id, cg.guarantor_order, c.contract_number, cl.full_name
+             FROM contract_guarantors cg
+             JOIN contracts c ON c.id = cg.contract_id
+             JOIN clients cl ON cl.id = cg.client_id
+             WHERE cg.id = ? AND cg.contract_id = ?`
+          )
+          .get(guarantorId, contractId) as
+          | { id: string; client_id: string; guarantor_order: number; contract_number: string; full_name: string }
+          | undefined;
+
+        if (!row) {
+          res.status(404).json({ error: 'Связь поручителя с договором не найдена.' });
+          return;
+        }
+
+        withTransaction(db, () => {
+          db.prepare('DELETE FROM contract_guarantors WHERE id = ? AND contract_id = ?').run(
+            guarantorId,
+            contractId
+          );
+
+          // Re-index remaining guarantors on this contract so numbering stays sequential (1, 2, 3...)
+          const remaining = db
+            .prepare('SELECT id FROM contract_guarantors WHERE contract_id = ? ORDER BY guarantor_order ASC, created_at ASC')
+            .all(contractId) as Array<{ id: string }>;
+          remaining.forEach((rem, idx) => {
+            db.prepare('UPDATE contract_guarantors SET guarantor_order = ? WHERE id = ?').run(idx + 1, rem.id);
+          });
+
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'CONTRACT_GUARANTOR_REMOVED',
+            entityType: 'contract',
+            entityId: contractId,
+            summary: `Из договора ${row.contract_number} удалена привязка поручителя «${row.full_name}» (карточка человека в базе сохранена).`,
+          });
+        });
+
+        res.json({ ok: true, removedGuarantorId: guarantorId, preservedClientId: row.client_id });
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка удаления поручителя из договора.' });
       }
     }
   );
@@ -4082,6 +4821,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         entityId,
         clientId: explicitClientId,
         contractId: explicitContractId,
+        guarantorClientId: explicitGuarantorClientId,
+        guarantorDocType: explicitGuarantorDocType,
         docCategory,
         title,
         originalFilename,
@@ -4092,6 +4833,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         entityId?: string;
         clientId?: string;
         contractId?: string;
+        guarantorClientId?: string;
+        guarantorDocType?: string;
         docCategory?: string;
         title?: string;
         originalFilename?: string;
@@ -4134,6 +4877,22 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         resolvedClientId = entityId;
       }
 
+      const allowedCategories = new Set([
+        'contract_scan',
+        'receipt',
+        'transfer_proof',
+        'handover_act',
+        'return_act',
+        'photo',
+        'generated_template',
+      ]);
+      const safeDocCategory =
+        docCategory && allowedCategories.has(docCategory)
+          ? docCategory
+          : sigCheck.detectedMime?.startsWith('image/')
+            ? 'photo'
+            : 'contract_scan';
+
       const id = `doc_${crypto.randomUUID().slice(0, 8)}`;
       const storedFilename = `${crypto.randomUUID()}.${(originalFilename.split('.').pop() || 'bin').toLowerCase()}`;
       const { sha256 } = writePrivateDocumentBuffer(storedFilename, buffer);
@@ -4142,15 +4901,16 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       db.prepare(`
         INSERT INTO documents (
           id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
-          stored_filename, mime_type, size_bytes, sha256_hash, content_base64, is_archived, created_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+          stored_filename, mime_type, size_bytes, sha256_hash, content_base64,
+          is_archived, guarantor_client_id, guarantor_doc_type, created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       `).run(
         id,
         entityType,
         entityId,
         resolvedClientId,
         resolvedContractId,
-        docCategory || 'contract_scan',
+        safeDocCategory,
         title.trim(),
         originalFilename.replace(/[^a-zA-Z0-9._\-\u0400-\u04FF ]/g, '_'),
         storedFilename,
@@ -4158,6 +4918,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         buffer.length,
         sha256,
         contentBase64,
+        explicitGuarantorClientId || null,
+        (explicitGuarantorDocType || '').trim(),
         req.user!.id,
         now
       );
@@ -4176,6 +4938,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         sha256,
         clientId: resolvedClientId,
         contractId: resolvedContractId,
+        guarantorClientId: explicitGuarantorClientId || null,
         mimeType: sigCheck.detectedMime,
         sizeBytes: buffer.length,
         createdAt: now,

@@ -32,6 +32,10 @@ import {
   Camera,
   FileText,
   Trash2,
+  ShieldCheck,
+  Edit3,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
 interface NewContractModalProps {
@@ -52,7 +56,52 @@ interface PendingContractAttachment {
   sizeBytes: number;
   contentBase64: string;
   previewDataUrl?: string;
+  guarantorDocType?: string;
 }
+
+interface GuarantorDraftItem {
+  localId: string;
+  mode: 'existing' | 'new';
+  clientId: string;
+  searchQuery: string;
+  showSuggestions: boolean;
+  lastName: string;
+  firstName: string;
+  patronymic: string;
+  phone: string;
+  secondaryPhone: string;
+  documentRef: string;
+  address: string;
+  notes: string;
+  signedGuaranteeReceived: boolean;
+  isCollapsed: boolean;
+  selectedDocType: string;
+  attachments: PendingContractAttachment[];
+}
+
+function splitFullNameParts(fullName: string): {
+  lastName: string;
+  firstName: string;
+  patronymic: string;
+} {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  return {
+    lastName: parts[0] || '',
+    firstName: parts[1] || '',
+    patronymic: parts.slice(2).join(' ') || '',
+  };
+}
+
+function joinFullNameParts(lastName: string, firstName: string, patronymic: string): string {
+  return [lastName.trim(), firstName.trim(), patronymic.trim()].filter(Boolean).join(' ');
+}
+
+const GUARANTOR_DOC_TYPE_LABELS: Record<string, string> = {
+  guarantor_passport: 'Фото / скан паспорта поручителя',
+  signed_guarantee: 'Подписанный документ поручительства',
+  guarantor_id_scan: 'Скан удостоверения / документа',
+  guarantor_extra: 'Дополнительный документ поручителя',
+};
 
 export const NewContractModal: React.FC<NewContractModalProps> = ({
   clients,
@@ -76,15 +125,26 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   );
   const [clientId, setClientId] = useState(clients[0]?.id || '');
   const [clientNameQuery, setClientNameQuery] = useState(clients[0]?.fullName || '');
+  const initialNameParts = splitFullNameParts(clients[0]?.fullName || '');
+  const [payerLastName, setPayerLastName] = useState(initialNameParts.lastName);
+  const [payerFirstName, setPayerFirstName] = useState(initialNameParts.firstName);
+  const [payerPatronymic, setPayerPatronymic] = useState(initialNameParts.patronymic);
   const [showSuggestions, setShowSuggestions] = useState(false);
 
-  // Inline new client fields
+  // Inline new client fields & existing client optional supplement fields
   const [newClientPhone, setNewClientPhone] = useState('+7 ');
-  const [newClientSecondaryPhone, setNewClientSecondaryPhone] = useState('');
-  const [newClientDocumentRef, setNewClientDocumentRef] = useState('');
-  const [newClientAddress, setNewClientAddress] = useState('');
+  const [newClientSecondaryPhone, setNewClientSecondaryPhone] = useState(
+    clients[0]?.secondaryPhone || ''
+  );
+  const [newClientDocumentRef, setNewClientDocumentRef] = useState(
+    clients[0]?.documentRef || ''
+  );
+  const [newClientAddress, setNewClientAddress] = useState(clients[0]?.address || '');
   const [newClientNotes, setNewClientNotes] = useState('');
   const [allowSimilarName, setAllowSimilarName] = useState(false);
+
+  // Guarantors state (0, 1, 2, 3, or more)
+  const [guarantors, setGuarantors] = useState<GuarantorDraftItem[]>([]);
 
   // Contract attachments state (JPEG, PNG, WebP, PDF)
   const [attachments, setAttachments] = useState<PendingContractAttachment[]>([]);
@@ -170,6 +230,13 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
     setClientMode('existing');
     setClientId(cl.id);
     setClientNameQuery(cl.fullName);
+    const parts = splitFullNameParts(cl.fullName);
+    setPayerLastName(parts.lastName);
+    setPayerFirstName(parts.firstName);
+    setPayerPatronymic(parts.patronymic);
+    setNewClientSecondaryPhone(cl.secondaryPhone || '');
+    setNewClientDocumentRef(cl.documentRef || '');
+    setNewClientAddress(cl.address || '');
     setShowSuggestions(false);
     setError(null);
   };
@@ -177,9 +244,147 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   const handleSwitchToNewClient = () => {
     setClientMode('new');
     setClientId('');
+    const parts = splitFullNameParts(clientNameQuery);
+    setPayerLastName(parts.lastName);
+    setPayerFirstName(parts.firstName);
+    setPayerPatronymic(parts.patronymic);
+    setNewClientSecondaryPhone('');
+    setNewClientDocumentRef('');
+    setNewClientAddress('');
     setShowSuggestions(false);
     setAllowSimilarName(false);
     setError(null);
+  };
+
+  const handlePayerPartsChange = (last: string, first: string, patr: string) => {
+    setPayerLastName(last);
+    setPayerFirstName(first);
+    setPayerPatronymic(patr);
+    setClientNameQuery(joinFullNameParts(last, first, patr));
+  };
+
+  // --- GUARANTORS HELPERS ---
+  const handleAddGuarantor = () => {
+    setError(null);
+    if (guarantors.length >= 15) {
+      setError('Достигнуто максимальное количество поручителей по одному договору (15).');
+      return;
+    }
+    setGuarantors((prev) => [
+      ...prev,
+      {
+        localId: `guar_draft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        mode: 'new',
+        clientId: '',
+        searchQuery: '',
+        showSuggestions: false,
+        lastName: '',
+        firstName: '',
+        patronymic: '',
+        phone: '+7 ',
+        secondaryPhone: '',
+        documentRef: '',
+        address: '',
+        notes: '',
+        signedGuaranteeReceived: false,
+        isCollapsed: false,
+        selectedDocType: 'guarantor_passport',
+        attachments: [],
+      },
+    ]);
+  };
+
+  const updateGuarantorItem = (
+    localId: string,
+    updater: (item: GuarantorDraftItem) => GuarantorDraftItem
+  ) => {
+    setGuarantors((prev) => prev.map((g) => (g.localId === localId ? updater(g) : g)));
+  };
+
+  const handleRemoveGuarantor = (localId: string) => {
+    setGuarantors((prev) => prev.filter((g) => g.localId !== localId));
+    setError(null);
+  };
+
+  const handleSelectExistingGuarantor = (localId: string, cl: ClientDTO) => {
+    const parts = splitFullNameParts(cl.fullName);
+    updateGuarantorItem(localId, (g) => ({
+      ...g,
+      mode: 'existing',
+      clientId: cl.id,
+      searchQuery: cl.fullName,
+      showSuggestions: false,
+      lastName: parts.lastName,
+      firstName: parts.firstName,
+      patronymic: parts.patronymic,
+      phone: cl.phone,
+      secondaryPhone: cl.secondaryPhone || '',
+      documentRef: cl.documentRef || '',
+      address: cl.address || '',
+    }));
+    setError(null);
+  };
+
+  const handleGuarantorFilesSelected = async (
+    localId: string,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    setError(null);
+
+    const targetGuarantor = guarantors.find((g) => g.localId === localId);
+    const docTypeKey = targetGuarantor?.selectedDocType || 'guarantor_passport';
+    const docTypeLabel = GUARANTOR_DOC_TYPE_LABELS[docTypeKey] || 'Документ поручителя';
+
+    const allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'pdf'];
+    const newItems: PendingContractAttachment[] = [];
+
+    for (let i = 0; i < fileList.length; i++) {
+      const file = fileList[i];
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+      if (!allowedExtensions.includes(ext)) {
+        setError(
+          `Файл «${file.name}» не поддерживается. Разрешены форматы: JPEG, PNG, WebP и PDF.`
+        );
+        continue;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setError(`Файл «${file.name}» превышает максимальный размер 10 МБ.`);
+        continue;
+      }
+
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Ошибка чтения файла'));
+        reader.readAsDataURL(file);
+      });
+
+      const base64Part = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      newItems.push({
+        id: `gatt_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
+        title: `${docTypeLabel} (${file.name})`,
+        originalFilename: file.name,
+        mimeType:
+          file.type ||
+          (ext === 'pdf' ? 'application/pdf' : `image/${ext === 'jpg' ? 'jpeg' : ext}`),
+        sizeBytes: file.size,
+        contentBase64: base64Part,
+        previewDataUrl: file.type.startsWith('image/') ? dataUrl : undefined,
+        guarantorDocType: docTypeKey,
+      });
+    }
+
+    if (newItems.length > 0) {
+      updateGuarantorItem(localId, (g) => ({
+        ...g,
+        signedGuaranteeReceived:
+          docTypeKey === 'signed_guarantee' ? true : g.signedGuaranteeReceived,
+        attachments: [...g.attachments, ...newItems],
+      }));
+    }
+    e.target.value = '';
   };
 
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -296,6 +501,13 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
     startDate,
   ]);
 
+  const primaryEffectivePhone = useMemo(() => {
+    if (clientMode === 'existing' && selectedExistingClient) {
+      return normalizePhoneE164(selectedExistingClient.phone) || '';
+    }
+    return normalizePhoneE164(newClientPhone) || '';
+  }, [clientMode, selectedExistingClient, newClientPhone]);
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!previewConfirmed) {
@@ -309,22 +521,87 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
     }
 
     if (clientMode === 'new') {
-      if (!clientNameQuery.trim()) {
-        setError('Введите ФИО клиента (фамилию, имя и отчество).');
+      const composedPayerName =
+        joinFullNameParts(payerLastName, payerFirstName, payerPatronymic) ||
+        clientNameQuery.trim();
+      if (!composedPayerName) {
+        setError('Введите ФИО основного плательщика (фамилию, имя и отчество).');
         return;
       }
       const normPhone = normalizePhoneE164(newClientPhone);
       if (!normPhone) {
-        setError('Введите корректный номер телефона нового клиента в формате +7XXXXXXXXXX.');
+        setError('Введите корректный номер телефона основного плательщика в формате +7XXXXXXXXXX.');
         return;
       }
       if (duplicateCheck.exactPhoneDuplicate) {
         setError(
-          `Клиент с номером ${normPhone} уже существует («${duplicateCheck.exactPhoneDuplicate.fullName}»). Выберите его ниже, чтобы не создавать дубликат.`
+          `Клиент с номером ${normPhone} уже существует («${duplicateCheck.exactPhoneDuplicate.fullName}»). Выберите его, чтобы не создавать дубликат.`
         );
         return;
       }
     }
+
+    // Validate guarantors before submitting
+    const seenGuarantorClientIds = new Set<string>();
+    const seenGuarantorPhones = new Set<string>();
+
+    for (let i = 0; i < guarantors.length; i++) {
+      const g = guarantors[i];
+      const label = `Поручитель №${i + 1}`;
+      if (g.mode === 'existing') {
+        if (!g.clientId) {
+          setError(`${label}: выберите человека из базы или переключитесь на создание новой карточки поручителя.`);
+          return;
+        }
+        if (clientMode === 'existing' && g.clientId === clientId) {
+          setError(`${label}: основной плательщик не может быть поручителем по собственному договору.`);
+          return;
+        }
+        if (seenGuarantorClientIds.has(g.clientId)) {
+          setError(`${label}: этот человек уже добавлен поручителем в текущий договор.`);
+          return;
+        }
+        seenGuarantorClientIds.add(g.clientId);
+      } else {
+        const gFullName =
+          joinFullNameParts(g.lastName, g.firstName, g.patronymic) || g.searchQuery.trim();
+        if (!gFullName) {
+          setError(`${label}: заполните ФИО поручителя (Фамилию и Имя).`);
+          return;
+        }
+        const gNormPhone = normalizePhoneE164(g.phone);
+        if (!gNormPhone) {
+          setError(`${label} («${gFullName}»): укажите корректный основной номер телефона (+7XXXXXXXXXX).`);
+          return;
+        }
+        if (primaryEffectivePhone && gNormPhone === primaryEffectivePhone) {
+          setError(
+            `${label} («${gFullName}»): телефон совпадает с основным плательщиком. Основной плательщик не может быть поручителем по собственному договору.`
+          );
+          return;
+        }
+        if (seenGuarantorPhones.has(gNormPhone)) {
+          setError(`${label} («${gFullName}»): этот номер телефона (${gNormPhone}) уже указан у другого поручителя в этом договоре.`);
+          return;
+        }
+        const existingMatch = clients.find(
+          (c) =>
+            normalizePhoneE164(c.phone) === gNormPhone ||
+            (c.secondaryPhone && normalizePhoneE164(c.secondaryPhone) === gNormPhone)
+        );
+        if (existingMatch) {
+          setError(
+            `${label}: человек с номером ${gNormPhone} уже есть в базе («${existingMatch.fullName}»). Нажмите «Выбрать существующего» в карточке поручителя, чтобы не создавать дубликат.`
+          );
+          return;
+        }
+        seenGuarantorPhones.add(gNormPhone);
+      }
+    }
+
+    const composedPayerFullName =
+      joinFullNameParts(payerLastName, payerFirstName, payerPatronymic) ||
+      clientNameQuery.trim();
 
     setSubmitting(true);
     setError(null);
@@ -332,10 +609,21 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
       await onSubmit({
         idempotencyKey,
         clientId: clientMode === 'existing' ? clientId : undefined,
+        clientUpdates:
+          clientMode === 'existing'
+            ? {
+                secondaryPhone: newClientSecondaryPhone.trim(),
+                documentRef: newClientDocumentRef.trim(),
+                address: newClientAddress.trim(),
+              }
+            : undefined,
         newClient:
           clientMode === 'new'
             ? {
-                fullName: clientNameQuery.trim(),
+                fullName: composedPayerFullName,
+                lastName: payerLastName.trim(),
+                firstName: payerFirstName.trim(),
+                patronymic: payerPatronymic.trim(),
                 phone: newClientPhone.trim(),
                 secondaryPhone: newClientSecondaryPhone.trim(),
                 documentRef: newClientDocumentRef.trim(),
@@ -344,6 +632,44 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                 allowSimilarName,
               }
             : undefined,
+        guarantors: guarantors.map((g) => {
+          const fullName =
+            joinFullNameParts(g.lastName, g.firstName, g.patronymic) || g.searchQuery.trim();
+          return {
+            clientId: g.mode === 'existing' ? g.clientId : undefined,
+            clientUpdates:
+              g.mode === 'existing'
+                ? {
+                    secondaryPhone: g.secondaryPhone.trim(),
+                    documentRef: g.documentRef.trim(),
+                    address: g.address.trim(),
+                  }
+                : undefined,
+            newClient:
+              g.mode === 'new'
+                ? {
+                    fullName,
+                    lastName: g.lastName.trim(),
+                    firstName: g.firstName.trim(),
+                    patronymic: g.patronymic.trim(),
+                    phone: g.phone.trim(),
+                    secondaryPhone: g.secondaryPhone.trim(),
+                    documentRef: g.documentRef.trim(),
+                    address: g.address.trim(),
+                    notes: g.notes.trim(),
+                  }
+                : undefined,
+            notes: g.notes.trim(),
+            signedGuaranteeReceived: g.signedGuaranteeReceived,
+            attachments: g.attachments.map((att) => ({
+              title: att.title,
+              originalFilename: att.originalFilename,
+              mimeType: att.mimeType,
+              contentBase64: att.contentBase64,
+              guarantorDocType: att.guarantorDocType || 'guarantor_passport',
+            })),
+          };
+        }),
         purchaseId: purchaseId || null,
         planId: planId || null,
         itemTitle,
@@ -386,7 +712,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
               Оформление договора продажи в рассрочку
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Введите ФИО клиента (выберите существующего или создайте нового прямо в форме) и прикрепите скан/фото договора
+              Заполните данные основного плательщика, добавьте одного или нескольких поручителей (при необходимости) и прикрепите документы
             </p>
           </div>
           <button
@@ -406,14 +732,19 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
         )}
 
         <form onSubmit={handleCreate} className="mt-5 space-y-6">
-          {/* Client Selection / Inline Creation Block */}
+          {/* 1. Primary Payer Block (ОСНОВНОЙ ПЛАТЕЛЬЩИК) */}
           <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Search className="w-4 h-4 text-slate-700" />
-                <span className="text-xs font-semibold text-slate-900">
-                  ФИО клиента (поиск по базе или создание нового клиента) *
-                </span>
+              <div>
+                <div className="flex items-center gap-2">
+                  <Search className="w-4 h-4 text-slate-700" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                    1. ОСНОВНОЙ ПЛАТЕЛЬЩИК ПО ДОГОВОРУ *
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Найдите существующего клиента по ФИО или телефону либо создайте новую карточку прямо в форме
+                </p>
               </div>
               <div className="flex items-center gap-1.5">
                 <button
@@ -450,7 +781,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
 
             <div className="relative">
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                ФИО клиента (Фамилия Имя Отчество) *
+                Поиск клиента по ФИО или номеру телефона *
               </label>
               <input
                 type="text"
@@ -459,6 +790,10 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                 onChange={(e) => {
                   const val = e.target.value;
                   setClientNameQuery(val);
+                  const parts = splitFullNameParts(val);
+                  setPayerLastName(parts.lastName);
+                  setPayerFirstName(parts.firstName);
+                  setPayerPatronymic(parts.patronymic);
                   setShowSuggestions(true);
                   if (clientMode === 'existing') {
                     const exact = clients.find(
@@ -532,33 +867,73 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
               )}
             </div>
 
-            {/* Selected existing client summary */}
+            {/* Selected existing client summary + editable supplementary fields */}
             {clientMode === 'existing' && selectedExistingClient && (
-              <div className="p-3 bg-white border border-slate-200 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs">
-                <div>
-                  <div className="font-semibold text-slate-900 flex items-center gap-2">
-                    <span>Выбран существующий клиент: {selectedExistingClient.fullName}</span>
-                    <span
-                      className={`px-2 py-0.5 text-[10px] font-medium border rounded-md ${
-                        getClientPaymentStatusMeta(selectedExistingClient.paymentStatus).badgeClass
-                      }`}
-                    >
-                      {getClientPaymentStatusMeta(selectedExistingClient.paymentStatus).label}
-                    </span>
+              <div className="p-3.5 bg-white border border-slate-200 rounded-lg space-y-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="font-semibold text-slate-900 flex items-center gap-2">
+                      <span>Выбран существующий клиент: {selectedExistingClient.fullName}</span>
+                      <span
+                        className={`px-2 py-0.5 text-[10px] font-medium border rounded-md ${
+                          getClientPaymentStatusMeta(selectedExistingClient.paymentStatus).badgeClass
+                        }`}
+                      >
+                        {getClientPaymentStatusMeta(selectedExistingClient.paymentStatus).label}
+                      </span>
+                    </div>
+                    <div className="text-slate-500 mt-0.5 font-mono">
+                      Основной телефон: {selectedExistingClient.phone} · Остаток долга по своим договорам:{' '}
+                      {formatMoney(selectedExistingClient.totalRemainingDebtKopecks || 0)}
+                    </div>
                   </div>
-                  <div className="text-slate-500 mt-0.5 font-mono">
-                    Телефон: {selectedExistingClient.phone} · Паспорт:{' '}
-                    {selectedExistingClient.documentRef || 'не указан'} · Остаток долга:{' '}
-                    {formatMoney(selectedExistingClient.totalRemainingDebtKopecks || 0)}
+                  <button
+                    type="button"
+                    onClick={() => setShowSuggestions((v) => !v)}
+                    className="px-2.5 py-1 text-xs text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                  >
+                    Сменить клиента
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-100">
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                      Дополнительный телефон
+                    </label>
+                    <input
+                      type="tel"
+                      value={newClientSecondaryPhone}
+                      onChange={(e) => setNewClientSecondaryPhone(e.target.value)}
+                      placeholder="+7 928 111-22-33"
+                      className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                      Паспортные данные (при необходимости)
+                    </label>
+                    <input
+                      type="text"
+                      value={newClientDocumentRef}
+                      onChange={(e) => setNewClientDocumentRef(e.target.value)}
+                      placeholder="Серия и номер паспорта"
+                      className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                      Адрес проживания
+                    </label>
+                    <input
+                      type="text"
+                      value={newClientAddress}
+                      onChange={(e) => setNewClientAddress(e.target.value)}
+                      placeholder="Город, улица, дом"
+                      className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                    />
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowSuggestions((v) => !v)}
-                  className="px-2.5 py-1 text-xs text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
-                >
-                  Сменить клиента
-                </button>
               </div>
             )}
 
@@ -566,13 +941,58 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
             {clientMode === 'new' && (
               <div className="p-3.5 bg-white border border-emerald-200 rounded-lg space-y-3">
                 <div className="text-xs font-semibold text-emerald-900">
-                  Регистрация нового клиента одновременно с оформлением договора
+                  Регистрация нового основного плательщика одновременно с оформлением договора
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Фамилия *
+                    </label>
+                    <input
+                      type="text"
+                      value={payerLastName}
+                      onChange={(e) =>
+                        handlePayerPartsChange(e.target.value, payerFirstName, payerPatronymic)
+                      }
+                      placeholder="Фамилия"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Имя *
+                    </label>
+                    <input
+                      type="text"
+                      value={payerFirstName}
+                      onChange={(e) =>
+                        handlePayerPartsChange(payerLastName, e.target.value, payerPatronymic)
+                      }
+                      placeholder="Имя"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Отчество
+                    </label>
+                    <input
+                      type="text"
+                      value={payerPatronymic}
+                      onChange={(e) =>
+                        handlePayerPartsChange(payerLastName, payerFirstName, e.target.value)
+                      }
+                      placeholder="Отчество"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                    />
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Основной телефон клиента (WhatsApp / звонки) *
+                      Основной номер телефона (WhatsApp / звонки) *
                     </label>
                     <input
                       type="tel"
@@ -585,7 +1005,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Дополнительный телефон (опционально)
+                      Дополнительный номер телефона (опционально)
                     </label>
                     <input
                       type="tel"
@@ -597,7 +1017,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Паспортные данные / документ (опционально)
+                      Паспортные данные (при необходимости)
                     </label>
                     <input
                       type="text"
@@ -609,7 +1029,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Адрес проживания (опционально)
+                      Адрес проживания
                     </label>
                     <input
                       type="text"
@@ -686,6 +1106,648 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
             )}
           </div>
 
+          {/* 2. New Block: ПОРУЧИТЕЛИ ПО ДОГОВОРУ */}
+          <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-slate-800" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                    ПОРУЧИТЕЛИ ПО ДОГОВОРУ ({guarantors.length})
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Добавьте одного или нескольких поручителей, которые участвуют в обеспечении обязательств по договору
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleAddGuarantor}
+                className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5 shadow-xs"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>+ Добавить поручителя</span>
+              </button>
+            </div>
+
+            {guarantors.length === 0 ? (
+              <div className="p-3 bg-white border border-dashed border-slate-300 rounded-lg text-xs text-slate-500 flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  Договор может быть оформлен без поручителей либо с одним, двумя, тремя и более поручителями.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleAddGuarantor}
+                  className="text-xs font-semibold text-slate-900 underline hover:text-slate-700"
+                >
+                  + Добавить первого поручителя
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {guarantors.map((g, idx) => {
+                  const gFullName =
+                    joinFullNameParts(g.lastName, g.firstName, g.patronymic) ||
+                    g.searchQuery.trim();
+                  const gNormPhone = normalizePhoneE164(g.phone);
+
+                  const isSameAsPayer =
+                    (g.mode === 'existing' &&
+                      clientMode === 'existing' &&
+                      g.clientId &&
+                      g.clientId === clientId) ||
+                    Boolean(
+                      gNormPhone &&
+                        primaryEffectivePhone &&
+                        gNormPhone === primaryEffectivePhone
+                    );
+
+                  const isSameAsOtherGuarantor = guarantors.some((other, otherIdx) => {
+                    if (otherIdx === idx) return false;
+                    if (
+                      g.mode === 'existing' &&
+                      other.mode === 'existing' &&
+                      g.clientId &&
+                      g.clientId === other.clientId
+                    ) {
+                      return true;
+                    }
+                    const otherNorm = normalizePhoneE164(other.phone);
+                    return Boolean(gNormPhone && otherNorm && gNormPhone === otherNorm);
+                  });
+
+                  const duplicateExistingClientForNew =
+                    g.mode === 'new' && gNormPhone
+                      ? clients.find(
+                          (c) =>
+                            normalizePhoneE164(c.phone) === gNormPhone ||
+                            (c.secondaryPhone &&
+                              normalizePhoneE164(c.secondaryPhone) === gNormPhone)
+                        ) || null
+                      : null;
+
+                  const q = g.searchQuery.trim().toLowerCase();
+                  const qDigits = q.replace(/\D/g, '');
+                  const guarantorMatches = clients
+                    .filter((c) => {
+                      if (!q) return true;
+                      const nameMatch = c.fullName.toLowerCase().includes(q);
+                      const phoneMatch =
+                        c.phone.toLowerCase().includes(q) ||
+                        (qDigits.length >= 3 &&
+                          c.phone.replace(/\D/g, '').includes(qDigits));
+                      return nameMatch || phoneMatch;
+                    })
+                    .slice(0, 7);
+
+                  return (
+                    <div
+                      key={g.localId}
+                      className="bg-white border border-slate-200 rounded-xl p-4 space-y-3 shadow-2xs"
+                    >
+                      {/* Guarantor Card Header */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2.5 py-1 text-xs font-bold bg-slate-900 text-white rounded-md">
+                            Поручитель №{idx + 1}
+                          </span>
+                          <span className="text-xs font-semibold text-slate-900">
+                            {gFullName || 'ФИО ещё не заполнено'}
+                          </span>
+                          {g.phone && g.phone.trim() !== '+7' && (
+                            <span className="text-xs font-mono text-slate-500">
+                              · {g.phone}
+                            </span>
+                          )}
+                          {g.mode === 'existing' && g.clientId && (
+                            <span className="px-2 py-0.5 text-[10px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200 rounded">
+                              Из базы клиентов
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateGuarantorItem(g.localId, (item) => ({
+                                ...item,
+                                isCollapsed: !item.isCollapsed,
+                              }))
+                            }
+                            className="px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1"
+                          >
+                            {g.isCollapsed ? (
+                              <>
+                                <Edit3 className="w-3.5 h-3.5" />
+                                <span>Редактировать</span>
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              </>
+                            ) : (
+                              <>
+                                <span>Свернуть</span>
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveGuarantor(g.localId)}
+                            className="px-2.5 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Удалить</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Collapsed Summary View */}
+                      {g.isCollapsed ? (
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs text-slate-600 pt-1">
+                          <div>
+                            <span className="text-slate-400">ФИО:</span>{' '}
+                            <strong className="text-slate-900">{gFullName || '—'}</strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-400">Телефон:</span>{' '}
+                            <span className="font-mono text-slate-900">{g.phone || '—'}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400">Паспорт:</span>{' '}
+                            <span className="text-slate-900">{g.documentRef || 'не указан'}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400">Адрес / Документы:</span>{' '}
+                            <span className="text-slate-900">
+                              {g.address || 'не указан'} ({g.attachments.length} файл.)
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        /* Expanded Guarantor Form */
+                        <div className="space-y-3.5">
+                          {/* Mode switch + Database Search */}
+                          <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                            <span className="text-xs font-medium text-slate-700">
+                              Способ заполнения поручителя №{idx + 1}:
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateGuarantorItem(g.localId, (item) => ({
+                                    ...item,
+                                    mode: 'existing',
+                                    showSuggestions: true,
+                                  }))
+                                }
+                                className={`px-2.5 py-1 text-xs font-medium rounded-md border flex items-center gap-1 ${
+                                  g.mode === 'existing'
+                                    ? 'bg-slate-900 text-white border-slate-900'
+                                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                                }`}
+                              >
+                                <UserCheck className="w-3.5 h-3.5" />
+                                <span>Найти и выбрать из базы</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateGuarantorItem(g.localId, (item) => ({
+                                    ...item,
+                                    mode: 'new',
+                                    clientId: '',
+                                    showSuggestions: false,
+                                  }))
+                                }
+                                className={`px-2.5 py-1 text-xs font-medium rounded-md border flex items-center gap-1 ${
+                                  g.mode === 'new'
+                                    ? 'bg-emerald-700 text-white border-emerald-700'
+                                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                                }`}
+                              >
+                                <UserPlus className="w-3.5 h-3.5" />
+                                <span>Создать новую карточку</span>
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Search input for finding existing person by ФИО or phone */}
+                          <div className="relative">
+                            <label className="block text-xs font-medium text-slate-700 mb-1">
+                              Поиск поручителя в базе по ФИО или номеру телефона
+                            </label>
+                            <input
+                              type="text"
+                              value={g.searchQuery}
+                              onFocus={() =>
+                                updateGuarantorItem(g.localId, (item) => ({
+                                  ...item,
+                                  showSuggestions: true,
+                                }))
+                              }
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                const parts = splitFullNameParts(val);
+                                updateGuarantorItem(g.localId, (item) => ({
+                                  ...item,
+                                  searchQuery: val,
+                                  showSuggestions: true,
+                                  lastName:
+                                    item.mode === 'new' ? parts.lastName : item.lastName,
+                                  firstName:
+                                    item.mode === 'new' ? parts.firstName : item.firstName,
+                                  patronymic:
+                                    item.mode === 'new' ? parts.patronymic : item.patronymic,
+                                }));
+                              }}
+                              placeholder="Введите фамилию, имя, отчество или телефон для быстрого поиска..."
+                              className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                            />
+
+                            {g.showSuggestions && (
+                              <div className="mt-1 border border-slate-200 rounded-lg bg-white shadow-sm max-h-44 overflow-y-auto divide-y divide-slate-100">
+                                {guarantorMatches.length > 0 ? (
+                                  guarantorMatches.map((cl) => {
+                                    const isPrimaryPayer =
+                                      clientMode === 'existing' && cl.id === clientId;
+                                    const isSelectedHere =
+                                      g.mode === 'existing' && g.clientId === cl.id;
+                                    return (
+                                      <div
+                                        key={cl.id}
+                                        onClick={() => {
+                                          if (!isPrimaryPayer) {
+                                            handleSelectExistingGuarantor(g.localId, cl);
+                                          }
+                                        }}
+                                        className={`px-3 py-2 text-xs flex items-center justify-between ${
+                                          isPrimaryPayer
+                                            ? 'bg-slate-50 opacity-60 cursor-not-allowed'
+                                            : 'cursor-pointer hover:bg-slate-50'
+                                        } ${isSelectedHere ? 'bg-emerald-50/70' : ''}`}
+                                      >
+                                        <div>
+                                          <div className="font-medium text-slate-900">
+                                            {cl.fullName}
+                                          </div>
+                                          <div className="text-[11px] text-slate-500 font-mono">
+                                            Тел: {cl.phone}
+                                            {cl.documentRef
+                                              ? ` · Паспорт: ${cl.documentRef}`
+                                              : ''}
+                                          </div>
+                                        </div>
+                                        <span className="text-[11px] font-medium text-emerald-700">
+                                          {isPrimaryPayer
+                                            ? 'Основной плательщик'
+                                            : isSelectedHere
+                                              ? 'Выбран ✓'
+                                              : 'Выбрать поручителем'}
+                                        </span>
+                                      </div>
+                                    );
+                                  })
+                                ) : (
+                                  <div className="p-2.5 text-xs text-slate-500 flex items-center justify-between">
+                                    <span>В базе не найдено «{g.searchQuery}».</span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        updateGuarantorItem(g.localId, (item) => ({
+                                          ...item,
+                                          mode: 'new',
+                                          clientId: '',
+                                          showSuggestions: false,
+                                        }))
+                                      }
+                                      className="px-2 py-1 text-[11px] font-medium text-white bg-emerald-700 rounded"
+                                    >
+                                      Заполнить как нового
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Основная информация */}
+                          <div>
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">
+                              Основная информация поручителя
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Фамилия *
+                                </label>
+                                <input
+                                  type="text"
+                                  value={g.lastName}
+                                  disabled={g.mode === 'existing' && Boolean(g.clientId)}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      lastName: val,
+                                      searchQuery: joinFullNameParts(
+                                        val,
+                                        item.firstName,
+                                        item.patronymic
+                                      ),
+                                    }));
+                                  }}
+                                  placeholder="Фамилия"
+                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Имя *
+                                </label>
+                                <input
+                                  type="text"
+                                  value={g.firstName}
+                                  disabled={g.mode === 'existing' && Boolean(g.clientId)}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      firstName: val,
+                                      searchQuery: joinFullNameParts(
+                                        item.lastName,
+                                        val,
+                                        item.patronymic
+                                      ),
+                                    }));
+                                  }}
+                                  placeholder="Имя"
+                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Отчество
+                                </label>
+                                <input
+                                  type="text"
+                                  value={g.patronymic}
+                                  disabled={g.mode === 'existing' && Boolean(g.clientId)}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      patronymic: val,
+                                      searchQuery: joinFullNameParts(
+                                        item.lastName,
+                                        item.firstName,
+                                        val
+                                      ),
+                                    }));
+                                  }}
+                                  placeholder="Отчество"
+                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-2.5">
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Основной номер телефона *
+                                </label>
+                                <input
+                                  type="tel"
+                                  value={g.phone}
+                                  disabled={g.mode === 'existing' && Boolean(g.clientId)}
+                                  onChange={(e) =>
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      phone: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="+7 928 000-00-00"
+                                  className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Дополнительный номер телефона (необязательно)
+                                </label>
+                                <input
+                                  type="tel"
+                                  value={g.secondaryPhone}
+                                  onChange={(e) =>
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      secondaryPhone: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="+7 928 111-22-33"
+                                  className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-lg"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Дополнительные сведения */}
+                          <div>
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-2">
+                              Дополнительные сведения
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Паспортные данные
+                                </label>
+                                <input
+                                  type="text"
+                                  value={g.documentRef}
+                                  onChange={(e) =>
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      documentRef: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="Серия и номер паспорта"
+                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Адрес проживания
+                                </label>
+                                <input
+                                  type="text"
+                                  value={g.address}
+                                  onChange={(e) =>
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      address: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="Город, улица, дом, кв."
+                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Примечание (необязательно)
+                                </label>
+                                <input
+                                  type="text"
+                                  value={g.notes}
+                                  onChange={(e) =>
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      notes: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="Родство, место работы и т.д."
+                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Validation alerts inside guarantor card */}
+                          {isSameAsPayer && (
+                            <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 font-medium">
+                              Ошибка: основной плательщик не может быть добавлен поручителем по собственному договору.
+                            </div>
+                          )}
+
+                          {isSameAsOtherGuarantor && (
+                            <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 font-medium">
+                              Ошибка: этот человек уже добавлен поручителем в текущий договор.
+                            </div>
+                          )}
+
+                          {duplicateExistingClientForNew && (
+                            <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <strong>Человек с телефоном {gNormPhone} уже есть в базе:</strong>{' '}
+                                {duplicateExistingClientForNew.fullName}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSelectExistingGuarantor(
+                                    g.localId,
+                                    duplicateExistingClientForNew
+                                  )
+                                }
+                                className="px-2.5 py-1 text-xs font-medium text-white bg-slate-900 rounded hover:bg-slate-800"
+                              >
+                                Выбрать существующего
+                              </button>
+                            </div>
+                          )}
+
+                          {/* Документы поручителя */}
+                          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <div className="text-xs font-semibold text-slate-900">
+                                  Документы поручителя №{idx + 1} (приватное хранилище)
+                                </div>
+                                <div className="text-[11px] text-slate-500">
+                                  Фото паспорта, скан документа, подписанное поручительство (JPEG, PNG, WebP, PDF до 10 МБ)
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2">
+                                <select
+                                  value={g.selectedDocType}
+                                  onChange={(e) =>
+                                    updateGuarantorItem(g.localId, (item) => ({
+                                      ...item,
+                                      selectedDocType: e.target.value,
+                                    }))
+                                  }
+                                  className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                                >
+                                  <option value="guarantor_passport">Фото / скан паспорта</option>
+                                  <option value="signed_guarantee">
+                                    Подписанный документ поручительства
+                                  </option>
+                                  <option value="guarantor_id_scan">Скан документа</option>
+                                  <option value="guarantor_extra">Дополнительный документ</option>
+                                </select>
+
+                                <label className="px-2.5 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 cursor-pointer flex items-center gap-1">
+                                  <Paperclip className="w-3.5 h-3.5" />
+                                  <span>Прикрепить файл</span>
+                                  <input
+                                    type="file"
+                                    accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf"
+                                    multiple
+                                    onChange={(e) => handleGuarantorFilesSelected(g.localId, e)}
+                                    className="hidden"
+                                  />
+                                </label>
+                              </div>
+                            </div>
+
+                            <label className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={g.signedGuaranteeReceived}
+                                onChange={(e) =>
+                                  updateGuarantorItem(g.localId, (item) => ({
+                                    ...item,
+                                    signedGuaranteeReceived: e.target.checked,
+                                  }))
+                                }
+                                className="rounded border-slate-300"
+                              />
+                              <span>Подписанный документ поручительства получен</span>
+                            </label>
+
+                            {g.attachments.length > 0 && (
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                                {g.attachments.map((att) => (
+                                  <div
+                                    key={att.id}
+                                    className="p-2 bg-white border border-slate-200 rounded-lg flex items-center justify-between gap-2 text-xs"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="font-medium text-slate-900 truncate">
+                                        {att.title}
+                                      </div>
+                                      <div className="text-[11px] text-slate-500 font-mono truncate">
+                                        {att.originalFilename} · {formatFileSize(att.sizeBytes)}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        updateGuarantorItem(g.localId, (item) => ({
+                                          ...item,
+                                          attachments: item.attachments.filter(
+                                            (a) => a.id !== att.id
+                                          ),
+                                        }))
+                                      }
+                                      className="p-1 text-slate-400 hover:text-red-600 rounded"
+                                      title="Удалить документ поручителя"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -706,7 +1768,6 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   ))}
               </select>
             </div>
-
 
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -1573,6 +2634,8 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
     '[ФИО / ИП / Наименование Продавца — заполняется после согласования юр. статуса]'
   );
 
+  const guarantors = contract.guarantors || [];
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
       <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
@@ -1632,12 +2695,31 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
               <strong>Продавец:</strong> {sellerTitle}
             </p>
             <p>
-              <strong>Покупатель:</strong> {contract.clientName}, контактный телефон: {contract.clientPhone}
+              <strong>Покупатель (Основной плательщик):</strong> {contract.clientName}, контактный телефон: {contract.clientPhone}
             </p>
             <p>
               <strong>Наименование передаваемого товара:</strong> {contract.itemTitle}
             </p>
           </div>
+
+          {guarantors.length > 0 && (
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+              <div className="font-semibold text-slate-900">
+                Поручители по договору ({guarantors.length}):
+              </div>
+              <div className="space-y-1.5">
+                {guarantors.map((g, idx) => (
+                  <div key={g.id} className="text-xs border-b border-slate-200 last:border-b-0 pb-1.5 last:pb-0">
+                    <strong>Поручитель №{idx + 1}:</strong> {g.fullName} · Тел.: {g.phone}
+                    {g.secondaryPhone ? `, доп. тел.: ${g.secondaryPhone}` : ''}
+                    {g.documentRef ? ` · Паспорт: ${g.documentRef}` : ''}
+                    {g.address ? ` · Адрес: ${g.address}` : ''}
+                    {g.notes ? ` · Примечание: ${g.notes}` : ''}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg font-mono">
             <div>
@@ -1690,16 +2772,29 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
             </div>
           )}
 
-          <div className="pt-8 grid grid-cols-2 gap-8 text-xs">
-            <div className="border-t border-slate-400 pt-2">
-              Подпись Продавца: ______________________
+          <div className="pt-8 space-y-6 text-xs">
+            <div className="grid grid-cols-2 gap-8">
+              <div className="border-t border-slate-400 pt-2">
+                Подпись Продавца: ______________________
+              </div>
+              <div className="border-t border-slate-400 pt-2">
+                Подпись Покупателя ({contract.clientName}): ______________________
+              </div>
             </div>
-            <div className="border-t border-slate-400 pt-2">
-              Подпись Покупателя: ______________________
-            </div>
+
+            {guarantors.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2">
+                {guarantors.map((g, idx) => (
+                  <div key={g.id} className="border-t border-slate-400 pt-2">
+                    Подпись Поручителя №{idx + 1} ({g.fullName}): ______________________
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
     </div>
   );
 };
+

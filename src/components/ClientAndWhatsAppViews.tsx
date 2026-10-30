@@ -708,6 +708,54 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                       </div>
                     </div>
 
+                    {/* Guarantors of this contract */}
+                    {cnt.guarantors && cnt.guarantors.length > 0 && (
+                      <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                        <div className="text-[11px] font-semibold text-slate-700">
+                          Поручители по договору ({cnt.guarantors.length}):
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {cnt.guarantors.map((g) => (
+                            <div
+                              key={g.id}
+                              className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-slate-900">
+                                  Поручитель №{g.guarantorOrder}: {g.fullName}
+                                </span>
+                                <span
+                                  className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
+                                    g.signedGuaranteeReceived
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : 'bg-amber-100 text-amber-800'
+                                  }`}
+                                >
+                                  {g.signedGuaranteeReceived ? 'Подписано' : 'Без подписи'}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-600 font-mono">
+                                Тел.: {g.phone}
+                                {g.secondaryPhone ? ` · Доп.: ${g.secondaryPhone}` : ''}
+                              </div>
+                              {(g.documentRef || g.address) && (
+                                <div className="text-[11px] text-slate-500">
+                                  {g.documentRef ? `Паспорт: ${g.documentRef}` : ''}
+                                  {g.documentRef && g.address ? ' · ' : ''}
+                                  {g.address ? `Адрес: ${g.address}` : ''}
+                                </div>
+                              )}
+                              {g.notes && (
+                                <div className="text-[11px] text-slate-500 italic">
+                                  Прим.: {g.notes}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Attached contract files */}
                     {contractDocs.length > 0 && (
                       <div className="pt-2 border-t border-slate-100 flex flex-wrap gap-2">
@@ -797,6 +845,85 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+
+        {/* Participation as Guarantor on other contracts */}
+        <div className="space-y-3 pt-2 border-t border-slate-200">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                Поручительство по договорам других клиентов ({client.guarantorContracts?.length || 0})
+              </h3>
+              <p className="text-[11px] text-slate-500">
+                Договоры, в которых {client.fullName} выступает поручителем. Суммы этих обязательств учитываются справочно и не увеличивают личный долг плательщика.
+              </p>
+            </div>
+          </div>
+
+          {!client.guarantorContracts || client.guarantorContracts.length === 0 ? (
+            <div className="p-3.5 border border-slate-200 rounded-xl text-xs text-slate-500 bg-slate-50">
+              Клиент не выступает поручителем ни по одному договору.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {client.guarantorContracts.map((gc) => (
+                <div
+                  key={gc.guarantorRecordId}
+                  className="p-3.5 border border-indigo-200 bg-indigo-50/40 rounded-xl flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="px-2 py-0.5 bg-indigo-100 text-indigo-900 font-semibold rounded text-[11px]">
+                        Поручитель №{gc.guarantorOrder}
+                      </span>
+                      <span className="font-mono font-bold text-slate-900">
+                        Договор {gc.contractNumber}
+                      </span>
+                      <span className="text-slate-700 font-medium">· {gc.itemTitle}</span>
+                      <span
+                        className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
+                          gc.signedGuaranteeReceived
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {gc.signedGuaranteeReceived
+                          ? 'Поручительство подписано'
+                          : 'Ожидает подписи'}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-700">
+                      Основной плательщик:{' '}
+                      <strong className="text-slate-900">{gc.borrowerName}</strong> · Тел.:{' '}
+                      <span className="font-mono">{gc.borrowerPhone}</span> · Оформлен:{' '}
+                      <span className="font-mono">{formatDateRu(gc.startDate)}</span>
+                    </div>
+                    {gc.notes && (
+                      <div className="text-[11px] text-slate-600 italic">
+                        Примечание к поручительству: {gc.notes}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="text-right space-y-0.5">
+                    <div className="text-[11px] text-slate-500">
+                      Остаток долга заёмщика:{' '}
+                      <span className="font-mono font-semibold text-slate-900">
+                        {formatMoney(gc.remainingDebtKopecks)}
+                      </span>
+                    </div>
+                    {gc.overdueKopecks > 0 ? (
+                      <div className="text-[11px] text-red-600 font-mono font-semibold">
+                        Просрочка по договору: {formatMoney(gc.overdueKopecks)}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-emerald-700">Просрочек нет</div>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

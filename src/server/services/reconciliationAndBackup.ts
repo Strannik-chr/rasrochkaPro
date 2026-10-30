@@ -225,6 +225,7 @@ export function createEncryptedBackup(
       suppliers: db.prepare('SELECT * FROM suppliers').all(),
       purchases: db.prepare('SELECT * FROM purchases').all(),
       contracts: db.prepare('SELECT * FROM contracts').all(),
+      contract_guarantors: db.prepare('SELECT * FROM contract_guarantors').all(),
       schedule_versions: db.prepare('SELECT * FROM schedule_versions').all(),
       schedule_items: db.prepare('SELECT * FROM schedule_items').all(),
       overdue_contacts: db.prepare('SELECT * FROM overdue_contacts').all(),
@@ -414,6 +415,7 @@ export function restoreEncryptedBackupFromEnvelope(
       suppliers?: Array<Record<string, unknown>>;
       purchases?: Array<Record<string, unknown>>;
       contracts?: Array<Record<string, unknown>>;
+      contract_guarantors?: Array<Record<string, unknown>>;
       schedule_versions?: Array<Record<string, unknown>>;
       schedule_items?: Array<Record<string, unknown>>;
       overdue_contacts?: Array<Record<string, unknown>>;
@@ -449,6 +451,7 @@ export function restoreEncryptedBackupFromEnvelope(
     db.exec('DELETE FROM overdue_contacts;');
     db.exec('DELETE FROM schedule_items;');
     db.exec('DELETE FROM schedule_versions;');
+    db.exec('DELETE FROM contract_guarantors;');
     db.exec('DELETE FROM contracts;');
     db.exec('DELETE FROM purchases;');
     db.exec('DELETE FROM suppliers;');
@@ -486,6 +489,9 @@ export function restoreEncryptedBackupFromEnvelope(
     }
     for (const contract of tables.contracts || []) {
       insertRow('contracts', contract);
+    }
+    for (const cg of tables.contract_guarantors || []) {
+      insertRow('contract_guarantors', cg);
     }
     for (const sv of tables.schedule_versions || []) {
       insertRow('schedule_versions', sv);
