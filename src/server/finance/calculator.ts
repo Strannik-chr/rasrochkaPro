@@ -347,3 +347,122 @@ export function toSafeCsvRow(cells: Array<string | number | null | undefined>): 
     })
     .join(';');
 }
+
+export type AutoAllocationStrategy = 'spread_remaining' | 'sequential';
+
+export interface UnpaidScheduleItemInput {
+  id: string;
+  remainingKopecks: number;
+}
+
+export interface ComputedScheduleAllocation {
+  scheduleItemId: string;
+  amountKopecks: number;
+}
+
+/**
+ * Computes automatic payment allocation across unpaid schedule items.
+ *
+ * Strategies:
+ * - 'spread_remaining' (DEFAULT): Closes the current (first unpaid) month first, and distributes
+ *   any remaining overpayment evenly across all remaining unpaid months.
+ *   Example: Monthly payment is 15 000 ₽ (4 months left), client pays 18 000 ₽:
+ *   Month 1 gets 15 000 ₽ (closed), and the remaining 3 000 ₽ is spread evenly across Months 2, 3, 4 (1 000 ₽ each).
+ * - 'sequential': Closes unpaid months strictly one after another in chronological order.
+ *   Example: Monthly payment is 7 000 ₽, client pays 15 000 ₽:
+ *   Month 1 gets 7 000 ₽, Month 2 gets 7 000 ₽, Month 3 gets 1 000 ₽.
+ */
+export function computeAutomaticScheduleAllocations(
+  totalKopecks: number,
+  items: UnpaidScheduleItemInput[],
+  strategy: AutoAllocationStrategy = 'spread_remaining'
+): ComputedScheduleAllocation[] {
+  const validItems = items.filter((it) => it && it.remainingKopecks > 0);
+  if (totalKopecks <= 0 || validItems.length === 0) {
+    return [];
+  }
+
+  if (strategy === 'sequential') {
+    const result: ComputedScheduleAllocation[] = [];
+    let remaining = Math.max(0, Math.trunc(totalKopecks));
+    for (const item of validItems) {
+      if (remaining <= 0) break;
+      const alloc = Math.min(item.remainingKopecks, remaining);
+      if (alloc > 0) {
+        result.push({
+          scheduleItemId: item.id,
+          amountKopecks: alloc,
+        });
+        remaining -= alloc;
+      }
+    }
+    return result;
+  }
+
+  // Default strategy: 'spread_remaining'
+  // 1. Close the current unpaid installment first
+  const firstItem = validItems[0];
+  const firstAlloc = Math.min(firstItem.remainingKopecks, Math.max(0, Math.trunc(totalKopecks)));
+  const allocById: Record<string, number> = {
+    [firstItem.id]: firstAlloc,
+  };
+
+  const restItems = validItems.slice(1);
+  for (const it of restItems) {
+    allocById[it.id] = 0;
+  }
+
+  let remainingToSpread = Math.max(0, Math.trunc(totalKopecks) - firstAlloc);
+
+  // 2. Spread any extra overpayment evenly across all remaining unpaid months
+  while (remainingToSpread > 0 && restItems.length > 0) {
+    const active = restItems.filter((it) => it.remainingKopecks - allocById[it.id] > 0);
+    if (active.length === 0) break;
+
+    const count = active.length;
+    const baseShare = Math.floor(remainingToSpread / count);
+    const rem = remainingToSpread % count;
+
+    let anyCapped = false;
+    for (let i = 0; i < count; i++) {
+      const targetAdd = baseShare + (i < rem ? 1 : 0);
+      const capLeft = active[i].remainingKopecks - allocById[active[i].id];
+      if (capLeft < targetAdd) {
+        anyCapped = true;
+        break;
+      }
+    }
+
+    if (!anyCapped) {
+      for (let i = 0; i < count; i++) {
+        const targetAdd = baseShare + (i < rem ? 1 : 0);
+        allocById[active[i].id] += targetAdd;
+        remainingToSpread -= targetAdd;
+      }
+      break;
+    } else {
+      const minCapLeft = Math.min(...active.map((it) => it.remainingKopecks - allocById[it.id]));
+      const stepShare = Math.max(1, Math.min(baseShare, minCapLeft));
+      for (const it of active) {
+        if (remainingToSpread <= 0) break;
+        const capLeft = it.remainingKopecks - allocById[it.id];
+        const add = Math.min(capLeft, stepShare, remainingToSpread);
+        allocById[it.id] += add;
+        remainingToSpread -= add;
+      }
+    }
+  }
+
+  const finalAllocations: ComputedScheduleAllocation[] = [];
+  for (const item of validItems) {
+    const amt = allocById[item.id] || 0;
+    if (amt > 0) {
+      finalAllocations.push({
+        scheduleItemId: item.id,
+        amountKopecks: amt,
+      });
+    }
+  }
+  return finalAllocations;
+}
+

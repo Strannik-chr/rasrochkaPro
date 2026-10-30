@@ -4,7 +4,6 @@ import {
   ContractDTO,
   FinancialAccountDTO,
   PaymentDTO,
-  ScheduleItemDTO,
 } from '../shared/types';
 import {
   formatDateRu,
@@ -12,27 +11,30 @@ import {
   parseRublesInputToKopecks,
   translateScheduleStatus,
 } from '../utils/format';
-import { X, AlertTriangle, Check, Zap, SlidersHorizontal, Info } from 'lucide-react';
+import {
+  AutoAllocationStrategy,
+  computeAutomaticScheduleAllocations,
+} from '../server/finance/calculator';
+import { X, AlertTriangle, Check, Zap, SlidersHorizontal, Info, Layers, ArrowRight } from 'lucide-react';
 
 /**
- * Computes sequential chronological allocation across unpaid schedule items.
- * Example: monthly installment is 7 000 ₽, payment is 15 000 ₽:
- * Month 1: 7 000 ₽ (closed)
- * Month 2: 7 000 ₽ (closed)
- * Month 3: 1 000 ₽ (partial, leaving 6 000 ₽)
+ * Computes automatic allocation across unpaid schedule items.
+ * Default strategy ('spread_remaining'):
+ *   Closes the current month first (e.g. 15 000 ₽ out of 18 000 ₽),
+ *   and distributes the extra 3 000 ₽ evenly across all remaining unpaid months.
+ * Alternative strategy ('sequential'):
+ *   Closes unpaid months strictly one after another in chronological order.
  */
 export function computeAutoAllocation(
   totalKopecks: number,
-  items: Array<{ id: string; remainingKopecks: number }>
+  items: Array<{ id: string; remainingKopecks: number }>,
+  strategy: AutoAllocationStrategy = 'spread_remaining'
 ): Record<string, string> {
   const result: Record<string, string> = {};
-  let remaining = Math.max(0, totalKopecks);
-  for (const item of items) {
-    if (remaining <= 0) break;
-    const alloc = Math.min(item.remainingKopecks, remaining);
-    if (alloc > 0) {
-      result[item.id] = (alloc / 100).toFixed(2);
-      remaining -= alloc;
+  const allocations = computeAutomaticScheduleAllocations(totalKopecks, items, strategy);
+  for (const alloc of allocations) {
+    if (alloc.amountKopecks > 0) {
+      result[alloc.scheduleItemId] = (alloc.amountKopecks / 100).toFixed(2);
     }
   }
   return result;
@@ -43,8 +45,12 @@ export function summarizeAllocations(
   items: Array<{ id: string; installmentNumber: number; remainingKopecks: number }>,
   allocMap: Record<string, string>
 ) {
-  const fullyCovered: number[] = [];
-  let partiallyCovered: { num: number; amountKopecks: number; leftKopecks: number } | null = null;
+  const fullyCovered: Array<{ num: number; amountKopecks: number }> = [];
+  const partiallyCoveredItems: Array<{
+    num: number;
+    amountKopecks: number;
+    leftKopecks: number;
+  }> = [];
   let totalAllocatedKopecks = 0;
 
   for (const item of items) {
@@ -52,18 +58,31 @@ export function summarizeAllocations(
     if (allocKop <= 0) continue;
     totalAllocatedKopecks += allocKop;
     if (allocKop >= item.remainingKopecks) {
-      fullyCovered.push(item.installmentNumber);
+      fullyCovered.push({
+        num: item.installmentNumber,
+        amountKopecks: allocKop,
+      });
     } else {
-      partiallyCovered = {
+      partiallyCoveredItems.push({
         num: item.installmentNumber,
         amountKopecks: allocKop,
         leftKopecks: item.remainingKopecks - allocKop,
-      };
+      });
     }
   }
 
   const unallocatedKopecks = Math.max(0, amountKopecks - totalAllocatedKopecks);
-  return { fullyCovered, partiallyCovered, totalAllocatedKopecks, unallocatedKopecks };
+  const spreadTotalKopecks = partiallyCoveredItems.reduce((s, p) => s + p.amountKopecks, 0);
+
+  return {
+    fullyCovered: fullyCovered.map((f) => f.num),
+    fullyCoveredDetails: fullyCovered,
+    partiallyCovered: partiallyCoveredItems[0] || null,
+    partiallyCoveredItems,
+    spreadTotalKopecks,
+    totalAllocatedKopecks,
+    unallocatedKopecks,
+  };
 }
 
 interface ManualAllocationModalProps {
@@ -88,6 +107,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
     payment.contractId || clientContracts[0]?.id || ''
   );
   const [allocationMode, setAllocationMode] = useState<'auto' | 'manual'>('auto');
+  const [autoStrategy, setAutoStrategy] = useState<AutoAllocationStrategy>('spread_remaining');
   const [allocMap, setAllocMap] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -95,12 +115,12 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
   const selectedContract = contracts.find((c) => c.id === selectedContractId);
   const unpaidItems = (selectedContract?.schedule || []).filter((i) => i.remainingKopecks > 0);
 
-  // Apply automatic sequential allocation whenever contract or mode changes
+  // Apply automatic allocation whenever contract, mode, or strategy changes
   useEffect(() => {
     if (allocationMode === 'auto' && unpaidItems.length > 0) {
-      setAllocMap(computeAutoAllocation(payment.unallocatedKopecks, unpaidItems));
+      setAllocMap(computeAutoAllocation(payment.unallocatedKopecks, unpaidItems, autoStrategy));
     }
-  }, [selectedContractId, allocationMode, payment.unallocatedKopecks]);
+  }, [selectedContractId, allocationMode, autoStrategy, payment.unallocatedKopecks]);
 
   const totalSelectedKopecks = Object.values(allocMap).reduce<number>(
     (sum, val) => sum + parseRublesInputToKopecks(String(val)),
@@ -108,9 +128,12 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
   );
   const remainingUnallocatedAfter = payment.unallocatedKopecks - totalSelectedKopecks;
 
-  const handleApplyAutoAllocation = () => {
-    setAllocMap(computeAutoAllocation(payment.unallocatedKopecks, unpaidItems));
+  const handleApplyStrategy = (strategy: AutoAllocationStrategy) => {
+    setAutoStrategy(strategy);
     setAllocationMode('auto');
+    if (unpaidItems.length > 0) {
+      setAllocMap(computeAutoAllocation(payment.unallocatedKopecks, unpaidItems, strategy));
+    }
   };
 
   const handleQuickFillItem = (itemId: string, itemRemainingKopecks: number) => {
@@ -152,6 +175,8 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
         body: JSON.stringify({
           contractId: selectedContractId,
           allocations,
+          autoAllocate: allocationMode === 'auto',
+          autoAllocationStrategy: autoStrategy,
         }),
       });
       await onSuccess();
@@ -172,7 +197,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
               Распределение платежа · {payment.clientName}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Автоматическое последовательное закрытие месяцев по графику или ручной выбор конкретных платежей
+              По умолчанию сумма сверх текущего платежа распределяется равномерно на все оставшиеся месяцы
             </p>
           </div>
           <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
@@ -235,50 +260,93 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
 
           {selectedContract && (
             <div className="space-y-3">
-              {/* Mode switch & Quick Auto-action */}
-              <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-slate-100 border border-slate-200 rounded-lg">
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAllocationMode('auto');
-                      setAllocMap(computeAutoAllocation(payment.unallocatedKopecks, unpaidItems));
-                    }}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
-                      allocationMode === 'auto'
-                        ? 'bg-slate-900 text-white shadow-sm'
-                        : 'text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    <Zap className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Автораспределение по графику</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAllocationMode('manual')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
-                      allocationMode === 'manual'
-                        ? 'bg-slate-900 text-white shadow-sm'
-                        : 'text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    <SlidersHorizontal className="w-3.5 h-3.5" />
-                    <span>Ручной ввод сумм</span>
-                  </button>
+              {/* Mode switch & Strategy selector */}
+              <div className="p-3 bg-slate-100 border border-slate-200 rounded-xl space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-slate-800">
+                    Способ распределения платежа:
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAllocationMode('auto');
+                        setAllocMap(computeAutoAllocation(payment.unallocatedKopecks, unpaidItems, autoStrategy));
+                      }}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
+                        allocationMode === 'auto'
+                          ? 'bg-slate-900 text-white shadow-sm'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-200'
+                      }`}
+                    >
+                      <Zap className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Автоматически</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllocationMode('manual')}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
+                        allocationMode === 'manual'
+                          ? 'bg-slate-900 text-white shadow-sm'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-200'
+                      }`}
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                      <span>Ручной ввод</span>
+                    </button>
+                  </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleApplyAutoAllocation}
-                  className="px-3 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md hover:bg-emerald-100 flex items-center gap-1"
-                >
-                  <Zap className="w-3.5 h-3.5" />
-                  <span>Заполнить по очереди</span>
-                </button>
+                {allocationMode === 'auto' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleApplyStrategy('spread_remaining')}
+                      className={`p-2.5 rounded-lg border text-left transition-all ${
+                        autoStrategy === 'spread_remaining'
+                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
+                          : 'bg-white/70 border-slate-200 hover:bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>На все оставшиеся месяцы</span>
+                        </span>
+                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 rounded">
+                          По умолчанию
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 mt-1 leading-snug">
+                        Закрывает текущий месяц, а переплату сверху делит поровну на все оставшиеся месяцы.
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleApplyStrategy('sequential')}
+                      className={`p-2.5 rounded-lg border text-left transition-all ${
+                        autoStrategy === 'sequential'
+                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
+                          : 'bg-white/70 border-slate-200 hover:bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                          <ArrowRight className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                          <span>По очереди по месяцам</span>
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 mt-1 leading-snug">
+                        Закрывает текущий месяц, а весь остаток направляет в ближайший следующий месяц.
+                      </p>
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Explanatory summary banner */}
-              {(summary.fullyCovered.length > 0 || summary.partiallyCovered) && (
+              {(summary.fullyCovered.length > 0 || summary.partiallyCoveredItems.length > 0) && (
                 <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-xl text-xs text-emerald-950 flex items-start gap-2.5">
                   <Info className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
                   <div>
@@ -286,17 +354,31 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                       Результат распределения суммы {formatMoney(totalSelectedKopecks)}:
                     </div>
                     <div className="mt-1 space-y-0.5 text-[11px] text-emerald-950">
-                      {summary.fullyCovered.length > 0 && (
+                      {summary.fullyCoveredDetails.length > 0 && (
                         <div>
                           • Будет полностью закрыто платежей:{' '}
-                          <strong>{summary.fullyCovered.length} мес.</strong> (№
-                          {summary.fullyCovered.join(', №')})
+                          <strong>{summary.fullyCoveredDetails.length} мес.</strong> (
+                          {summary.fullyCoveredDetails
+                            .map((f) => `№${f.num} — ${formatMoney(f.amountKopecks)}`)
+                            .join(', ')}
+                          )
                         </div>
                       )}
-                      {summary.partiallyCovered && (
+                      {summary.partiallyCoveredItems.length === 1 && (
                         <div>
-                          • В счёт платежа №{summary.partiallyCovered.num} пойдёт{' '}
-                          <strong>{formatMoney(summary.partiallyCovered.amountKopecks)}</strong> (остаток к доплате в следующем месяце: {formatMoney(summary.partiallyCovered.leftKopecks)})
+                          • В счёт платежа №{summary.partiallyCoveredItems[0].num} пойдёт{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].amountKopecks)}</strong>{' '}
+                          (остаток к оплате в этом месяце:{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].leftKopecks)}</strong>)
+                        </div>
+                      )}
+                      {summary.partiallyCoveredItems.length > 1 && (
+                        <div>
+                          • Сумма сверху (<strong>{formatMoney(summary.spreadTotalKopecks)}</strong>) равномерно распределена на все оставшиеся{' '}
+                          <strong>{summary.partiallyCoveredItems.length} мес.</strong> (№
+                          {summary.partiallyCoveredItems.map((p) => p.num).join(', №')}): по{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].amountKopecks)}</strong> на каждый месяц (новый платёж в эти месяцы:{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].leftKopecks)}</strong>)
                         </div>
                       )}
                       {remainingUnallocatedAfter > 0 && (
@@ -463,6 +545,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   const [eventDate, setEventDate] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState('');
   const [allocationMode, setAllocationMode] = useState<'auto' | 'manual'>('auto');
+  const [autoStrategy, setAutoStrategy] = useState<AutoAllocationStrategy>('spread_remaining');
   const [allocMap, setAllocMap] = useState<Record<string, string>>({});
   const [idempotencyKey] = useState(() => `idem_pay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   const [error, setError] = useState<string | null>(null);
@@ -484,14 +567,14 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
 
   const amountKopecks = parseRublesInputToKopecks(amountRubles);
 
-  // Automatically recalculate cascade allocations when amount or contract changes in auto mode
+  // Automatically recalculate allocations when amount, contract, mode, or strategy changes
   useEffect(() => {
     if (allocationMode === 'auto' && selectedContract && amountKopecks > 0) {
-      setAllocMap(computeAutoAllocation(amountKopecks, unpaidItems));
+      setAllocMap(computeAutoAllocation(amountKopecks, unpaidItems, autoStrategy));
     } else if (allocationMode === 'auto' && amountKopecks === 0) {
       setAllocMap({});
     }
-  }, [amountRubles, contractId, allocationMode]);
+  }, [amountRubles, contractId, allocationMode, autoStrategy]);
 
   const allocatedKopecks = Object.values(allocMap).reduce<number>(
     (sum, v) => sum + parseRublesInputToKopecks(String(v)),
@@ -499,10 +582,11 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   );
   const unallocatedAfter = amountKopecks - allocatedKopecks;
 
-  const handleApplyAutoAllocation = () => {
+  const handleSelectAutoStrategy = (strategy: AutoAllocationStrategy) => {
+    setAutoStrategy(strategy);
+    setAllocationMode('auto');
     if (unpaidItems.length > 0 && amountKopecks > 0) {
-      setAllocMap(computeAutoAllocation(amountKopecks, unpaidItems));
-      setAllocationMode('auto');
+      setAllocMap(computeAutoAllocation(amountKopecks, unpaidItems, strategy));
     }
   };
 
@@ -542,6 +626,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
           notes,
           allocations,
           autoAllocate: allocationMode === 'auto',
+          autoAllocationStrategy: autoStrategy,
         }),
       });
       await onSuccess();
@@ -562,7 +647,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
               Регистрация поступления от клиента
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Автораспределение по графику: платёж автоматически закрывает месяцы по порядку
+              По умолчанию закрывается текущий месяц, а переплата распределяется на все оставшиеся месяцы
             </p>
           </div>
           <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
@@ -630,7 +715,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                 min="1"
                 value={amountRubles}
                 onChange={(e) => setAmountRubles(e.target.value)}
-                placeholder="Например: 15000"
+                placeholder="Например: 18000"
                 className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
                 required
               />
@@ -689,68 +774,134 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
             </div>
           </div>
 
-          {selectedContract && amountKopecks > 0 && (
+          {selectedContract && (
             <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
-              {/* Allocation Mode Header */}
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAllocationMode('auto');
-                      setAllocMap(computeAutoAllocation(amountKopecks, unpaidItems));
-                    }}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
-                      allocationMode === 'auto'
-                        ? 'bg-slate-900 text-white shadow-sm'
-                        : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    <Zap className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Автораспределение по графику</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAllocationMode('manual')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
-                      allocationMode === 'manual'
-                        ? 'bg-slate-900 text-white shadow-sm'
-                        : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    <SlidersHorizontal className="w-3.5 h-3.5" />
-                    <span>Ручной ввод</span>
-                  </button>
+              {/* Allocation Mode & Overpayment Strategy Selector */}
+              <div className="space-y-3 border-b border-slate-200 pb-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAllocationMode('auto');
+                        if (amountKopecks > 0) {
+                          setAllocMap(computeAutoAllocation(amountKopecks, unpaidItems, autoStrategy));
+                        }
+                      }}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
+                        allocationMode === 'auto'
+                          ? 'bg-slate-900 text-white shadow-sm'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Zap className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Автораспределение</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllocationMode('manual')}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md flex items-center gap-1.5 transition-colors ${
+                        allocationMode === 'manual'
+                          ? 'bg-slate-900 text-white shadow-sm'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                      <span>Ручной ввод</span>
+                    </button>
+                  </div>
+
+                  {amountKopecks > 0 && (
+                    <div className="text-xs font-mono text-slate-700">
+                      Распределено: <strong>{formatMoney(allocatedKopecks)}</strong> · Нераспределённый остаток:{' '}
+                      <strong className={unallocatedAfter < 0 ? 'text-red-600' : 'text-emerald-700'}>
+                        {formatMoney(unallocatedAfter)}
+                      </strong>
+                    </div>
+                  )}
                 </div>
 
-                <div className="text-xs font-mono text-slate-700">
-                  Распределено: <strong>{formatMoney(allocatedKopecks)}</strong> · Нераспределённый остаток:{' '}
-                  <strong className={unallocatedAfter < 0 ? 'text-red-600' : 'text-emerald-700'}>
-                    {formatMoney(unallocatedAfter)}
-                  </strong>
-                </div>
+                {allocationMode === 'auto' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAutoStrategy('spread_remaining')}
+                      className={`p-3 rounded-lg border text-left transition-all ${
+                        autoStrategy === 'spread_remaining'
+                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
+                          : 'bg-white/70 border-slate-200 hover:bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>На каждый оставшийся месяц</span>
+                        </span>
+                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 rounded">
+                          По умолчанию
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 mt-1 leading-snug">
+                        Если клиент заплатил больше (например, 18 000 ₽ вместо 15 000 ₽), текущий месяц закроется, а лишние 3 000 ₽ распределятся поровну на все оставшиеся месяцы.
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAutoStrategy('sequential')}
+                      className={`p-3 rounded-lg border text-left transition-all ${
+                        autoStrategy === 'sequential'
+                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
+                          : 'bg-white/70 border-slate-200 hover:bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                          <ArrowRight className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                          <span>По очереди на следующие месяцы</span>
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 mt-1 leading-snug">
+                        Закрывает текущий месяц, а вся переплата целиком переходит в счёт ближайшего следующего месяца по графику.
+                      </p>
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Explanatory summary banner for the user */}
-              {(summary.fullyCovered.length > 0 || summary.partiallyCovered) && (
+              {amountKopecks > 0 && (summary.fullyCovered.length > 0 || summary.partiallyCoveredItems.length > 0) && (
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-950 flex items-start gap-2.5">
                   <Info className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
                   <div>
                     <div className="font-semibold text-emerald-900">
-                      Автоматический расчёт распределения суммы {formatMoney(amountKopecks)}:
+                      Расчёт распределения суммы {formatMoney(amountKopecks)}:
                     </div>
                     <div className="mt-1 space-y-0.5 text-[11px] text-emerald-950">
-                      {summary.fullyCovered.length > 0 && (
+                      {summary.fullyCoveredDetails.length > 0 && (
                         <div>
-                          • Полностью закрывается месяцев:{' '}
-                          <strong>{summary.fullyCovered.length} мес.</strong> (№
-                          {summary.fullyCovered.join(', №')})
+                          • Полностью закрывается:{' '}
+                          <strong>{summary.fullyCoveredDetails.length} мес.</strong> (
+                          {summary.fullyCoveredDetails
+                            .map((f) => `№${f.num} — ${formatMoney(f.amountKopecks)}`)
+                            .join(', ')}
+                          )
                         </div>
                       )}
-                      {summary.partiallyCovered && (
+                      {summary.partiallyCoveredItems.length === 1 && (
                         <div>
-                          • В счёт следующего месяца (№{summary.partiallyCovered.num}) направлено:{' '}
-                          <strong>{formatMoney(summary.partiallyCovered.amountKopecks)}</strong> (останется оплатить: {formatMoney(summary.partiallyCovered.leftKopecks)})
+                          • В счёт месяца №{summary.partiallyCoveredItems[0].num} направлено:{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].amountKopecks)}</strong> (останется оплатить в этом месяце:{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].leftKopecks)}</strong>)
+                        </div>
+                      )}
+                      {summary.partiallyCoveredItems.length > 1 && (
+                        <div>
+                          • Сумма сверху (<strong>{formatMoney(summary.spreadTotalKopecks)}</strong>) распределена поровну на все оставшиеся{' '}
+                          <strong>{summary.partiallyCoveredItems.length} мес.</strong> (№
+                          {summary.partiallyCoveredItems.map((p) => p.num).join(', №')}): списано по{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].amountKopecks)}</strong> с каждого месяца (останется платить по{' '}
+                          <strong>{formatMoney(summary.partiallyCoveredItems[0].leftKopecks)}</strong>/мес.)
                         </div>
                       )}
                       {unallocatedAfter > 0 && (
@@ -763,89 +914,91 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                 </div>
               )}
 
-              <table className="w-full text-left text-xs bg-white border border-slate-200 rounded-lg overflow-hidden">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                    <th className="py-2 px-3">№</th>
-                    <th className="py-2 px-3">Дата по графику</th>
-                    <th className="py-2 px-3 text-right">Остаток по строке</th>
-                    <th className="py-2 px-3 text-right">Направить сумму (₽)</th>
-                    <th className="py-2 px-3 text-right">Результат</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {unpaidItems.map((item) => {
-                    const allocKop = parseRublesInputToKopecks(allocMap[item.id] || '0');
-                    const isFull = allocKop >= item.remainingKopecks;
-                    const isPartial = allocKop > 0 && allocKop < item.remainingKopecks;
-                    return (
-                      <tr
-                        key={item.id}
-                        className={isFull ? 'bg-emerald-50/40' : isPartial ? 'bg-amber-50/40' : ''}
-                      >
-                        <td className="py-1.5 px-3 font-mono">№{item.installmentNumber}</td>
-                        <td className="py-1.5 px-3 font-mono">{formatDateRu(item.dueDate)}</td>
-                        <td className="py-1.5 px-3 font-mono text-right font-medium">
-                          {formatMoney(item.remainingKopecks)}
-                        </td>
-                        <td className="py-1.5 px-3 text-right">
-                          <div className="flex items-center justify-end gap-2">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              max={item.remainingKopecks / 100}
-                              value={allocMap[item.id] || ''}
-                              onChange={(e) => {
-                                setAllocationMode('manual');
-                                setAllocMap((prev) => ({ ...prev, [item.id]: e.target.value }));
-                              }}
-                              className={`w-28 px-2 py-1 text-xs font-mono text-right border rounded ${
-                                isFull
-                                  ? 'border-emerald-300 bg-emerald-50/50 font-semibold text-emerald-900'
-                                  : isPartial
-                                    ? 'border-amber-300 bg-amber-50/50 font-semibold text-amber-900'
-                                    : 'border-slate-300 bg-white'
-                              }`}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setAllocationMode('manual');
-                                const curr = parseRublesInputToKopecks(allocMap[item.id] || '0');
-                                const avail = Math.max(0, unallocatedAfter + curr);
-                                const fill = Math.min(item.remainingKopecks, avail);
-                                setAllocMap((prev) => ({
-                                  ...prev,
-                                  [item.id]: (fill / 100).toFixed(2),
-                                }));
-                              }}
-                              className="px-2 py-1 text-[11px] border border-slate-200 rounded hover:bg-slate-50"
-                            >
-                              Макс.
-                            </button>
-                          </div>
-                        </td>
-                        <td className="py-1.5 px-3 text-right">
-                          {isFull && (
-                            <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 rounded">
-                              Погашен полностью ✓
-                            </span>
-                          )}
-                          {isPartial && (
-                            <span className="px-2 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-900 rounded">
-                              Частично (останется {formatMoney(item.remainingKopecks - allocKop)})
-                            </span>
-                          )}
-                          {!isFull && !isPartial && (
-                            <span className="text-[11px] text-slate-400">Без оплаты</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              {amountKopecks > 0 && (
+                <table className="w-full text-left text-xs bg-white border border-slate-200 rounded-lg overflow-hidden">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                      <th className="py-2 px-3">№</th>
+                      <th className="py-2 px-3">Дата по графику</th>
+                      <th className="py-2 px-3 text-right">Остаток по строке</th>
+                      <th className="py-2 px-3 text-right">Направить сумму (₽)</th>
+                      <th className="py-2 px-3 text-right">Результат</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {unpaidItems.map((item) => {
+                      const allocKop = parseRublesInputToKopecks(allocMap[item.id] || '0');
+                      const isFull = allocKop >= item.remainingKopecks;
+                      const isPartial = allocKop > 0 && allocKop < item.remainingKopecks;
+                      return (
+                        <tr
+                          key={item.id}
+                          className={isFull ? 'bg-emerald-50/40' : isPartial ? 'bg-amber-50/40' : ''}
+                        >
+                          <td className="py-1.5 px-3 font-mono">№{item.installmentNumber}</td>
+                          <td className="py-1.5 px-3 font-mono">{formatDateRu(item.dueDate)}</td>
+                          <td className="py-1.5 px-3 font-mono text-right font-medium">
+                            {formatMoney(item.remainingKopecks)}
+                          </td>
+                          <td className="py-1.5 px-3 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                max={item.remainingKopecks / 100}
+                                value={allocMap[item.id] || ''}
+                                onChange={(e) => {
+                                  setAllocationMode('manual');
+                                  setAllocMap((prev) => ({ ...prev, [item.id]: e.target.value }));
+                                }}
+                                className={`w-28 px-2 py-1 text-xs font-mono text-right border rounded ${
+                                  isFull
+                                    ? 'border-emerald-300 bg-emerald-50/50 font-semibold text-emerald-900'
+                                    : isPartial
+                                      ? 'border-amber-300 bg-amber-50/50 font-semibold text-amber-900'
+                                      : 'border-slate-300 bg-white'
+                                }`}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setAllocationMode('manual');
+                                  const curr = parseRublesInputToKopecks(allocMap[item.id] || '0');
+                                  const avail = Math.max(0, unallocatedAfter + curr);
+                                  const fill = Math.min(item.remainingKopecks, avail);
+                                  setAllocMap((prev) => ({
+                                    ...prev,
+                                    [item.id]: (fill / 100).toFixed(2),
+                                  }));
+                                }}
+                                className="px-2 py-1 text-[11px] border border-slate-200 rounded hover:bg-slate-50"
+                              >
+                                Макс.
+                              </button>
+                            </div>
+                          </td>
+                          <td className="py-1.5 px-3 text-right">
+                            {isFull && (
+                              <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 rounded">
+                                Погашен полностью ✓
+                              </span>
+                            )}
+                            {isPartial && (
+                              <span className="px-2 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-900 rounded">
+                                Частично (останется {formatMoney(item.remainingKopecks - allocKop)})
+                              </span>
+                            )}
+                            {!isFull && !isPartial && (
+                              <span className="text-[11px] text-slate-400">Без оплаты</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
             </div>
           )}
 
@@ -870,3 +1023,4 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
     </div>
   );
 };
+

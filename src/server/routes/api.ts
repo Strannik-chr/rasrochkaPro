@@ -3,11 +3,13 @@ import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import { withTransaction } from '../db/database';
 import {
+  AutoAllocationStrategy,
   assertKopecks,
   calculateContractAndSchedule,
   calculateDaysOverdue,
   calculateEarlyPayoffComparison,
   calculateTotalCostKopecks,
+  computeAutomaticScheduleAllocations,
   formatRubles,
   toSafeCsvRow,
 } from '../finance/calculator';
@@ -4142,6 +4144,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           notes,
           allocations,
           autoAllocate,
+          autoAllocationStrategy,
         } = req.body as {
           idempotencyKey?: string;
           clientId?: string;
@@ -4153,6 +4156,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           notes?: string;
           allocations?: Array<{ scheduleItemId: string; amountKopecks: number }>;
           autoAllocate?: boolean;
+          autoAllocationStrategy?: AutoAllocationStrategy;
         };
 
         if (!idempotencyKey || !idempotencyKey.trim()) {
@@ -4186,7 +4190,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           ? allocations.filter((a) => a && Number(a.amountKopecks) > 0)
           : [];
 
-        // Automatic sequential allocation across schedule if requested and contractId is specified
+        const effectiveStrategy: AutoAllocationStrategy =
+          autoAllocationStrategy === 'sequential' ? 'sequential' : 'spread_remaining';
+
+        // Automatic allocation across schedule if requested and contractId is specified
         if (autoAllocate && contractId && requestedAllocs.length === 0) {
           const cRow = db
             .prepare('SELECT current_schedule_version FROM contracts WHERE id = ?')
@@ -4207,17 +4214,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                 paid_kopecks: number;
               }>;
 
-            let remainingAmount = amount;
-            for (const item of unpaidItems) {
-              if (remainingAmount <= 0) break;
-              const need = Number(item.planned_kopecks) - Number(item.paid_kopecks);
-              const allocAmt = Math.min(need, remainingAmount);
-              requestedAllocs.push({
-                scheduleItemId: item.id,
-                amountKopecks: allocAmt,
-              });
-              remainingAmount -= allocAmt;
-            }
+            const computedAllocs = computeAutomaticScheduleAllocations(
+              amount,
+              unpaidItems.map((it) => ({
+                id: it.id,
+                remainingKopecks: Math.max(0, Number(it.planned_kopecks) - Number(it.paid_kopecks)),
+              })),
+              effectiveStrategy
+            );
+            requestedAllocs.push(...computedAllocs);
           }
         }
 
@@ -4351,10 +4356,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     (req: AuthenticatedRequest, res: Response) => {
       try {
         const paymentId = req.params.id;
-        const { contractId, allocations, autoAllocate } = req.body as {
+        const { contractId, allocations, autoAllocate, autoAllocationStrategy } = req.body as {
           contractId?: string;
           allocations?: Array<{ scheduleItemId: string; amountKopecks: number }>;
           autoAllocate?: boolean;
+          autoAllocationStrategy?: AutoAllocationStrategy;
         };
 
         const payRow = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId) as
@@ -4369,6 +4375,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const requestedAllocs = Array.isArray(allocations)
           ? allocations.filter((a) => a && Number(a.amountKopecks) > 0)
           : [];
+
+        const effectiveStrategy: AutoAllocationStrategy =
+          autoAllocationStrategy === 'sequential' ? 'sequential' : 'spread_remaining';
 
         if (autoAllocate && effectiveContractId && requestedAllocs.length === 0) {
           const cRow = db
@@ -4390,17 +4399,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                 paid_kopecks: number;
               }>;
 
-            let remainingAmount = Number(payRow.unallocated_kopecks);
-            for (const item of unpaidItems) {
-              if (remainingAmount <= 0) break;
-              const need = Number(item.planned_kopecks) - Number(item.paid_kopecks);
-              const allocAmt = Math.min(need, remainingAmount);
-              requestedAllocs.push({
-                scheduleItemId: item.id,
-                amountKopecks: allocAmt,
-              });
-              remainingAmount -= allocAmt;
-            }
+            const computedAllocs = computeAutomaticScheduleAllocations(
+              Number(payRow.unallocated_kopecks),
+              unpaidItems.map((it) => ({
+                id: it.id,
+                remainingKopecks: Math.max(0, Number(it.planned_kopecks) - Number(it.paid_kopecks)),
+              })),
+              effectiveStrategy
+            );
+            requestedAllocs.push(...computedAllocs);
           }
         }
 
