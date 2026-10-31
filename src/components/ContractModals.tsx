@@ -18,6 +18,7 @@ import {
   translateScheduleStatus,
 } from '../utils/format';
 import { normalizePhoneE164 } from '../shared/clientStatus';
+import { BrandLogo } from './BrandLogo';
 import {
   X,
   Calculator,
@@ -2676,7 +2677,13 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
         </div>
 
         <div className="p-4 sm:p-6 border border-slate-300 rounded-lg text-xs text-slate-900 space-y-4 leading-relaxed">
-          <div className="text-center border-b border-slate-200 pb-3">
+          <div className="text-center border-b border-slate-200 pb-3 space-y-1.5">
+            <div className="flex items-center justify-center gap-2">
+              <BrandLogo size="sm" />
+              <span className="text-sm font-bold tracking-tight text-slate-900 font-display">
+                Рассрочка<span className="text-emerald-700">Про</span>
+              </span>
+            </div>
             <div className="text-sm font-bold break-words">
               {templateType === 'contract' &&
                 `ДОГОВОР КУПЛИ-ПРОДАЖИ ТОВАРА В РАССРОЧКУ № ${contract.contractNumber}`}

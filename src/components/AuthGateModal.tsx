@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { X, Shield, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { X, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { BrandLogo } from './BrandLogo';
 
 interface AuthGateModalProps {
   onClose?: () => void;
@@ -56,17 +57,19 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   };
 
   const cardContent = (
-    <div className="bg-white border border-slate-200 rounded-xl w-full max-w-sm p-6 sm:p-8 shadow-xs">
-      <div className="flex items-center justify-between pb-5 border-b border-slate-200">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-slate-900 text-white flex items-center justify-center shrink-0">
-            <Shield className="w-4 h-4" />
+    <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-sm p-6 sm:p-8 shadow-sm">
+      <div className="flex items-start justify-between pb-5 border-b border-slate-200">
+        <div className="flex items-center gap-3.5">
+          <div className="w-14 h-14 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0 shadow-2xs">
+            <BrandLogo size="lg" />
           </div>
           <div>
-            <h1 className="text-base font-bold text-slate-900 leading-tight">
-              Вход в приложение
+            <div className="text-lg font-bold tracking-tight text-slate-900 font-display leading-tight">
+              Рассрочка<span className="text-emerald-700">Про</span>
+            </div>
+            <h1 className="text-xs font-medium text-slate-600 mt-0.5">
+              Вход в систему учёта рассрочки
             </h1>
-            <p className="text-xs text-slate-500 mt-0.5">РассрочкаПро</p>
           </div>
         </div>
         {!fullScreen && onClose && (

@@ -48,6 +48,7 @@ import {
 import { buildDirectWhatsAppUrl } from './shared/clientStatus';
 import { ManualAllocationModal, NewPaymentModal } from './components/PaymentAllocateModal';
 import { AuthGateModal } from './components/AuthGateModal';
+import { BrandLogo } from './components/BrandLogo';
 import {
   Search,
   Plus,
@@ -319,17 +320,50 @@ export default function App() {
 
   const downloadProtectedFile = useCallback(
     async (path: string, fallbackFilename: string) => {
+      const safeName = (fallbackFilename || 'document.bin').trim() || 'document.bin';
+      const isIOSOrWebKitMobile =
+        typeof navigator !== 'undefined' &&
+        (/iPhone|iPad|iPod/i.test(navigator.userAgent || '') ||
+          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+      // Verify auth, file existence, and SHA-256 integrity on the server first
       const blob = await fetchProtectedBlob(path);
+
+      // Keep the Blob URL alive for 60s so mobile & desktop async download managers can read it
       const objUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
+      a.style.display = 'none';
       a.href = objUrl;
-      a.download = fallbackFilename;
+      a.download = safeName;
+      a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(objUrl);
+
+      window.setTimeout(() => {
+        if (a.parentNode) {
+          a.parentNode.removeChild(a);
+        }
+        URL.revokeObjectURL(objUrl);
+      }, 60_000);
+
+      // On iOS Safari / WebKit mobile where programmatic blob: downloads after await can be ignored,
+      // also trigger the direct authenticated Content-Disposition: attachment endpoint
+      if (isIOSOrWebKitMobile) {
+        const authUrl = sessionToken
+          ? `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(sessionToken)}`
+          : path;
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = authUrl;
+        document.body.appendChild(iframe);
+        window.setTimeout(() => {
+          if (iframe.parentNode) {
+            iframe.parentNode.removeChild(iframe);
+          }
+        }, 60_000);
+      }
     },
-    [fetchProtectedBlob]
+    [fetchProtectedBlob, sessionToken]
   );
 
   const apiFetch = useCallback(
@@ -873,8 +907,12 @@ export default function App() {
 
   if (loading && !currentUser) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC] text-xs text-slate-500">
-        Проверка защищённой сессии...
+      <div className="min-h-screen flex flex-col items-center justify-center gap-3 bg-[#F8FAFC] text-xs text-slate-500">
+        <BrandLogo size="lg" />
+        <div className="font-semibold text-sm text-slate-900 font-display">
+          Рассрочка<span className="text-emerald-700">Про</span>
+        </div>
+        <div>Проверка защищённой сессии...</div>
       </div>
     );
   }
@@ -915,9 +953,12 @@ export default function App() {
               e.preventDefault();
               setActiveSection('dashboard');
             }}
-            className="text-base sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
+            className="flex items-center gap-2 text-base sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display group"
           >
-            РассрочкаПро
+            <BrandLogo size="sm" className="transition-transform group-hover:scale-105" />
+            <span>
+              Рассрочка<span className="text-emerald-700">Про</span>
+            </span>
           </a>
         </div>
 
@@ -1021,10 +1062,16 @@ export default function App() {
               : 'hidden lg:flex lg:w-64'
           } flex-col border-r border-slate-200 bg-white shrink-0 no-print overflow-y-auto`}
         >
-          <div className="p-4 border-b border-slate-200 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-xs text-slate-500 min-w-0 truncate">
-                Телефон: <strong className="font-mono text-slate-900">{currentUser.phone || currentUser.fullName}</strong>
+          <div className="p-4 border-b border-slate-200 space-y-2.5">
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2 min-w-0">
+                <BrandLogo size="sm" />
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-slate-900 font-display truncate leading-tight">
+                    Рассрочка<span className="text-emerald-700">Про</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 truncate">Учёт продаж в рассрочку</div>
+                </div>
               </div>
               {mobileMenuOpen && (
                 <button
@@ -1035,6 +1082,9 @@ export default function App() {
                   <X className="w-4 h-4" />
                 </button>
               )}
+            </div>
+            <div className="text-xs text-slate-500 min-w-0 truncate">
+              Телефон: <strong className="font-mono text-slate-900">{currentUser.phone || currentUser.fullName}</strong>
             </div>
             <div className="text-[11px] text-slate-500 truncate">{currentUser.fullName}</div>
             <div className="text-xs text-slate-500 flex items-center justify-between pt-1">
@@ -1120,7 +1170,7 @@ export default function App() {
         </aside>
 
         {/* Main Content Viewport */}
-        <main className="flex-1 overflow-y-auto p-3 sm:p-6 max-w-[1440px] mx-auto w-full min-w-0 space-y-5 sm:space-y-6">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-6 max-w-[1440px] mx-auto w-full min-w-0 space-y-5 sm:space-y-6">
           {/* Workspace Toolbar: Search & Quick Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 no-print">
             <div className="relative w-full sm:w-80">
@@ -2164,97 +2214,105 @@ export default function App() {
                             <div className="text-[11px] font-medium text-slate-700">
                               Прикреплённые фото и сканы договора ({contractDocs.length}):
                             </div>
-                            <div className="flex flex-wrap gap-2">
+                            <div className="space-y-2">
                               {contractDocs.map((doc) => (
                                 <div
                                   key={doc.id}
-                                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs flex flex-wrap items-center gap-2 max-w-full"
+                                  className="w-full p-2.5 sm:px-3 sm:py-2 bg-white border border-slate-200 rounded-lg text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0"
                                 >
-                                  <FileText className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-                                  <span
-                                    className="font-medium text-slate-900 truncate max-w-[160px] sm:max-w-[220px]"
-                                    title={doc.originalFilename}
-                                  >
-                                    {doc.originalFilename}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => setPreviewingDocument(doc)}
-                                    className="px-2 py-0.5 text-[11px] font-medium text-slate-700 bg-slate-100 rounded hover:bg-slate-200 inline-flex items-center gap-1"
-                                  >
-                                    <Eye className="w-3 h-3" />
-                                    <span>Просмотр</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      try {
-                                        await downloadProtectedFile(
-                                          `/api/v1/documents/${doc.id}/download`,
-                                          doc.originalFilename || `${doc.id}.bin`
-                                        );
-                                      } catch (err) {
-                                        notify(
-                                          'error',
-                                          err instanceof Error
-                                            ? err.message
-                                            : 'Ошибка скачивания файла'
-                                        );
-                                      }
-                                    }}
-                                    className="px-2 py-0.5 text-[11px] font-medium text-slate-700 border border-slate-300 rounded hover:bg-slate-100 inline-flex items-center gap-1"
-                                  >
-                                    <Download className="w-3 h-3" />
-                                    <span>Скачать</span>
-                                  </button>
-                                  {isOwner &&
-                                    (confirmDeleteContractDocId === doc.id ? (
-                                      <span className="inline-flex items-center gap-1 bg-red-50 border border-red-200 px-2 py-0.5 rounded">
+                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                    <FileText className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+                                    <span
+                                      className="font-medium text-slate-900 break-all sm:truncate"
+                                      title={doc.originalFilename}
+                                    >
+                                      {doc.originalFilename}
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => setPreviewingDocument(doc)}
+                                      className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-slate-100 rounded-md hover:bg-slate-200 inline-flex items-center gap-1"
+                                    >
+                                      <Eye className="w-3 h-3 shrink-0" />
+                                      <span>Просмотр</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          await downloadProtectedFile(
+                                            `/api/v1/documents/${doc.id}/download`,
+                                            doc.originalFilename || `${doc.id}.bin`
+                                          );
+                                          notify(
+                                            'success',
+                                            `Файл «${doc.originalFilename}» скачан на устройство.`
+                                          );
+                                        } catch (err) {
+                                          notify(
+                                            'error',
+                                            err instanceof Error
+                                              ? err.message
+                                              : 'Ошибка скачивания файла'
+                                          );
+                                        }
+                                      }}
+                                      className="px-2.5 py-1 text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md hover:bg-emerald-100 inline-flex items-center gap-1"
+                                    >
+                                      <Download className="w-3 h-3 shrink-0" />
+                                      <span>Скачать</span>
+                                    </button>
+                                    {isOwner &&
+                                      (confirmDeleteContractDocId === doc.id ? (
+                                        <span className="inline-flex items-center gap-1 bg-red-50 border border-red-200 px-2 py-0.5 rounded-md">
+                                          <button
+                                            type="button"
+                                            onClick={async () => {
+                                              try {
+                                                await apiFetch(`/api/v1/documents/${doc.id}`, {
+                                                  method: 'DELETE',
+                                                });
+                                                setConfirmDeleteContractDocId(null);
+                                                await loadFullState();
+                                                notify(
+                                                  'success',
+                                                  `Прикреплённое фото/файл «${doc.originalFilename}» удалено.`
+                                                );
+                                              } catch (err) {
+                                                notify(
+                                                  'error',
+                                                  err instanceof Error
+                                                    ? err.message
+                                                    : 'Ошибка удаления файла'
+                                                );
+                                              }
+                                            }}
+                                            className="text-[11px] font-semibold text-red-700 hover:underline"
+                                          >
+                                            Да, удалить
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => setConfirmDeleteContractDocId(null)}
+                                            className="text-[11px] text-slate-600 hover:text-slate-900 ml-1"
+                                          >
+                                            Отмена
+                                          </button>
+                                        </span>
+                                      ) : (
                                         <button
                                           type="button"
-                                          onClick={async () => {
-                                            try {
-                                              await apiFetch(`/api/v1/documents/${doc.id}`, {
-                                                method: 'DELETE',
-                                              });
-                                              setConfirmDeleteContractDocId(null);
-                                              await loadFullState();
-                                              notify(
-                                                'success',
-                                                `Прикреплённое фото/файл «${doc.originalFilename}» удалено.`
-                                              );
-                                            } catch (err) {
-                                              notify(
-                                                'error',
-                                                err instanceof Error
-                                                  ? err.message
-                                                  : 'Ошибка удаления файла'
-                                              );
-                                            }
-                                          }}
-                                          className="text-[11px] font-semibold text-red-700 hover:underline"
+                                          onClick={() => setConfirmDeleteContractDocId(doc.id)}
+                                          className="px-2.5 py-1 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded-md hover:bg-red-100 inline-flex items-center gap-1"
+                                          title="Удалить прикреплённое фото / файл"
                                         >
-                                          Да, удалить
+                                          <Trash2 className="w-3 h-3 shrink-0" />
+                                          <span>Удалить</span>
                                         </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => setConfirmDeleteContractDocId(null)}
-                                          className="text-[11px] text-slate-600 hover:text-slate-900 ml-1"
-                                        >
-                                          Отмена
-                                        </button>
-                                      </span>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        onClick={() => setConfirmDeleteContractDocId(doc.id)}
-                                        className="px-2 py-0.5 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded hover:bg-red-100 inline-flex items-center gap-1"
-                                        title="Удалить прикреплённое фото / файл"
-                                      >
-                                        <Trash2 className="w-3 h-3" />
-                                        <span>Удалить</span>
-                                      </button>
-                                    ))}
+                                      ))}
+                                  </div>
                                 </div>
                               ))}
                             </div>

@@ -5182,12 +5182,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           summary: `Скачан защищённый документ «${row.title}» (${row.original_filename}, SHA-256 проверен).`,
         });
 
-        const safeDownloadName = row.original_filename.replace(/["\\\r\n]/g, '_');
+        const safeDownloadName = (row.original_filename || 'document.bin').replace(/["\\\r\n]/g, '_');
+        const asciiFallbackName =
+          safeDownloadName.replace(/[^\x20-\x7E]/g, '_').replace(/%;/g, '_') || 'document.bin';
         res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
         res.setHeader('Content-Length', String(buffer.length));
         res.setHeader(
           'Content-Disposition',
-          `attachment; filename="${ encodeURIComponent(safeDownloadName) }"`
+          `attachment; filename="${asciiFallbackName}"; filename*=UTF-8''${encodeURIComponent(safeDownloadName)}`
         );
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('Cache-Control', 'private, no-store');
