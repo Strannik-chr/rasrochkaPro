@@ -209,6 +209,7 @@ export default function App() {
       | 'owner_withdrawal'
       | 'internal_transfer',
     category: 'Аренда и операционные расходы',
+    counterparty: '',
     amountRubles: '',
     description: '',
     eventDate: new Date().toISOString().slice(0, 10),
@@ -662,6 +663,188 @@ export default function App() {
       p.notes.toLowerCase().includes(q)
   );
 
+  // Resolve full counterparty ("От кого / Кому") and item/contract ("Что / За что") details for any ledger entry
+  const resolveLedgerEntryInfo = useCallback(
+    (l: LedgerEntryDTO) => {
+      // Extract explicit "От кого: ... — ..." or "Кому: ... — ..." if present in description
+      const prefixMatch = l.description.match(/^(?:От кого|Кому|Контрагент):\s*([^—|]+?)\s*[—|]\s*(.+)$/i);
+      const extractedCounterparty = prefixMatch ? prefixMatch[1].trim() : null;
+      const cleanedDescription = prefixMatch ? prefixMatch[2].trim() : l.description;
+
+      if (l.entryType === 'client_payment' || l.referenceType === 'payment') {
+        const payment = payments.find((p) => p.id === l.referenceId);
+        const contractFromPayment = payment?.contractId
+          ? contracts.find((c) => c.id === payment.contractId)
+          : payment?.allocations?.[0]?.contractId
+          ? contracts.find((c) => c.id === payment.allocations[0].contractId)
+          : undefined;
+        const dpContractId = l.referenceId.startsWith('pay_dp_')
+          ? l.referenceId.replace(/^pay_dp_/, '')
+          : l.id.startsWith('led_dp_')
+          ? l.id.replace(/^led_dp_/, '')
+          : null;
+        const contractFromDp = dpContractId ? contracts.find((c) => c.id === dpContractId) : undefined;
+        const contractNumberInDesc = l.description.match(/ДГ-\d{4}-\d+/i)?.[0] || null;
+        const contractFromNumber = contractNumberInDesc
+          ? contracts.find((c) => c.contractNumber.toUpperCase() === contractNumberInDesc.toUpperCase())
+          : undefined;
+
+        const contract = contractFromPayment || contractFromDp || contractFromNumber;
+        const resolvedClientId = contract?.clientId || payment?.clientId || null;
+        const clientObj = resolvedClientId ? clients.find((cl) => cl.id === resolvedClientId) : undefined;
+
+        const clientName =
+          contract?.clientName ||
+          payment?.clientName ||
+          clientObj?.fullName ||
+          extractedCounterparty ||
+          'Клиент по договору';
+        const clientPhone = contract?.clientPhone || clientObj?.phone || null;
+        const contractNumber =
+          contract?.contractNumber || payment?.contractNumber || contractNumberInDesc || null;
+        const parenItem = l.description.match(/\(([^)]+)\)\s*$/)?.[1]?.trim() || null;
+        const itemTitle = contract?.itemTitle || parenItem || null;
+
+        let paymentKindLabel = 'Платёж по рассрочке';
+        if (
+          payment?.isDownPayment ||
+          l.category.toLowerCase().includes('первоначальный') ||
+          l.description.toLowerCase().includes('первоначальный')
+        ) {
+          paymentKindLabel = 'Первоначальный взнос';
+        } else if (
+          l.category.toLowerCase().includes('досрочн') ||
+          l.description.toLowerCase().includes('досрочн')
+        ) {
+          paymentKindLabel = 'Досрочное погашение';
+        } else if (payment?.allocations && payment.allocations.length > 0) {
+          paymentKindLabel = `Оплата по графику (${payment.allocations
+            .map((a) => `пл. №${a.installmentNumber}`)
+            .join(', ')})`;
+        }
+
+        return {
+          roleBadge: 'От клиента',
+          roleBadgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+          counterpartyName: clientName,
+          counterpartyPhone: clientPhone,
+          clientId: resolvedClientId,
+          itemTitle,
+          contractNumber,
+          paymentKindLabel,
+          displayDescription: cleanedDescription,
+        };
+      }
+
+      if (l.entryType === 'client_refund' || l.referenceType === 'contract') {
+        const contractNumberInDesc = l.description.match(/ДГ-\d{4}-\d+/i)?.[0] || null;
+        const contract = contracts.find(
+          (c) =>
+            c.id === l.referenceId ||
+            (contractNumberInDesc && c.contractNumber.toUpperCase() === contractNumberInDesc.toUpperCase())
+        );
+        const resolvedClientId = contract?.clientId || null;
+        const clientObj = resolvedClientId ? clients.find((cl) => cl.id === resolvedClientId) : undefined;
+
+        return {
+          roleBadge: 'Возврат клиенту',
+          roleBadgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
+          counterpartyName: contract?.clientName || clientObj?.fullName || extractedCounterparty || 'Клиент',
+          counterpartyPhone: contract?.clientPhone || clientObj?.phone || null,
+          clientId: resolvedClientId,
+          itemTitle: contract?.itemTitle || null,
+          contractNumber: contract?.contractNumber || contractNumberInDesc || null,
+          paymentKindLabel: 'Возврат средств при расторжении',
+          displayDescription: cleanedDescription,
+        };
+      }
+
+      if (
+        l.entryType === 'purchase_payment' ||
+        l.entryType === 'delivery_expense' ||
+        l.referenceType === 'purchase'
+      ) {
+        const purchase = purchases.find((p) => p.id === l.referenceId);
+        const supplier = purchase ? suppliers.find((s) => s.id === purchase.supplierId) : undefined;
+        const quotedItem = l.description.match(/«([^»]+)»/)?.[1]?.trim() || null;
+
+        return {
+          roleBadge: l.entryType === 'delivery_expense' ? 'Доставка закупки' : 'Магазин / Поставщик',
+          roleBadgeClass: 'bg-sky-50 text-sky-800 border-sky-200',
+          counterpartyName:
+            purchase?.supplierName || supplier?.name || extractedCounterparty || 'Магазин / Поставщик',
+          counterpartyPhone: supplier?.contactInfo || null,
+          clientId: purchase?.clientId || null,
+          itemTitle: purchase?.itemName || quotedItem || null,
+          contractNumber: purchase?.contractNumber || null,
+          paymentKindLabel: purchase?.clientName
+            ? `Закупка под клиента: ${purchase.clientName}`
+            : l.entryType === 'delivery_expense'
+            ? 'Доставка и сопутствующие затраты'
+            : 'Оплата закупки товара',
+          displayDescription: cleanedDescription,
+        };
+      }
+
+      if (l.entryType === 'owner_injection' || l.entryType === 'owner_withdrawal') {
+        const creatorUser = users.find(
+          (u) => u.email === l.createdByEmail || u.phone === l.createdByEmail
+        );
+        const ownerName =
+          extractedCounterparty ||
+          creatorUser?.fullName ||
+          (currentUser?.role === 'owner' ? currentUser.fullName : null) ||
+          'Владелец бизнеса';
+
+        return {
+          roleBadge: l.entryType === 'owner_injection' ? 'От владельца (внесение)' : 'Владельцу (изъятие)',
+          roleBadgeClass: 'bg-indigo-50 text-indigo-800 border-indigo-200',
+          counterpartyName: ownerName,
+          counterpartyPhone: creatorUser?.phone || (currentUser?.role === 'owner' ? currentUser.phone : null),
+          clientId: null,
+          itemTitle: null,
+          contractNumber: null,
+          paymentKindLabel:
+            l.entryType === 'owner_injection'
+              ? 'Пополнение оборотных средств (не выручка)'
+              : 'Личное изъятие средств владельцем',
+          displayDescription: cleanedDescription,
+        };
+      }
+
+      if (l.entryType === 'internal_transfer_in' || l.entryType === 'internal_transfer_out') {
+        const relAcc = accounts.find((a) => a.id === l.relatedAccountId);
+        return {
+          roleBadge: l.direction === 'in' ? 'Со счёта' : 'На счёт',
+          roleBadgeClass: 'bg-slate-100 text-slate-700 border-slate-300',
+          counterpartyName: relAcc?.name || 'Внутренний счёт / касса',
+          counterpartyPhone: null,
+          clientId: null,
+          itemTitle: null,
+          contractNumber: null,
+          paymentKindLabel:
+            l.direction === 'in'
+              ? `Зачисление на «${l.accountName}»`
+              : `Списание с «${l.accountName}»`,
+          displayDescription: cleanedDescription,
+        };
+      }
+
+      return {
+        roleBadge: l.direction === 'in' ? 'От кого' : 'Получатель расхода',
+        roleBadgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
+        counterpartyName: extractedCounterparty || l.category || 'Операционный контрагент',
+        counterpartyPhone: null,
+        clientId: null,
+        itemTitle: null,
+        contractNumber: null,
+        paymentKindLabel: l.category || translateEntryType(l.entryType),
+        displayDescription: cleanedDescription,
+      };
+    },
+    [payments, contracts, clients, purchases, suppliers, users, currentUser, accounts]
+  );
+
   // Handlers
   const handleCreateClient = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -748,6 +931,17 @@ export default function App() {
     e.preventDefault();
     try {
       const amountKop = parseRublesInputToKopecks(ledgerForm.amountRubles);
+      const cp = ledgerForm.counterparty.trim();
+      const rawDesc = ledgerForm.description.trim();
+      const cpPrefix =
+        ledgerForm.entryType === 'owner_injection' ? `От кого: ${cp}` : `Кому: ${cp}`;
+      const composedDescription =
+        cp &&
+        ledgerForm.entryType !== 'internal_transfer' &&
+        !rawDesc.toLowerCase().includes(cp.toLowerCase())
+          ? `${cpPrefix} — ${rawDesc}`
+          : rawDesc;
+
       await apiFetch('/api/v1/finance/ledger', {
         method: 'POST',
         body: JSON.stringify({
@@ -756,11 +950,11 @@ export default function App() {
           entryType: ledgerForm.entryType,
           category: ledgerForm.category,
           amountKopecks: amountKop,
-          description: ledgerForm.description,
+          description: composedDescription,
           eventDate: ledgerForm.eventDate,
         }),
       });
-      setLedgerForm((prev) => ({ ...prev, amountRubles: '', description: '' }));
+      setLedgerForm((prev) => ({ ...prev, counterparty: '', amountRubles: '', description: '' }));
       await loadFullState();
       notify('success', 'Финансовая операция успешно проведена и проверена.');
     } catch (err) {
@@ -3316,9 +3510,19 @@ export default function App() {
                       onSubmit={handleRecordLedgerOperation}
                       className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
                     >
-                      <h2 className="text-sm font-semibold text-slate-900">
-                        Провести операцию по кассе или банковскому счёту
-                      </h2>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h2 className="text-sm font-semibold text-slate-900">
+                          Провести операцию по кассе или банковскому счёту
+                        </h2>
+                        <button
+                          type="button"
+                          onClick={() => setShowNewPaymentModal(true)}
+                          className="text-xs font-medium text-emerald-700 hover:text-emerald-800 underline inline-flex items-center gap-1"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Принять платёж от клиента по рассрочке</span>
+                        </button>
+                      </div>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div>
                           <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -3326,9 +3530,19 @@ export default function App() {
                           </label>
                           <select
                             value={ledgerForm.entryType}
-                            onChange={(e) =>
-                              setLedgerForm((p) => ({ ...p, entryType: e.target.value as any }))
-                            }
+                            onChange={(e) => {
+                              const nextType = e.target.value as any;
+                              setLedgerForm((p) => ({
+                                ...p,
+                                entryType: nextType,
+                                category:
+                                  nextType === 'owner_injection'
+                                    ? 'Пополнение оборотных средств владельцем'
+                                    : nextType === 'owner_withdrawal'
+                                    ? 'Личное изъятие владельца'
+                                    : 'Аренда и операционные расходы',
+                              }));
+                            }}
                             className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
                           >
                             <option value="operating_expense">Операционный расход бизнеса</option>
@@ -3420,9 +3634,38 @@ export default function App() {
                           />
                         </div>
 
-                        <div className="sm:col-span-2">
+                        {ledgerForm.entryType !== 'internal_transfer' && (
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 mb-1">
+                              {ledgerForm.entryType === 'owner_injection'
+                                ? 'От кого поступили средства'
+                                : 'Кому / Получатель'}
+                            </label>
+                            <input
+                              type="text"
+                              value={ledgerForm.counterparty}
+                              onChange={(e) =>
+                                setLedgerForm((p) => ({ ...p, counterparty: e.target.value }))
+                              }
+                              placeholder={
+                                ledgerForm.entryType === 'owner_injection'
+                                  ? `Напр.: ${currentUser?.fullName || 'Владелец бизнеса'}`
+                                  : 'Напр.: Арендодатель / Курьер / Сервис'
+                              }
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            />
+                          </div>
+                        )}
+
+                        <div
+                          className={
+                            ledgerForm.entryType === 'internal_transfer'
+                              ? 'sm:col-span-2'
+                              : 'sm:col-span-1'
+                          }
+                        >
                           <label className="block text-xs font-medium text-slate-700 mb-1">
-                            Описание / основание операции *
+                            Что / описание и основание операции *
                           </label>
                           <input
                             type="text"
@@ -3430,7 +3673,7 @@ export default function App() {
                             onChange={(e) =>
                               setLedgerForm((p) => ({ ...p, description: e.target.value }))
                             }
-                            placeholder="Подробное назначение операции"
+                            placeholder="За что именно (назначение операции)"
                             className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                             required
                           />
@@ -3457,51 +3700,101 @@ export default function App() {
                             l.entryType === 'operating_expense' ||
                             l.entryType === 'delivery_expense'
                         )
-                        .map((l) => (
-                          <div
-                            key={l.id}
-                            className={`p-4 space-y-1.5 text-xs ${
-                              l.status === 'reversed' ? 'opacity-50 line-through bg-slate-50' : ''
-                            }`}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="font-semibold text-slate-900 break-words">
-                                {translateEntryType(l.entryType)}
+                        .map((l) => {
+                          const info = resolveLedgerEntryInfo(l);
+                          return (
+                            <div
+                              key={l.id}
+                              className={`p-4 space-y-2.5 text-xs ${
+                                l.status === 'reversed' ? 'opacity-50 line-through bg-slate-50' : ''
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <div className="font-semibold text-slate-900 break-words">
+                                    {translateEntryType(l.entryType)}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 mt-0.5">
+                                    {info.paymentKindLabel}
+                                  </div>
+                                </div>
+                                <div
+                                  className={`font-mono text-sm font-bold whitespace-nowrap shrink-0 ${
+                                    l.direction === 'in' ? 'text-emerald-700' : 'text-slate-900'
+                                  }`}
+                                >
+                                  {l.direction === 'in' ? '+' : '−'}
+                                  {formatMoney(l.amountKopecks)}
+                                </div>
                               </div>
-                              <div
-                                className={`font-mono font-bold shrink-0 ${
-                                  l.direction === 'in' ? 'text-emerald-700' : 'text-slate-900'
-                                }`}
-                              >
-                                {l.direction === 'in' ? '+' : '−'}
-                                {formatMoney(l.amountKopecks)}
+
+                              <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-lg space-y-1.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span
+                                    className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${info.roleBadgeClass}`}
+                                  >
+                                    {info.roleBadge}:
+                                  </span>
+                                  {info.clientId ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setViewingClientCardId(info.clientId!)}
+                                      className="font-bold text-slate-900 hover:underline text-left break-words"
+                                    >
+                                      {info.counterpartyName}
+                                    </button>
+                                  ) : (
+                                    <span className="font-semibold text-slate-900 break-words">
+                                      {info.counterpartyName}
+                                    </span>
+                                  )}
+                                  {info.counterpartyPhone && (
+                                    <span className="font-mono text-[11px] text-slate-500">
+                                      ({info.counterpartyPhone})
+                                    </span>
+                                  )}
+                                </div>
+
+                                {(info.itemTitle || info.contractNumber) && (
+                                  <div className="text-slate-800 flex flex-wrap items-center gap-1.5 pt-0.5">
+                                    {info.itemTitle && (
+                                      <span className="font-medium">
+                                        Товар: <strong className="text-slate-900">{info.itemTitle}</strong>
+                                      </span>
+                                    )}
+                                    {info.contractNumber && (
+                                      <span className="px-1.5 py-0.5 bg-white border border-slate-200 rounded font-mono text-[11px] text-slate-700">
+                                        {info.contractNumber}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+
+                                <div className="text-slate-600 break-words text-[11px]">
+                                  {info.displayDescription}
+                                </div>
+                              </div>
+
+                              <div className="text-slate-500 flex flex-wrap items-center gap-2 text-[11px]">
+                                <span className="font-mono">{formatDateRu(l.eventDate)}</span>
+                                <span>·</span>
+                                <span>{l.accountName}</span>
                               </div>
                             </div>
-                            <div className="text-slate-500 flex flex-wrap items-center gap-2">
-                              <span className="font-mono">{formatDateRu(l.eventDate)}</span>
-                              <span>·</span>
-                              <span>{l.accountName}</span>
-                              {l.category && (
-                                <>
-                                  <span>·</span>
-                                  <span>{l.category}</span>
-                                </>
-                              )}
-                            </div>
-                            <div className="text-slate-700 break-words pt-0.5">{l.description}</div>
-                          </div>
-                        ))}
+                          );
+                        })}
                     </div>
 
                     {/* Desktop Table */}
                     <div className="hidden md:block overflow-x-auto">
-                      <table className="w-full min-w-[680px] text-left border-collapse text-xs">
+                      <table className="w-full min-w-[860px] text-left border-collapse text-xs">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
                             <th className="py-3 px-4 font-medium whitespace-nowrap">Дата</th>
                             <th className="py-3 px-4 font-medium">Счёт / Касса</th>
-                            <th className="py-3 px-4 font-medium">Вид операции и категория</th>
-                            <th className="py-3 px-4 font-medium">Основание</th>
+                            <th className="py-3 px-4 font-medium">Вид операции</th>
+                            <th className="py-3 px-4 font-medium">От кого / Кому (Контрагент)</th>
+                            <th className="py-3 px-4 font-medium">Что / Товар, договор и основание</th>
                             <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Сумма</th>
                           </tr>
                         </thead>
@@ -3513,30 +3806,87 @@ export default function App() {
                                 l.entryType === 'operating_expense' ||
                                 l.entryType === 'delivery_expense'
                             )
-                            .map((l) => (
-                              <tr
-                                key={l.id}
-                                className={l.status === 'reversed' ? 'opacity-50 line-through' : ''}
-                              >
-                                <td className="py-3 px-4 font-mono whitespace-nowrap">{formatDateRu(l.eventDate)}</td>
-                                <td className="py-3 px-4">{l.accountName}</td>
-                                <td className="py-3 px-4">
-                                  <div className="font-medium text-slate-900">
-                                    {translateEntryType(l.entryType)}
-                                  </div>
-                                  <div className="text-slate-500">{l.category}</div>
-                                </td>
-                                <td className="py-3 px-4 text-slate-700 break-words">{l.description}</td>
-                                <td
-                                  className={`py-3 px-4 font-mono text-right font-semibold whitespace-nowrap ${
-                                    l.direction === 'in' ? 'text-emerald-700' : 'text-slate-900'
+                            .map((l) => {
+                              const info = resolveLedgerEntryInfo(l);
+                              return (
+                                <tr
+                                  key={l.id}
+                                  className={`hover:bg-slate-50/80 ${
+                                    l.status === 'reversed' ? 'opacity-50 line-through' : ''
                                   }`}
                                 >
-                                  {l.direction === 'in' ? '+' : '−'}
-                                  {formatMoney(l.amountKopecks)}
-                                </td>
-                              </tr>
-                            ))}
+                                  <td className="py-3 px-4 font-mono whitespace-nowrap align-top">
+                                    {formatDateRu(l.eventDate)}
+                                  </td>
+                                  <td className="py-3 px-4 align-top text-slate-700">
+                                    {l.accountName}
+                                  </td>
+                                  <td className="py-3 px-4 align-top">
+                                    <div className="font-semibold text-slate-900">
+                                      {translateEntryType(l.entryType)}
+                                    </div>
+                                    <div className="text-slate-500 mt-0.5">
+                                      {info.paymentKindLabel || l.category}
+                                    </div>
+                                  </td>
+                                  <td className="py-3 px-4 align-top">
+                                    <div className="flex flex-col items-start gap-1">
+                                      <span
+                                        className={`inline-flex px-2 py-0.5 text-[10px] font-semibold rounded border ${info.roleBadgeClass}`}
+                                      >
+                                        {info.roleBadge}
+                                      </span>
+                                      {info.clientId ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => setViewingClientCardId(info.clientId!)}
+                                          className="font-bold text-slate-900 hover:text-emerald-700 hover:underline text-left break-words"
+                                          title="Открыть карточку клиента"
+                                        >
+                                          {info.counterpartyName}
+                                        </button>
+                                      ) : (
+                                        <div className="font-semibold text-slate-900 break-words">
+                                          {info.counterpartyName}
+                                        </div>
+                                      )}
+                                      {info.counterpartyPhone && (
+                                        <div className="font-mono text-[11px] text-slate-500">
+                                          {info.counterpartyPhone}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="py-3 px-4 align-top">
+                                    {(info.itemTitle || info.contractNumber) && (
+                                      <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                                        {info.itemTitle && (
+                                          <span className="font-semibold text-slate-900">
+                                            Товар: «{info.itemTitle}»
+                                          </span>
+                                        )}
+                                        {info.contractNumber && (
+                                          <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded font-mono text-[11px] font-medium text-slate-700 whitespace-nowrap">
+                                            {info.contractNumber}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+                                    <div className="text-slate-600 break-words">
+                                      {info.displayDescription}
+                                    </div>
+                                  </td>
+                                  <td
+                                    className={`py-3 px-4 font-mono text-right font-semibold whitespace-nowrap align-top ${
+                                      l.direction === 'in' ? 'text-emerald-700' : 'text-slate-900'
+                                    }`}
+                                  >
+                                    {l.direction === 'in' ? '+' : '−'}
+                                    {formatMoney(l.amountKopecks)}
+                                  </td>
+                                </tr>
+                              );
+                            })}
                         </tbody>
                       </table>
                     </div>
