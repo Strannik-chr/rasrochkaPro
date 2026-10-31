@@ -7,7 +7,7 @@ WORKDIR /app
 
 # 1. Установка зависимостей
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm install
 
 # 2. Копирование исходного кода и сборка фронтенда
 COPY . .
