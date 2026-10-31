@@ -870,7 +870,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
             <div className="space-y-2">
               {client.guarantorContracts.map((gc) => (
                 <div
-                  key={gc.guarantorRecordId}
+                  key={gc.id}
                   className="p-3.5 border border-indigo-200 bg-indigo-50/40 rounded-xl flex flex-wrap items-center justify-between gap-3"
                 >
                   <div className="space-y-1">

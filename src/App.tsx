@@ -115,6 +115,7 @@ export default function App() {
     role: UserRole;
     status: string;
     mustChangePassword?: boolean;
+    passwordChangedAt?: string | null;
     mfaEnabled: boolean;
   } | null>(null);
   const [csrfToken, setCsrfToken] = useState<string>('');
@@ -254,7 +255,7 @@ export default function App() {
     password: '',
     fullName: '',
     role: 'staff' as UserRole,
-    mustChangePassword: true,
+    mustChangePassword: false,
   });
   const [editingUser, setEditingUser] = useState<{
     id: string;
@@ -269,6 +270,8 @@ export default function App() {
     mustChangePassword: boolean;
   } | null>(null);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [passwordChangeDismissed, setPasswordChangeDismissed] = useState(false);
+  const [passwordChangeLoading, setPasswordChangeLoading] = useState(false);
   const [selfPasswordForm, setSelfPasswordForm] = useState({
     currentPassword: '',
     newPassword: '',
@@ -3426,7 +3429,7 @@ export default function App() {
                           password: '',
                           fullName: '',
                           role: 'staff',
-                          mustChangePassword: true,
+                          mustChangePassword: false,
                         });
                         await loadFullState();
                         notify('success', 'Пользователь успешно создан.');
@@ -3506,7 +3509,7 @@ export default function App() {
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                      <label className="inline-flex items-center gap-2 text-xs text-slate-700">
+                      <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
                         <input
                           type="checkbox"
                           checked={adminNewUserForm.mustChangePassword}
@@ -3518,7 +3521,7 @@ export default function App() {
                           }
                           className="rounded border-slate-300"
                         />
-                        <span>Потребовать смену первоначального пароля при первом входе</span>
+                        <span>Запросить смену пароля при первом входе (необязательно, по умолчанию выключено)</span>
                       </label>
                       <button
                         type="submit"
@@ -3678,7 +3681,7 @@ export default function App() {
                           />
                         </div>
                         <div className="flex items-center justify-between gap-3">
-                          <label className="inline-flex items-center gap-2 text-xs text-slate-700">
+                          <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
                             <input
                               type="checkbox"
                               checked={resetPasswordModal.mustChangePassword}
@@ -3688,7 +3691,7 @@ export default function App() {
                                 )
                               }
                             />
-                            <span>Сменить при следующем входе</span>
+                            <span>Запросить смену при входе (необязательно)</span>
                           </label>
                           <button
                             type="submit"
@@ -3708,6 +3711,7 @@ export default function App() {
                         <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
                           <th className="py-3 px-4 font-medium">Номер телефона и описание</th>
                           <th className="py-3 px-4 font-medium">Статус аккаунта</th>
+                          <th className="py-3 px-4 font-medium">Статус пароля</th>
                           <th className="py-3 px-4 font-medium">Роль</th>
                           <th className="py-3 px-4 font-medium">Дата создания</th>
                           <th className="py-3 px-4 font-medium text-right">Действия администратора</th>
@@ -3722,14 +3726,36 @@ export default function App() {
                             </td>
                             <td className="py-3 px-4">
                               {u.status === 'active' ? (
-                                <span className="text-emerald-700 font-medium">Активен</span>
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                  Активен
+                                </span>
                               ) : (
-                                <span className="text-red-600 font-semibold">Заблокирован</span>
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium text-red-700 bg-red-50 border border-red-200">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                                  Заблокирован
+                                </span>
                               )}
-                              {u.mustChangePassword && (
-                                <div className="text-[11px] text-amber-700">
-                                  Требуется смена первоначального пароля
+                            </td>
+                            <td className="py-3 px-4">
+                              {u.passwordChangedAt ? (
+                                <div className="space-y-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                    Изменён
+                                  </span>
+                                  <div className="text-[10px] font-mono text-slate-500">
+                                    {formatDateTimeRu(u.passwordChangedAt)}
+                                  </div>
                                 </div>
+                              ) : u.mustChangePassword ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
+                                  ⏳ Временный (запрошена смена)
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
+                                  🔑 Первоначальный (активен)
+                                </span>
                               )}
                             </td>
                             <td className="py-3 px-4 font-mono">{u.role}</td>
@@ -3759,7 +3785,7 @@ export default function App() {
                                       id: u.id,
                                       phone: u.phone,
                                       newPassword: '',
-                                      mustChangePassword: true,
+                                      mustChangePassword: false,
                                     })
                                   }
                                   className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
@@ -4618,48 +4644,76 @@ export default function App() {
         />
       )}
 
-      {(showChangePasswordModal || currentUser?.mustChangePassword) && (
+      {(showChangePasswordModal || (Boolean(currentUser?.mustChangePassword) && !passwordChangeDismissed)) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
           <form
             onSubmit={async (e) => {
               e.preventDefault();
+              if (passwordChangeLoading) return;
+              setPasswordChangeLoading(true);
               try {
-                await apiFetch('/api/v1/auth/change-password', {
+                const res = await apiFetch('/api/v1/auth/change-password', {
                   method: 'POST',
                   body: JSON.stringify(selfPasswordForm),
                 });
                 setSelfPasswordForm({ currentPassword: '', newPassword: '' });
+                setPasswordChangeDismissed(true);
                 setShowChangePasswordModal(false);
-                setCurrentUser((prev) => (prev ? { ...prev, mustChangePassword: false } : null));
+                setCurrentUser((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        mustChangePassword: false,
+                        passwordChangedAt: res.passwordChangedAt || new Date().toISOString(),
+                      }
+                    : null
+                );
                 await loadFullState();
                 notify('success', 'Пароль успешно изменён.');
               } catch (err) {
                 notify('error', err instanceof Error ? err.message : 'Ошибка смены пароля');
+              } finally {
+                setPasswordChangeLoading(false);
               }
             }}
-            className="bg-white border border-slate-200 rounded-xl w-full max-w-sm p-6 space-y-4"
+            className="bg-white border border-slate-200 rounded-xl w-full max-w-sm p-6 space-y-4 shadow-xl"
           >
             <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-              <h2 className="text-sm font-bold text-slate-900">
-                {currentUser?.mustChangePassword
-                  ? 'Смена первоначального пароля'
-                  : 'Смена пароля учётной записи'}
-              </h2>
-              {!currentUser?.mustChangePassword && (
-                <button
-                  type="button"
-                  onClick={() => setShowChangePasswordModal(false)}
-                  className="text-slate-400 hover:text-slate-900"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">
+                  {currentUser?.mustChangePassword
+                    ? 'Смена пароля (по желанию)'
+                    : 'Смена пароля учётной записи'}
+                </h2>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {currentUser?.mustChangePassword
+                    ? 'Вы можете сменить пароль сейчас или оставить текущий и продолжить работу.'
+                    : 'Задайте новый надёжный пароль.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (currentUser?.mustChangePassword) {
+                    try {
+                      await apiFetch('/api/v1/auth/skip-password-change', { method: 'POST' });
+                    } catch {
+                      // ignore
+                    }
+                    setCurrentUser((prev) => (prev ? { ...prev, mustChangePassword: false } : null));
+                    await loadFullState();
+                  }
+                  setPasswordChangeDismissed(true);
+                  setShowChangePasswordModal(false);
+                  setSelfPasswordForm({ currentPassword: '', newPassword: '' });
+                }}
+                className="p-1 text-slate-400 hover:text-slate-900 rounded-lg hover:bg-slate-100"
+                aria-label="Закрыть"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            {currentUser?.mustChangePassword && (
-              <p className="text-xs text-slate-600">
-                Администратор установил для вашего аккаунта временный пароль. Пожалуйста, задайте собственный постоянный пароль.
-              </p>
-            )}
+
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
                 Текущий пароль
@@ -4670,7 +4724,8 @@ export default function App() {
                 onChange={(e) =>
                   setSelfPasswordForm((p) => ({ ...p, currentPassword: e.target.value }))
                 }
-                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                placeholder="Введите текущий пароль"
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
                 required
               />
             </div>
@@ -4684,16 +4739,43 @@ export default function App() {
                 onChange={(e) =>
                   setSelfPasswordForm((p) => ({ ...p, newPassword: e.target.value }))
                 }
-                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                placeholder="Введите новый пароль"
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
                 required
               />
             </div>
-            <button
-              type="submit"
-              className="w-full py-2.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
-            >
-              Сохранить новый пароль
-            </button>
+
+            <div className="flex flex-col sm:flex-row items-center gap-2 pt-1">
+              <button
+                type="submit"
+                disabled={passwordChangeLoading}
+                className="w-full sm:flex-1 py-2.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50"
+              >
+                {passwordChangeLoading ? 'Сохранение...' : 'Сохранить пароль'}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (currentUser?.mustChangePassword) {
+                    try {
+                      await apiFetch('/api/v1/auth/skip-password-change', { method: 'POST' });
+                    } catch {
+                      // ignore
+                    }
+                    setCurrentUser((prev) => (prev ? { ...prev, mustChangePassword: false } : null));
+                    await loadFullState();
+                    notify('success', 'Текущий пароль сохранён. Вы можете сменить его в любое время.');
+                  }
+                  setPasswordChangeDismissed(true);
+                  setShowChangePasswordModal(false);
+                  setSelfPasswordForm({ currentPassword: '', newPassword: '' });
+                }}
+                disabled={passwordChangeLoading}
+                className="w-full sm:w-auto px-3.5 py-2.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 hover:text-slate-900"
+              >
+                {currentUser?.mustChangePassword ? 'Оставить текущий' : 'Отмена'}
+              </button>
+            </div>
           </form>
         </div>
       )}

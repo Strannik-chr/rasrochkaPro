@@ -94,6 +94,7 @@ export interface AuthenticatedRequest extends Request {
     role: UserRole;
     status: string;
     mustChangePassword: boolean;
+    passwordChangedAt?: string | null;
     mfaEnabled: boolean;
   };
   sessionTokenHash?: string;
@@ -317,7 +318,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           `
           SELECT
             s.token_hash, s.csrf_token, s.last_active_at, s.expires_at, s.revoked_at,
-            u.id as user_id, u.email, u.phone, u.full_name, u.role, u.status, u.must_change_password, u.mfa_enabled
+            u.id as user_id, u.email, u.phone, u.full_name, u.role, u.status, u.must_change_password, u.password_changed_at, u.mfa_enabled
           FROM sessions s
           JOIN users u ON u.id = s.user_id
           WHERE s.token_hash = ?
@@ -337,6 +338,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             role: UserRole;
             status: string;
             must_change_password: number;
+            password_changed_at: string | null;
             mfa_enabled: number;
           }
         | undefined;
@@ -361,6 +363,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             role: sessionRow.role,
             status: sessionRow.status,
             mustChangePassword: Boolean(sessionRow.must_change_password),
+            passwordChangedAt: sessionRow.password_changed_at ? String(sessionRow.password_changed_at) : null,
             mfaEnabled: Boolean(sessionRow.mfa_enabled),
           };
           req.sessionTokenHash = sessionRow.token_hash;
@@ -540,6 +543,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           role: UserRole;
           status: string;
           must_change_password: number;
+          password_changed_at: string | null;
           mfa_enabled: number;
           mfa_secret: string | null;
           failed_login_attempts: number;
@@ -702,12 +706,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         role: userRow.role,
         status: userRow.status,
         mustChangePassword: Boolean(userRow.must_change_password),
+        passwordChangedAt: userRow.password_changed_at ? String(userRow.password_changed_at) : null,
         mfaEnabled: Boolean(userRow.mfa_enabled),
       },
     });
   });
 
-  // Self password change (including mandatory password change on first login)
+  // Self password change
   router.post('/auth/change-password', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     const { currentPassword, newPassword } = req.body as {
       currentPassword?: unknown;
@@ -771,6 +776,22 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       });
     });
 
+    res.json({ ok: true, mustChangePassword: false, passwordChangedAt: nowIso });
+  });
+
+  // Allow user to dismiss or keep current password without forced change
+  router.post('/auth/skip-password-change', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    withTransaction(db, () => {
+      db.prepare('UPDATE users SET must_change_password = 0 WHERE id = ?').run(req.user!.id);
+      recordAudit(db, {
+        actorUserId: req.user!.id,
+        actorEmail: req.user!.phone,
+        action: 'USER_PASSWORD_CHANGE_SKIPPED',
+        entityType: 'user',
+        entityId: req.user!.id,
+        summary: `Пользователь ${req.user!.phone} подтвердил сохранение текущего пароля (обязательная смена снята).`,
+      });
+    });
     res.json({ ok: true, mustChangePassword: false });
   });
 
@@ -5358,7 +5379,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const assignedStatus: UserStatus =
         typeof status === 'string' && status === 'blocked' ? 'blocked' : 'active';
 
-      const requireChange = mustChangePassword === undefined ? 1 : mustChangePassword ? 1 : 0;
+      const requireChange = Boolean(mustChangePassword) ? 1 : 0;
 
       const existing = db
         .prepare('SELECT id FROM users WHERE phone = ?')
@@ -5560,7 +5581,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       }
 
       const nowIso = new Date().toISOString();
-      const requireChange = mustChangePassword === undefined ? 1 : mustChangePassword ? 1 : 0;
+      const requireChange = Boolean(mustChangePassword) ? 1 : 0;
+      const nextChangedAt = requireChange ? null : nowIso;
 
       withTransaction(db, () => {
         db.prepare(
@@ -5568,7 +5590,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
            SET password_hash = ?, must_change_password = ?, password_changed_at = ?,
                failed_login_attempts = 0, locked_until = NULL
            WHERE id = ?`
-        ).run(hashPassword(newPassword), requireChange, nowIso, targetId);
+        ).run(hashPassword(newPassword), requireChange, nextChangedAt, targetId);
 
         resetRateLimitBucket(db, `acct:${targetUser.phone}`);
 
