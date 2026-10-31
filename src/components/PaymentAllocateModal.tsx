@@ -392,7 +392,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
               )}
 
               <div className="border border-slate-200 rounded-xl overflow-x-auto">
-                <table className="w-full min-w-[560px] text-left border-collapse text-xs">
+                <table className="w-full min-w-max text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
                       <th className="py-2.5 px-3 font-medium whitespace-nowrap">Платёж графика</th>
@@ -402,7 +402,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                       <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Статус после оплаты</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-slate-100 tabular-nums">
                     {unpaidItems.map((item) => {
                       const allocKop = parseRublesInputToKopecks(allocMap[item.id] || '0');
                       const isFull = allocKop >= item.remainingKopecks;
@@ -916,7 +916,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
 
               {amountKopecks > 0 && (
                 <div className="overflow-x-auto bg-white border border-slate-200 rounded-lg">
-                  <table className="w-full min-w-[540px] text-left text-xs">
+                  <table className="w-full min-w-max text-left border-collapse text-xs">
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
                         <th className="py-2 px-3 whitespace-nowrap">№</th>
@@ -926,7 +926,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                         <th className="py-2 px-3 text-right whitespace-nowrap">Результат</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
+                    <tbody className="divide-y divide-slate-100 tabular-nums">
                       {unpaidItems.map((item) => {
                         const allocKop = parseRublesInputToKopecks(allocMap[item.id] || '0');
                         const isFull = allocKop >= item.remainingKopecks;

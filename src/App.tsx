@@ -1363,16 +1363,16 @@ export default function App() {
 
                     {/* Desktop Table View */}
                     <div className="hidden md:block overflow-x-auto">
-                      <table className="w-full text-left border-collapse text-xs">
+                      <table className="w-full min-w-max text-left border-collapse text-xs">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                            <th className="py-3 px-4 font-medium">Договор и дата</th>
+                            <th className="py-3 px-4 font-medium whitespace-nowrap">Договор и дата</th>
                             <th className="py-3 px-4 font-medium">Заёмщик и товар</th>
-                            <th className="py-3 px-4 font-medium text-right">Себестоимость</th>
-                            <th className="py-3 px-4 font-medium text-right">Цена продажи</th>
-                            <th className="py-3 px-4 font-medium text-right">Внесено всего</th>
-                            <th className="py-3 px-4 font-medium text-right">Остаток долга</th>
-                            <th className="py-3 px-4 font-medium text-right">Действия</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Себестоимость</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Цена продажи</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Внесено всего</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Остаток долга</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Действия</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -2262,10 +2262,10 @@ export default function App() {
                         )}
 
                         {/* Contract Financial Breakdown */}
-                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono bg-slate-50 p-3.5 rounded-lg border border-slate-200">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono tabular-nums bg-slate-50 p-3.5 rounded-lg border border-slate-200">
                           <div>
                             <div className="font-sans text-slate-500">Полная себестоимость</div>
-                            <div className="font-semibold text-slate-900 mt-0.5 break-words">
+                            <div className="font-semibold text-slate-900 mt-0.5 whitespace-nowrap">
                               {formatMoney(c.totalCostKopecks)}
                             </div>
                           </div>
@@ -2273,13 +2273,13 @@ export default function App() {
                             <div className="font-sans text-slate-500">
                               Наценка ({c.markupPercent}%)
                             </div>
-                            <div className="font-semibold text-emerald-700 mt-0.5 break-words">
+                            <div className="font-semibold text-emerald-700 mt-0.5 whitespace-nowrap">
                               +{formatMoney(c.markupKopecks)}
                             </div>
                           </div>
                           <div>
                             <div className="font-sans text-slate-500">Цена продажи</div>
-                            <div className="font-semibold text-slate-900 mt-0.5 break-words">
+                            <div className="font-semibold text-slate-900 mt-0.5 whitespace-nowrap">
                               {formatMoney(c.salePriceKopecks)}
                             </div>
                           </div>
@@ -2287,54 +2287,54 @@ export default function App() {
                             <div className="font-sans text-slate-500">
                               1-й взнос ({c.downPaymentPercent}%)
                             </div>
-                            <div className="font-semibold text-slate-900 mt-0.5 break-words">
+                            <div className="font-semibold text-slate-900 mt-0.5 whitespace-nowrap">
                               {formatMoney(c.downPaymentKopecks)}
                             </div>
                           </div>
                           <div>
                             <div className="font-sans text-slate-500">Фактически оплачено</div>
-                            <div className="font-semibold text-emerald-700 mt-0.5 break-words">
+                            <div className="font-semibold text-emerald-700 mt-0.5 whitespace-nowrap">
                               {formatMoney(c.totalCollectedKopecks)}
                             </div>
                           </div>
                           <div>
                             <div className="font-sans text-slate-500">Текущий остаток долга</div>
-                            <div className="font-bold text-slate-900 mt-0.5 break-words">
+                            <div className="font-bold text-slate-900 mt-0.5 whitespace-nowrap">
                               {formatMoney(c.remainingDebtKopecks)}
                             </div>
                           </div>
                         </div>
 
                         {/* Active Schedule Table */}
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-left border-collapse text-xs min-w-[540px]">
+                        <div className="overflow-x-auto -mx-2 px-2">
+                          <table className="w-full min-w-max text-left border-collapse text-xs">
                             <thead>
                               <tr className="border-b border-slate-200 text-slate-500">
-                                <th className="py-2 pr-3 font-medium">Платёж</th>
-                                <th className="py-2 pr-3 font-medium">Дата по графику</th>
-                                <th className="py-2 pr-3 font-medium text-right">Сумма по плану</th>
-                                <th className="py-2 pr-3 font-medium text-right">Внесено</th>
-                                <th className="py-2 pr-3 font-medium text-right">Остаток по строке</th>
-                                <th className="py-2 font-medium">Статус и примечание</th>
+                                <th className="py-2.5 px-3 font-medium whitespace-nowrap">Платёж</th>
+                                <th className="py-2.5 px-3 font-medium whitespace-nowrap">Дата по графику</th>
+                                <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Сумма по плану</th>
+                                <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Внесено</th>
+                                <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Остаток по строке</th>
+                                <th className="py-2.5 px-3 font-medium whitespace-nowrap">Статус и примечание</th>
                               </tr>
                             </thead>
-                            <tbody className="divide-y divide-slate-100">
+                            <tbody className="divide-y divide-slate-100 tabular-nums">
                               {c.schedule.map((item) => (
                                 <tr key={item.id}>
-                                  <td className="py-2 pr-3 font-mono font-medium whitespace-nowrap">
+                                  <td className="py-2.5 px-3 font-mono font-medium whitespace-nowrap">
                                     №{item.installmentNumber}
                                   </td>
-                                  <td className="py-2 pr-3 font-mono whitespace-nowrap">{formatDateRu(item.dueDate)}</td>
-                                  <td className="py-2 pr-3 font-mono text-right whitespace-nowrap">
+                                  <td className="py-2.5 px-3 font-mono whitespace-nowrap">{formatDateRu(item.dueDate)}</td>
+                                  <td className="py-2.5 px-3 font-mono text-right whitespace-nowrap">
                                     {formatMoney(item.plannedKopecks)}
                                   </td>
-                                  <td className="py-2 pr-3 font-mono text-right text-emerald-700 whitespace-nowrap">
+                                  <td className="py-2.5 px-3 font-mono text-right text-emerald-700 whitespace-nowrap">
                                     {formatMoney(item.paidKopecks)}
                                   </td>
-                                  <td className="py-2 pr-3 font-mono text-right font-semibold whitespace-nowrap">
+                                  <td className="py-2.5 px-3 font-mono text-right font-semibold whitespace-nowrap">
                                     {formatMoney(item.remainingKopecks)}
                                   </td>
-                                  <td className="py-2 text-slate-700">
+                                  <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
                                     <span
                                       className={
                                         item.daysOverdue > 0

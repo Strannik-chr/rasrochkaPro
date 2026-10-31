@@ -2034,19 +2034,19 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
                 <div>
                   <div className="text-slate-500">Полная себестоимость</div>
-                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                  <div className="text-sm font-semibold font-mono tabular-nums whitespace-nowrap text-slate-900 mt-0.5">
                     {formatMoney(previewResult.totalCostKopecks)}
                   </div>
                 </div>
                 <div>
                   <div className="text-slate-500">Наценка ({previewResult.markupPercent}%)</div>
-                  <div className="text-sm font-semibold font-mono text-emerald-700 mt-0.5">
+                  <div className="text-sm font-semibold font-mono tabular-nums whitespace-nowrap text-emerald-700 mt-0.5">
                     +{formatMoney(previewResult.markupKopecks)}
                   </div>
                 </div>
                 <div>
                   <div className="text-slate-500">Цена продажи</div>
-                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                  <div className="text-sm font-semibold font-mono tabular-nums whitespace-nowrap text-slate-900 mt-0.5">
                     {formatMoney(previewResult.salePriceKopecks)}
                   </div>
                 </div>
@@ -2054,37 +2054,37 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   <div className="text-slate-500">
                     Первый взнос ({previewResult.downPaymentPercent}%)
                   </div>
-                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                  <div className="text-sm font-semibold font-mono tabular-nums whitespace-nowrap text-slate-900 mt-0.5">
                     {formatMoney(previewResult.downPaymentKopecks)}
                   </div>
                 </div>
                 <div>
                   <div className="text-slate-500">Остаток в рассрочку</div>
-                  <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
+                  <div className="text-sm font-semibold font-mono tabular-nums whitespace-nowrap text-slate-900 mt-0.5">
                     {formatMoney(previewResult.financedPrincipalKopecks)}
                   </div>
                 </div>
               </div>
 
-              <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg bg-white">
-                <table className="w-full text-left border-collapse text-xs">
+              <div className="max-h-52 overflow-x-auto overflow-y-auto border border-slate-200 rounded-lg bg-white">
+                <table className="w-full min-w-max text-left border-collapse text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                      <th className="py-2 px-3 font-medium">№ платежа</th>
-                      <th className="py-2 px-3 font-medium">Дата оплаты</th>
-                      <th className="py-2 px-3 font-medium text-right">Сумма по графику</th>
+                      <th className="py-2 px-3 font-medium whitespace-nowrap">№ платежа</th>
+                      <th className="py-2 px-3 font-medium whitespace-nowrap">Дата оплаты</th>
+                      <th className="py-2 px-3 font-medium text-right whitespace-nowrap">Сумма по графику</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {previewResult.schedule.map((row: any) => (
                       <tr key={row.installmentNumber}>
-                        <td className="py-1.5 px-3 font-mono text-slate-700">
+                        <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-slate-700">
                           Платёж №{row.installmentNumber}
                         </td>
-                        <td className="py-1.5 px-3 font-mono text-slate-700">
+                        <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-slate-700">
                           {formatDateRu(row.dueDate)}
                         </td>
-                        <td className="py-1.5 px-3 font-mono text-right font-medium text-slate-900">
+                        <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-right font-medium text-slate-900">
                           {formatMoney(row.plannedKopecks)}
                         </td>
                       </tr>
@@ -2462,26 +2462,26 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs">
           <div>
             <div className="text-slate-500">Осталось месяцев платить</div>
-            <div className="text-base font-bold font-mono text-slate-900 mt-0.5">
+            <div className="text-base font-bold font-mono tabular-nums whitespace-nowrap text-slate-900 mt-0.5">
               {remainingMonthsCount} мес.{' '}
               <span className="text-xs font-normal text-slate-500">из {contract.termMonths}</span>
             </div>
           </div>
           <div>
             <div className="text-slate-500">Закрыто месяцев</div>
-            <div className="text-base font-bold font-mono text-emerald-700 mt-0.5">
+            <div className="text-base font-bold font-mono tabular-nums whitespace-nowrap text-emerald-700 mt-0.5">
               {completedMonthsCount} мес.
             </div>
           </div>
           <div>
             <div className="text-slate-500">Всего уже выплачено</div>
-            <div className="text-base font-bold font-mono text-emerald-700 mt-0.5">
+            <div className="text-base font-bold font-mono tabular-nums whitespace-nowrap text-emerald-700 mt-0.5">
               {formatMoney(contract.totalPaidOnScheduleKopecks)}
             </div>
           </div>
           <div>
             <div className="text-slate-500">Осталось выплатить</div>
-            <div className="text-base font-bold font-mono text-slate-900 mt-0.5">
+            <div className="text-base font-bold font-mono tabular-nums whitespace-nowrap text-slate-900 mt-0.5">
               {formatMoney(contract.remainingDebtKopecks)}
             </div>
           </div>
@@ -2505,36 +2505,36 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
               </div>
             )}
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto -mx-2 px-2">
+            <table className="w-full min-w-max text-left border-collapse text-xs">
               <thead>
                 <tr className="text-slate-500 border-b border-slate-100">
-                  <th className="py-2 pr-3">№</th>
-                  <th className="py-2 pr-3">Срок оплаты</th>
-                  <th className="py-2 pr-3 text-right">Сумма по графику</th>
-                  <th className="py-2 pr-3 text-right">Внесено</th>
-                  <th className="py-2 pr-3 text-right">Осталось</th>
-                  <th className="py-2">Статус</th>
+                  <th className="py-2.5 px-3 font-medium whitespace-nowrap">№</th>
+                  <th className="py-2.5 px-3 font-medium whitespace-nowrap">Срок оплаты</th>
+                  <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Сумма по графику</th>
+                  <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Внесено</th>
+                  <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Осталось</th>
+                  <th className="py-2.5 px-3 font-medium whitespace-nowrap">Статус</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 font-mono">
+              <tbody className="divide-y divide-slate-100 font-mono tabular-nums">
                 {activeScheduleItems.map((item) => (
                   <tr
                     key={item.id}
                     className={item.status === 'paid' ? 'bg-emerald-50/40 text-slate-500' : ''}
                   >
-                    <td className="py-2 pr-3 font-semibold text-slate-900">
+                    <td className="py-2.5 px-3 font-semibold text-slate-900 whitespace-nowrap">
                       #{item.installmentNumber}
                     </td>
-                    <td className="py-2 pr-3">{formatDateRu(item.dueDate)}</td>
-                    <td className="py-2 pr-3 text-right">{formatMoney(item.plannedKopecks)}</td>
-                    <td className="py-2 pr-3 text-right text-emerald-700">
+                    <td className="py-2.5 px-3 whitespace-nowrap">{formatDateRu(item.dueDate)}</td>
+                    <td className="py-2.5 px-3 text-right whitespace-nowrap">{formatMoney(item.plannedKopecks)}</td>
+                    <td className="py-2.5 px-3 text-right text-emerald-700 whitespace-nowrap">
                       {formatMoney(item.paidKopecks)}
                     </td>
-                    <td className="py-2 pr-3 text-right font-semibold text-slate-900">
+                    <td className="py-2.5 px-3 text-right font-semibold text-slate-900 whitespace-nowrap">
                       {formatMoney(item.remainingKopecks)}
                     </td>
-                    <td className="py-2 font-sans">
+                    <td className="py-2.5 px-3 font-sans whitespace-nowrap">
                       <span
                         className={
                           item.status === 'paid'
@@ -2746,24 +2746,24 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
                 Утверждённый график ежемесячных платежей ({contract.termMonths} мес.):
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[460px] border-collapse border border-slate-300 text-xs font-mono">
+                <table className="w-full min-w-max border-collapse border border-slate-300 text-xs font-mono tabular-nums">
                   <thead>
                     <tr className="bg-slate-50 font-sans">
-                      <th className="border border-slate-300 p-1.5 text-left">№</th>
-                      <th className="border border-slate-300 p-1.5 text-left">Дата платежа</th>
-                      <th className="border border-slate-300 p-1.5 text-right">Сумма по графику</th>
-                      <th className="border border-slate-300 p-1.5 text-right">Фактически внесено</th>
+                      <th className="border border-slate-300 py-2 px-3 text-left whitespace-nowrap">№</th>
+                      <th className="border border-slate-300 py-2 px-3 text-left whitespace-nowrap">Дата платежа</th>
+                      <th className="border border-slate-300 py-2 px-3 text-right whitespace-nowrap">Сумма по графику</th>
+                      <th className="border border-slate-300 py-2 px-3 text-right whitespace-nowrap">Фактически внесено</th>
                     </tr>
                   </thead>
                   <tbody>
                     {contract.schedule.map((item) => (
                       <tr key={item.id}>
-                        <td className="border border-slate-300 p-1.5">{item.installmentNumber}</td>
-                        <td className="border border-slate-300 p-1.5">{formatDateRu(item.dueDate)}</td>
-                        <td className="border border-slate-300 p-1.5 text-right">
+                        <td className="border border-slate-300 py-2 px-3 whitespace-nowrap">{item.installmentNumber}</td>
+                        <td className="border border-slate-300 py-2 px-3 whitespace-nowrap">{formatDateRu(item.dueDate)}</td>
+                        <td className="border border-slate-300 py-2 px-3 text-right whitespace-nowrap">
                           {formatMoney(item.plannedKopecks)}
                         </td>
-                        <td className="border border-slate-300 p-1.5 text-right">
+                        <td className="border border-slate-300 py-2 px-3 text-right whitespace-nowrap">
                           {formatMoney(item.paidKopecks)}
                         </td>
                       </tr>

@@ -1,13 +1,13 @@
 export function formatMoney(kopecks: number | null | undefined): string {
   if (kopecks === null || kopecks === undefined || Number.isNaN(kopecks)) {
-    return '0,00 ₽';
+    return '0,00\u00A0₽';
   }
   const sign = kopecks < 0 ? '−' : '';
   const abs = Math.abs(Math.trunc(kopecks));
   const rubles = Math.floor(abs / 100);
   const kop = abs % 100;
-  const formattedRubles = rubles.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
-  return `${sign}${formattedRubles},${String(kop).padStart(2, '0')} ₽`;
+  const formattedRubles = rubles.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u00A0');
+  return `${sign}${formattedRubles},${String(kop).padStart(2, '0')}\u00A0₽`;
 }
 
 export function parseRublesInputToKopecks(raw: string): number {
