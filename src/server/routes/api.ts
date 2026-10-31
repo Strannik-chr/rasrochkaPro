@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
-import { withTransaction } from '../db/database';
+import { cleanResetOperationalData, withTransaction } from '../db/database';
 import {
   AutoAllocationStrategy,
   assertKopecks,
@@ -5802,6 +5802,31 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       } catch (err) {
         res.status(404).json({
           error: err instanceof Error ? err.message : 'Файл резервной копии не найден.',
+        });
+      }
+    }
+  );
+
+  router.post(
+    '/security/database/clean-reset',
+    requireAuth,
+    requireRoles(['owner']),
+    (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const actorIdentifier = req.user!.phone || req.user!.email;
+        const bkp = createEncryptedBackup(db, req.user!.id, actorIdentifier);
+        const result = cleanResetOperationalData(db, req.user!.id, actorIdentifier, {
+          keepStaffUsers: Boolean(req.body?.keepStaffUsers),
+        });
+        res.json({
+          ok: true,
+          backupId: bkp.id,
+          backupFilename: bkp.filename,
+          ...result,
+        });
+      } catch (err) {
+        res.status(400).json({
+          error: err instanceof Error ? err.message : 'Ошибка очистки операционных данных.',
         });
       }
     }

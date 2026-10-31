@@ -19,6 +19,7 @@ RUN mkdir -p /data /data/uploads /data/backups /app/data /app/uploads /app/backu
 
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV SEED_DEMO_DATA=false
 ENV SQLITE_STORAGE_PATH=/data/installment_ledger.sqlite
 ENV PRIVATE_STORAGE_DIR=/data/uploads
 ENV BACKUP_STORAGE_DIR=/data/backups

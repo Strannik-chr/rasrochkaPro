@@ -287,6 +287,7 @@ export default function App() {
   const [previewingDocument, setPreviewingDocument] = useState<DocumentDTO | null>(null);
   const [confirmDeleteContractDocId, setConfirmDeleteContractDocId] = useState<string | null>(null);
   const [confirmRemoveGuarantorId, setConfirmRemoveGuarantorId] = useState<string | null>(null);
+  const [confirmCleanResetDb, setConfirmCleanResetDb] = useState(false);
 
   const fetchProtectedBlob = useCallback(
     async (path: string): Promise<Blob> => {
@@ -4378,6 +4379,64 @@ export default function App() {
                           </div>
                         )}
                       </div>
+                    </div>
+                  </div>
+
+                  {/* Clean Production Reset Card (Owner Only) */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
+                    <div className="space-y-1 max-w-2xl">
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Чистый старт для продакшена (очистка демо и тестовых записей)
+                      </h3>
+                      <p className="text-xs text-slate-600">
+                        Перед очисткой автоматически создаётся зашифрованная резервная копия (AES-256-GCM). Удаляются только тестовые договоры, клиенты, платежи и проводки; ваша учётная запись владельца ({currentUser?.phone}), тарифы рассрочки и счета кассы/банка (с балансом 0,00 ₽) полностью сохраняются.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {!confirmCleanResetDb ? (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmCleanResetDb(true)}
+                          className="px-3.5 py-2 text-xs font-medium text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                        >
+                          Очистить базу для чистого старта
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const res = await apiFetch('/api/v1/security/database/clean-reset', {
+                                  method: 'POST',
+                                  body: JSON.stringify({ keepStaffUsers: true }),
+                                });
+                                setConfirmCleanResetDb(false);
+                                await loadFullState();
+                                notify(
+                                  'success',
+                                  `База очищена для продакшена (предварительная копия: ${res.backupFilename}). Касса и банк: 0,00 ₽.`
+                                );
+                              } catch (err) {
+                                notify(
+                                  'error',
+                                  err instanceof Error ? err.message : 'Ошибка очистки базы данных'
+                                );
+                              }
+                            }}
+                            className="px-3.5 py-2 text-xs font-medium text-white bg-red-600 rounded-lg hover:bg-red-700"
+                          >
+                            Подтвердить очистку (с бэкапом)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmCleanResetDb(false)}
+                            className="px-3 py-2 text-xs font-medium text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50"
+                          >
+                            Отмена
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
