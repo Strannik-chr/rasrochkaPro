@@ -189,23 +189,23 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-4 sm:p-6 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200">
+          <div className="min-w-0">
+            <h2 className="text-base sm:text-lg font-semibold text-slate-900 break-words">
               Распределение платежа · {payment.clientName}
             </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p className="text-xs text-slate-500 mt-0.5 break-words">
               По умолчанию сумма сверх текущего платежа распределяется равномерно на все оставшиеся месяцы
             </p>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
+          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg shrink-0">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="mt-4 grid grid-cols-3 gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
           <div>
             <div className="text-slate-500">Сумма поступления</div>
             <div className="text-sm font-semibold font-mono text-slate-900 mt-0.5">
@@ -391,15 +391,15 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                 </div>
               )}
 
-              <div className="border border-slate-200 rounded-xl overflow-hidden">
-                <table className="w-full text-left border-collapse text-xs">
+              <div className="border border-slate-200 rounded-xl overflow-x-auto">
+                <table className="w-full min-w-[560px] text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                      <th className="py-2.5 px-3 font-medium">Платёж графика</th>
-                      <th className="py-2.5 px-3 font-medium">Срок</th>
-                      <th className="py-2.5 px-3 font-medium text-right">Остаток по строке</th>
-                      <th className="py-2.5 px-3 font-medium text-right">Направить сумму (₽)</th>
-                      <th className="py-2.5 px-3 font-medium text-right">Статус после оплаты</th>
+                      <th className="py-2.5 px-3 font-medium whitespace-nowrap">Платёж графика</th>
+                      <th className="py-2.5 px-3 font-medium whitespace-nowrap">Срок</th>
+                      <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Остаток по строке</th>
+                      <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Направить сумму (₽)</th>
+                      <th className="py-2.5 px-3 font-medium text-right whitespace-nowrap">Статус после оплаты</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -412,7 +412,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                           key={item.id}
                           className={isFull ? 'bg-emerald-50/40' : isPartial ? 'bg-amber-50/40' : ''}
                         >
-                          <td className="py-2 px-3">
+                          <td className="py-2 px-3 whitespace-nowrap">
                             <span className="font-mono font-medium text-slate-900">
                               №{item.installmentNumber}
                             </span>
@@ -421,7 +421,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                               {translateScheduleStatus(item.status)}
                             </span>
                           </td>
-                          <td className="py-2 px-3 font-mono text-slate-700">
+                          <td className="py-2 px-3 font-mono text-slate-700 whitespace-nowrap">
                             {formatDateRu(item.dueDate)}
                             {item.daysOverdue > 0 && (
                               <span className="text-red-600 ml-1.5 font-medium">
@@ -429,10 +429,10 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                               </span>
                             )}
                           </td>
-                          <td className="py-2 px-3 font-mono text-right font-semibold text-slate-900">
+                          <td className="py-2 px-3 font-mono text-right font-semibold text-slate-900 whitespace-nowrap">
                             {formatMoney(item.remainingKopecks)}
                           </td>
-                          <td className="py-2 px-3 text-right">
+                          <td className="py-2 px-3 text-right whitespace-nowrap">
                             <div className="flex items-center justify-end gap-2">
                               <input
                                 type="number"
@@ -462,7 +462,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                               </button>
                             </div>
                           </td>
-                          <td className="py-2 px-3 text-right">
+                          <td className="py-2 px-3 text-right whitespace-nowrap">
                             {isFull && (
                               <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 rounded">
                                 Погашен полностью ✓
@@ -639,18 +639,18 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-4 sm:p-6 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200">
+          <div className="min-w-0">
+            <h2 className="text-base sm:text-lg font-semibold text-slate-900 break-words">
               Регистрация поступления от клиента
             </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p className="text-xs text-slate-500 mt-0.5 break-words">
               По умолчанию закрывается текущий месяц, а переплата распределяется на все оставшиеся месяцы
             </p>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
+          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg shrink-0">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -915,89 +915,91 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
               )}
 
               {amountKopecks > 0 && (
-                <table className="w-full text-left text-xs bg-white border border-slate-200 rounded-lg overflow-hidden">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                      <th className="py-2 px-3">№</th>
-                      <th className="py-2 px-3">Дата по графику</th>
-                      <th className="py-2 px-3 text-right">Остаток по строке</th>
-                      <th className="py-2 px-3 text-right">Направить сумму (₽)</th>
-                      <th className="py-2 px-3 text-right">Результат</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {unpaidItems.map((item) => {
-                      const allocKop = parseRublesInputToKopecks(allocMap[item.id] || '0');
-                      const isFull = allocKop >= item.remainingKopecks;
-                      const isPartial = allocKop > 0 && allocKop < item.remainingKopecks;
-                      return (
-                        <tr
-                          key={item.id}
-                          className={isFull ? 'bg-emerald-50/40' : isPartial ? 'bg-amber-50/40' : ''}
-                        >
-                          <td className="py-1.5 px-3 font-mono">№{item.installmentNumber}</td>
-                          <td className="py-1.5 px-3 font-mono">{formatDateRu(item.dueDate)}</td>
-                          <td className="py-1.5 px-3 font-mono text-right font-medium">
-                            {formatMoney(item.remainingKopecks)}
-                          </td>
-                          <td className="py-1.5 px-3 text-right">
-                            <div className="flex items-center justify-end gap-2">
-                              <input
-                                type="number"
-                                step="0.01"
-                                min="0"
-                                max={item.remainingKopecks / 100}
-                                value={allocMap[item.id] || ''}
-                                onChange={(e) => {
-                                  setAllocationMode('manual');
-                                  setAllocMap((prev) => ({ ...prev, [item.id]: e.target.value }));
-                                }}
-                                className={`w-28 px-2 py-1 text-xs font-mono text-right border rounded ${
-                                  isFull
-                                    ? 'border-emerald-300 bg-emerald-50/50 font-semibold text-emerald-900'
-                                    : isPartial
-                                      ? 'border-amber-300 bg-amber-50/50 font-semibold text-amber-900'
-                                      : 'border-slate-300 bg-white'
-                                }`}
-                              />
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setAllocationMode('manual');
-                                  const curr = parseRublesInputToKopecks(allocMap[item.id] || '0');
-                                  const avail = Math.max(0, unallocatedAfter + curr);
-                                  const fill = Math.min(item.remainingKopecks, avail);
-                                  setAllocMap((prev) => ({
-                                    ...prev,
-                                    [item.id]: (fill / 100).toFixed(2),
-                                  }));
-                                }}
-                                className="px-2 py-1 text-[11px] border border-slate-200 rounded hover:bg-slate-50"
-                              >
-                                Макс.
-                              </button>
-                            </div>
-                          </td>
-                          <td className="py-1.5 px-3 text-right">
-                            {isFull && (
-                              <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 rounded">
-                                Погашен полностью ✓
-                              </span>
-                            )}
-                            {isPartial && (
-                              <span className="px-2 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-900 rounded">
-                                Частично (останется {formatMoney(item.remainingKopecks - allocKop)})
-                              </span>
-                            )}
-                            {!isFull && !isPartial && (
-                              <span className="text-[11px] text-slate-400">Без оплаты</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                <div className="overflow-x-auto bg-white border border-slate-200 rounded-lg">
+                  <table className="w-full min-w-[540px] text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                        <th className="py-2 px-3 whitespace-nowrap">№</th>
+                        <th className="py-2 px-3 whitespace-nowrap">Дата по графику</th>
+                        <th className="py-2 px-3 text-right whitespace-nowrap">Остаток по строке</th>
+                        <th className="py-2 px-3 text-right whitespace-nowrap">Направить сумму (₽)</th>
+                        <th className="py-2 px-3 text-right whitespace-nowrap">Результат</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {unpaidItems.map((item) => {
+                        const allocKop = parseRublesInputToKopecks(allocMap[item.id] || '0');
+                        const isFull = allocKop >= item.remainingKopecks;
+                        const isPartial = allocKop > 0 && allocKop < item.remainingKopecks;
+                        return (
+                          <tr
+                            key={item.id}
+                            className={isFull ? 'bg-emerald-50/40' : isPartial ? 'bg-amber-50/40' : ''}
+                          >
+                            <td className="py-1.5 px-3 font-mono whitespace-nowrap">№{item.installmentNumber}</td>
+                            <td className="py-1.5 px-3 font-mono whitespace-nowrap">{formatDateRu(item.dueDate)}</td>
+                            <td className="py-1.5 px-3 font-mono text-right font-medium whitespace-nowrap">
+                              {formatMoney(item.remainingKopecks)}
+                            </td>
+                            <td className="py-1.5 px-3 text-right whitespace-nowrap">
+                              <div className="flex items-center justify-end gap-2">
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  max={item.remainingKopecks / 100}
+                                  value={allocMap[item.id] || ''}
+                                  onChange={(e) => {
+                                    setAllocationMode('manual');
+                                    setAllocMap((prev) => ({ ...prev, [item.id]: e.target.value }));
+                                  }}
+                                  className={`w-28 px-2 py-1 text-xs font-mono text-right border rounded ${
+                                    isFull
+                                      ? 'border-emerald-300 bg-emerald-50/50 font-semibold text-emerald-900'
+                                      : isPartial
+                                        ? 'border-amber-300 bg-amber-50/50 font-semibold text-amber-900'
+                                        : 'border-slate-300 bg-white'
+                                  }`}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAllocationMode('manual');
+                                    const curr = parseRublesInputToKopecks(allocMap[item.id] || '0');
+                                    const avail = Math.max(0, unallocatedAfter + curr);
+                                    const fill = Math.min(item.remainingKopecks, avail);
+                                    setAllocMap((prev) => ({
+                                      ...prev,
+                                      [item.id]: (fill / 100).toFixed(2),
+                                    }));
+                                  }}
+                                  className="px-2 py-1 text-[11px] border border-slate-200 rounded hover:bg-slate-50"
+                                >
+                                  Макс.
+                                </button>
+                              </div>
+                            </td>
+                            <td className="py-1.5 px-3 text-right whitespace-nowrap">
+                              {isFull && (
+                                <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 rounded">
+                                  Погашен полностью ✓
+                                </span>
+                              )}
+                              {isPartial && (
+                                <span className="px-2 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-900 rounded">
+                                  Частично (останется {formatMoney(item.remainingKopecks - allocKop)})
+                                </span>
+                              )}
+                              {!isFull && !isPartial && (
+                                <span className="text-[11px] text-slate-400">Без оплаты</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           )}

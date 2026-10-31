@@ -1,7 +1,7 @@
 import { ClientPaymentStatus, StatusRulesConfigDTO } from './types';
 
 export const DEFAULT_STATUS_RULES: StatusRulesConfigDTO = {
-  gracePeriodDays: 0,
+  gracePeriodDays: 3,
   complexMinOverdueDays: 15,
   complexConsecutiveMissedCount: 2,
   complexMinOverdueKopecks: 3000000, // 30 000,00 ₽
@@ -191,14 +191,15 @@ export function evaluateContractStatus(
   contract: ContractEvalInput,
   rules: StatusRulesConfigDTO = DEFAULT_STATUS_RULES
 ): ComputedStatusResult {
-  const graceDays = Math.max(0, Math.trunc(Number(rules.gracePeriodDays || 0)));
+  const graceDays = Math.max(0, Math.trunc(Number(rules.gracePeriodDays ?? 3)));
+  const overdueThresholdDays = Math.max(1, graceDays);
 
   if (contract.status === 'completed' && contract.remainingDebtKopecks <= 0) {
     let pastLateCount = 0;
     for (const item of contract.schedule) {
       if (item.lastPaidEventDate) {
         const lateDays = diffDaysBetweenIsoDates(item.dueDate, item.lastPaidEventDate);
-        if (lateDays > graceDays) {
+        if (lateDays >= overdueThresholdDays) {
           pastLateCount++;
         }
       }
@@ -226,6 +227,7 @@ export function evaluateContractStatus(
   let maxConsecutiveOverdueCount = 0;
   let pastLateCount = 0;
   let inGracePeriodCount = 0;
+  let maxGraceDaysElapsed = 0;
   let nextPaymentDate: string | null = null;
   let nextPaymentAmountKopecks = 0;
 
@@ -234,10 +236,13 @@ export function evaluateContractStatus(
 
     const remaining = Math.max(0, item.plannedKopecks - item.paidKopecks);
     const rawDaysOverdue = remaining > 0 ? Math.max(0, item.daysOverdue) : 0;
-    const isEffectivelyOverdue = remaining > 0 && rawDaysOverdue > graceDays;
+    const isEffectivelyOverdue = remaining > 0 && rawDaysOverdue >= overdueThresholdDays;
 
-    if (remaining > 0 && rawDaysOverdue > 0 && rawDaysOverdue <= graceDays) {
+    if (remaining > 0 && rawDaysOverdue > 0 && rawDaysOverdue < overdueThresholdDays) {
       inGracePeriodCount++;
+      if (rawDaysOverdue > maxGraceDaysElapsed) {
+        maxGraceDaysElapsed = rawDaysOverdue;
+      }
     }
 
     if (isEffectivelyOverdue) {
@@ -253,7 +258,7 @@ export function evaluateContractStatus(
       currentStreak = 0;
       if (item.lastPaidEventDate) {
         const lateDays = diffDaysBetweenIsoDates(item.dueDate, item.lastPaidEventDate);
-        if (lateDays > graceDays) {
+        if (lateDays >= overdueThresholdDays) {
           pastLateCount++;
         }
       } else if (item.dueDate > item.originalDueDate) {
@@ -312,12 +317,12 @@ export function evaluateContractStatus(
     };
   }
 
-  // Check for 'watch' (active overdue below complex threshold)
+  // Check for 'watch' (active overdue after the 3-day payment window, below complex threshold)
   if (effectiveOverdueKopecks > 0) {
     return {
       status: 'watch',
       label: translateClientPaymentStatus('watch'),
-      reason: `Договор ${contract.contractNumber}: текущая просрочка ${formatKopecksShort(effectiveOverdueKopecks)} (${maxEffectiveDaysOverdue} дн.), требуется контроль оплаты.`,
+      reason: `Договор ${contract.contractNumber}: платёж не внесён в течение ${graceDays > 0 ? `${graceDays} дн.` : 'установленного срока'} после даты оплаты — текущая просрочка ${formatKopecksShort(effectiveOverdueKopecks)} (${maxEffectiveDaysOverdue} дн.), требуется контроль оплаты.`,
       effectiveOverdueKopecks,
       maxEffectiveDaysOverdue,
       consecutiveOverdueCount: maxConsecutiveOverdueCount,
@@ -327,14 +332,16 @@ export function evaluateContractStatus(
     };
   }
 
-  // No current overdue beyond grace period -> check if 'reliable' vs 'vip'
-  if (pastLateCount > 0 || inGracePeriodCount > 0 || contract.status === 'restructured') {
-    const details =
+  // No current overdue beyond the 3-day grace window -> keep 'reliable' (if past late / restructured) or 'vip'
+  if (pastLateCount > 0 || contract.status === 'restructured') {
+    const graceSuffix =
       inGracePeriodCount > 0
-        ? `текущий платёж в пределах льготного периода (${graceDays} дн.)`
-        : contract.status === 'restructured' || contract.currentScheduleVersion > 1
-          ? `график был перенесён/реструктурирован (v${contract.currentScheduleVersion}), текущий график соблюдается`
-          : `ранее зафиксировано небольших задержек: ${pastLateCount}, сейчас просроченной задолженности нет`;
+        ? ` (текущий платёж ожидается в течение ${graceDays} дн. после даты оплаты, прошло ${maxGraceDaysElapsed} дн.)`
+        : '';
+    const details =
+      contract.status === 'restructured' || contract.currentScheduleVersion > 1
+        ? `график был перенесён/реструктурирован (v${contract.currentScheduleVersion}), текущий график соблюдается${graceSuffix}`
+        : `ранее зафиксировано небольших задержек: ${pastLateCount}, сейчас просроченной задолженности нет${graceSuffix}`;
     return {
       status: 'reliable',
       label: translateClientPaymentStatus('reliable'),
@@ -351,7 +358,10 @@ export function evaluateContractStatus(
   return {
     status: 'vip',
     label: translateClientPaymentStatus('vip'),
-    reason: `Договор ${contract.contractNumber}: все платежи вносятся строго по графику, просрочек нет.`,
+    reason:
+      inGracePeriodCount > 0
+        ? `Договор ${contract.contractNumber}: наступил срок оплаты (ожидается платёж в течение ${graceDays} дн. после даты платежа, прошло ${maxGraceDaysElapsed} дн. — статус сохраняется).`
+        : `Договор ${contract.contractNumber}: все платежи вносятся строго по графику, просрочек нет.`,
     effectiveOverdueKopecks: 0,
     maxEffectiveDaysOverdue: 0,
     consecutiveOverdueCount: 0,

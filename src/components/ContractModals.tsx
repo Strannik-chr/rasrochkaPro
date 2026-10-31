@@ -704,21 +704,21 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-4xl max-h-[92vh] overflow-y-auto p-6">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-4xl max-h-[92vh] overflow-y-auto p-4 sm:p-6">
+        <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200">
+          <div className="min-w-0">
+            <h2 className="text-base sm:text-lg font-semibold text-slate-900 break-words">
               Оформление договора продажи в рассрочку
             </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p className="text-xs text-slate-500 mt-0.5 break-words">
               Заполните данные основного плательщика, добавьте одного или нескольких поручителей (при необходимости) и прикрепите документы
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-2 text-slate-500 hover:text-slate-900 rounded-lg"
+            className="p-2 text-slate-500 hover:text-slate-900 rounded-lg shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
@@ -2243,18 +2243,18 @@ export const EarlyPayoffModal: React.FC<EarlyPayoffModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-4 sm:p-6 max-h-[92vh] overflow-y-auto">
+        <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200">
+          <div className="min-w-0">
+            <h2 className="text-base sm:text-lg font-semibold text-slate-900 break-words">
               Калькулятор сравнения вариантов досрочного погашения · {contract.contractNumber}
             </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p className="text-xs text-slate-500 mt-0.5 break-words">
               Клиент: {contract.clientName} · Остаток по графику: {formatMoney(contract.remainingDebtKopecks)}
             </p>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
+          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg shrink-0">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -2439,21 +2439,21 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto space-y-5">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200">
-          <div className="flex items-center gap-2.5">
-            <History className="w-5 h-5 text-slate-700" />
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-4 sm:p-6 max-h-[92vh] overflow-y-auto space-y-5">
+        <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <History className="w-5 h-5 text-slate-700 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <h2 className="text-base sm:text-lg font-semibold text-slate-900 break-words">
                 График платежей по договору · {contract.contractNumber}
               </h2>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-slate-500 break-words">
                 Клиент: {contract.clientName} · Товар: {contract.itemTitle} · Текущая версия: v{contract.currentScheduleVersion}
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
+          <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg shrink-0">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -2637,24 +2637,24 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
   const guarantors = contract.guarantors || [];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-6 max-h-[92vh] overflow-y-auto">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200 no-print">
-          <div>
-            <h2 className="text-base font-semibold text-slate-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl p-4 sm:p-6 max-h-[92vh] overflow-y-auto">
+        <div className="flex flex-wrap items-start justify-between gap-3 pb-4 border-b border-slate-200 no-print">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-slate-900 break-words">
               Предварительный шаблон документа · {contract.contractNumber}
             </h2>
-            <p className="text-xs text-amber-700 mt-0.5">
+            <p className="text-xs text-amber-700 mt-0.5 break-words">
               Внимание: система не является юридической консультацией. Проверьте текст шаблона с российским юристом (ст. 488, 489 ГК РФ).
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => window.print()}
               className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg flex items-center gap-1.5"
             >
-              <Printer className="w-3.5 h-3.5" />
+              <Printer className="w-3.5 h-3.5 shrink-0" />
               <span>Печать / Сохранить PDF</span>
             </button>
             <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg">
@@ -2675,9 +2675,9 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
           />
         </div>
 
-        <div className="p-6 border border-slate-300 rounded-lg text-xs text-slate-900 space-y-4 leading-relaxed">
+        <div className="p-4 sm:p-6 border border-slate-300 rounded-lg text-xs text-slate-900 space-y-4 leading-relaxed">
           <div className="text-center border-b border-slate-200 pb-3">
-            <div className="text-sm font-bold">
+            <div className="text-sm font-bold break-words">
               {templateType === 'contract' &&
                 `ДОГОВОР КУПЛИ-ПРОДАЖИ ТОВАРА В РАССРОЧКУ № ${contract.contractNumber}`}
               {templateType === 'schedule' &&
@@ -2690,7 +2690,7 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
             <div className="text-slate-500 mt-1">Дата составления: {formatDateRu(contract.startDate)}</div>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-2 break-words">
             <p>
               <strong>Продавец:</strong> {sellerTitle}
             </p>
@@ -2709,7 +2709,7 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
               </div>
               <div className="space-y-1.5">
                 {guarantors.map((g, idx) => (
-                  <div key={g.id} className="text-xs border-b border-slate-200 last:border-b-0 pb-1.5 last:pb-0">
+                  <div key={g.id} className="text-xs border-b border-slate-200 last:border-b-0 pb-1.5 last:pb-0 break-words">
                     <strong>Поручитель №{idx + 1}:</strong> {g.fullName} · Тел.: {g.phone}
                     {g.secondaryPhone ? `, доп. тел.: ${g.secondaryPhone}` : ''}
                     {g.documentRef ? ` · Паспорт: ${g.documentRef}` : ''}
@@ -2724,19 +2724,19 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg font-mono">
             <div>
               <div className="text-[11px] font-sans text-slate-500">Цена продажи в рассрочку</div>
-              <div className="font-semibold">{formatMoney(contract.salePriceKopecks)}</div>
+              <div className="font-semibold break-words">{formatMoney(contract.salePriceKopecks)}</div>
             </div>
             <div>
               <div className="text-[11px] font-sans text-slate-500">Первоначальный взнос</div>
-              <div className="font-semibold">{formatMoney(contract.downPaymentKopecks)}</div>
+              <div className="font-semibold break-words">{formatMoney(contract.downPaymentKopecks)}</div>
             </div>
             <div>
               <div className="text-[11px] font-sans text-slate-500">Остаток к погашению</div>
-              <div className="font-semibold">{formatMoney(contract.financedPrincipalKopecks)}</div>
+              <div className="font-semibold break-words">{formatMoney(contract.financedPrincipalKopecks)}</div>
             </div>
             <div>
               <div className="text-[11px] font-sans text-slate-500">Текущий остаток долга</div>
-              <div className="font-semibold">{formatMoney(contract.remainingDebtKopecks)}</div>
+              <div className="font-semibold break-words">{formatMoney(contract.remainingDebtKopecks)}</div>
             </div>
           </div>
 
@@ -2745,39 +2745,41 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
               <div className="font-semibold mb-2">
                 Утверждённый график ежемесячных платежей ({contract.termMonths} мес.):
               </div>
-              <table className="w-full border-collapse border border-slate-300 text-xs font-mono">
-                <thead>
-                  <tr className="bg-slate-50 font-sans">
-                    <th className="border border-slate-300 p-1.5 text-left">№</th>
-                    <th className="border border-slate-300 p-1.5 text-left">Дата платежа</th>
-                    <th className="border border-slate-300 p-1.5 text-right">Сумма по графику</th>
-                    <th className="border border-slate-300 p-1.5 text-right">Фактически внесено</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {contract.schedule.map((item) => (
-                    <tr key={item.id}>
-                      <td className="border border-slate-300 p-1.5">{item.installmentNumber}</td>
-                      <td className="border border-slate-300 p-1.5">{formatDateRu(item.dueDate)}</td>
-                      <td className="border border-slate-300 p-1.5 text-right">
-                        {formatMoney(item.plannedKopecks)}
-                      </td>
-                      <td className="border border-slate-300 p-1.5 text-right">
-                        {formatMoney(item.paidKopecks)}
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[460px] border-collapse border border-slate-300 text-xs font-mono">
+                  <thead>
+                    <tr className="bg-slate-50 font-sans">
+                      <th className="border border-slate-300 p-1.5 text-left">№</th>
+                      <th className="border border-slate-300 p-1.5 text-left">Дата платежа</th>
+                      <th className="border border-slate-300 p-1.5 text-right">Сумма по графику</th>
+                      <th className="border border-slate-300 p-1.5 text-right">Фактически внесено</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {contract.schedule.map((item) => (
+                      <tr key={item.id}>
+                        <td className="border border-slate-300 p-1.5">{item.installmentNumber}</td>
+                        <td className="border border-slate-300 p-1.5">{formatDateRu(item.dueDate)}</td>
+                        <td className="border border-slate-300 p-1.5 text-right">
+                          {formatMoney(item.plannedKopecks)}
+                        </td>
+                        <td className="border border-slate-300 p-1.5 text-right">
+                          {formatMoney(item.paidKopecks)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
           <div className="pt-8 space-y-6 text-xs">
-            <div className="grid grid-cols-2 gap-8">
-              <div className="border-t border-slate-400 pt-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 sm:gap-8">
+              <div className="border-t border-slate-400 pt-2 break-words">
                 Подпись Продавца: ______________________
               </div>
-              <div className="border-t border-slate-400 pt-2">
+              <div className="border-t border-slate-400 pt-2 break-words">
                 Подпись Покупателя ({contract.clientName}): ______________________
               </div>
             </div>

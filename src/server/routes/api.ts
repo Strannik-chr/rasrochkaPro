@@ -1027,6 +1027,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       )
       .all() as Array<Record<string, unknown>>;
 
+    const overdueThresholdDays = Math.max(1, Math.trunc(Number(statusRules.gracePeriodDays ?? 3)));
+
     const contracts = contractsRaw.map((c) => {
       const cId = String(c.id);
       const currentVer = Number(c.current_schedule_version);
@@ -1043,12 +1045,20 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           if (
             Number(i.schedule_version) === currentVer &&
             remaining > 0 &&
-            daysOverdue > statusRules.gracePeriodDays &&
+            daysOverdue >= overdueThresholdDays &&
             dueDate < todayIso
           ) {
             status = 'overdue';
           } else if (remaining === 0 && status !== 'superseded' && status !== 'waived') {
             status = 'paid';
+          } else if (
+            Number(i.schedule_version) === currentVer &&
+            remaining > 0 &&
+            daysOverdue < overdueThresholdDays &&
+            status !== 'superseded' &&
+            status !== 'waived'
+          ) {
+            status = paid > 0 ? 'partial' : 'pending';
           } else if (paid > 0 && remaining > 0 && status !== 'overdue') {
             status = 'partial';
           }
@@ -1084,7 +1094,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const overdueKopecks =
         c.status === 'active' || c.status === 'restructured'
           ? activeSchedule
-              .filter((i) => i.daysOverdue > statusRules.gracePeriodDays)
+              .filter((i) => i.daysOverdue >= overdueThresholdDays)
               .reduce((acc, i) => acc + i.remainingKopecks, 0)
           : 0;
 
@@ -1415,7 +1425,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     for (const c of contracts) {
       if (c.status !== 'active' && c.status !== 'restructured') continue;
       for (const item of c.schedule) {
-        if (item.daysOverdue > 0 && item.remainingKopecks > 0) {
+        if (item.daysOverdue >= overdueThresholdDays && item.remainingKopecks > 0) {
           const itemContacts = overdueContactsRaw
             .filter((oc) => String(oc.schedule_item_id) === item.id)
             .map((oc) => ({

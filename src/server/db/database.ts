@@ -351,7 +351,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS status_rules_config (
       id TEXT PRIMARY KEY,
-      grace_period_days INTEGER NOT NULL DEFAULT 0 CHECK (grace_period_days >= 0 AND grace_period_days <= 60),
+      grace_period_days INTEGER NOT NULL DEFAULT 3 CHECK (grace_period_days >= 0 AND grace_period_days <= 60),
       complex_min_overdue_days INTEGER NOT NULL DEFAULT 15 CHECK (complex_min_overdue_days >= 1 AND complex_min_overdue_days <= 365),
       complex_consecutive_missed_count INTEGER NOT NULL DEFAULT 2 CHECK (complex_consecutive_missed_count >= 1 AND complex_consecutive_missed_count <= 24),
       complex_min_overdue_kopecks INTEGER NOT NULL DEFAULT 3000000 CHECK (complex_min_overdue_kopecks >= 100),
@@ -541,18 +541,25 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     db.exec('ALTER TABLE contracts ADD COLUMN idempotency_key TEXT;');
   }
 
-  // Ensure default status_rules_config row exists without overwriting existing admin customizations
+  // Ensure default status_rules_config row exists with 3-day payment window without overwriting admin customizations
   const rulesRow = db
-    .prepare("SELECT id FROM status_rules_config WHERE id = 'default'")
-    .get() as { id: string } | undefined;
+    .prepare("SELECT id, grace_period_days, updated_by FROM status_rules_config WHERE id = 'default'")
+    .get() as { id: string; grace_period_days: number; updated_by: string | null } | undefined;
   if (!rulesRow) {
     db.prepare(`
       INSERT INTO status_rules_config (
         id, grace_period_days, complex_min_overdue_days,
         complex_consecutive_missed_count, complex_min_overdue_kopecks,
         reliable_max_past_late_count, updated_by, updated_at
-      ) VALUES ('default', 0, 15, 2, 3000000, 3, 'system', ?)
+      ) VALUES ('default', 3, 15, 2, 3000000, 3, 'system', ?)
     `).run(new Date().toISOString());
+  } else if (
+    rulesRow.grace_period_days === 0 &&
+    (!rulesRow.updated_by || rulesRow.updated_by === 'system')
+  ) {
+    db.prepare(
+      "UPDATE status_rules_config SET grace_period_days = 3, updated_at = ? WHERE id = 'default'"
+    ).run(new Date().toISOString());
   }
 
   // Non-destructively normalize only legacy user phone numbers that are not yet in E.164 format (+7XXXXXXXXXX).
@@ -617,6 +624,11 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     db,
     '006_contract_guarantors',
     'Поддержка одного или нескольких поручителей по договору рассрочки и документов поручителей'
+  );
+  recordMigration(
+    db,
+    '007_three_day_grace_period_status',
+    'Автоматическая смена статуса при неоплате в течение 3 дней после наступления даты платежа'
   );
 
   // Sync documents/photos between SQLite and disk so nothing is ever lost after updates

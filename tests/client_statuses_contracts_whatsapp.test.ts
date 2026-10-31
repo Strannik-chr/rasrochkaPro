@@ -93,7 +93,57 @@ test('Unit & Domain: Все 5 статусов («VIP», «Надёжный», �
   const reliableContract = evaluateContractStatus(reliableContractInput, DEFAULT_STATUS_RULES);
   assert.equal(reliableContract.status, 'reliable');
 
-  // 4. Частичная оплата просроченного платежа НЕ считается полным погашением -> 'watch' («Под наблюдением»)
+  // 4. В течение первых дней (< 3 дней после наступления даты оплаты) статус НЕ ухудшается,
+  // а если в течение 3 дней после наступления даты оплаты не заплатил (daysOverdue >= 3) -> статус меняется на 'watch' («Под наблюдением»)
+  const day2GraceContractInput: ContractEvalInput = {
+    id: 'cnt_grace_2d',
+    contractNumber: 'ДГ-2026-0003А',
+    status: 'active',
+    currentScheduleVersion: 1,
+    remainingDebtKopecks: 1000000,
+    overdueKopecks: 0,
+    schedule: [
+      {
+        id: 'si_g2',
+        installmentNumber: 1,
+        dueDate: '2026-10-29',
+        originalDueDate: '2026-10-29',
+        plannedKopecks: 1000000,
+        paidKopecks: 0,
+        remainingKopecks: 1000000,
+        status: 'pending',
+        daysOverdue: 2, // 2 дня после даты оплаты (< 3 дней)
+      },
+    ],
+  };
+  const day2GraceContract = evaluateContractStatus(day2GraceContractInput, DEFAULT_STATUS_RULES);
+  assert.equal(day2GraceContract.status, 'vip');
+
+  const day3OverdueContractInput: ContractEvalInput = {
+    id: 'cnt_overdue_3d',
+    contractNumber: 'ДГ-2026-0003Б',
+    status: 'active',
+    currentScheduleVersion: 1,
+    remainingDebtKopecks: 1000000,
+    overdueKopecks: 1000000,
+    schedule: [
+      {
+        id: 'si_o3',
+        installmentNumber: 1,
+        dueDate: '2026-10-28',
+        originalDueDate: '2026-10-28',
+        plannedKopecks: 1000000,
+        paidKopecks: 0,
+        remainingKopecks: 1000000,
+        status: 'overdue',
+        daysOverdue: 3, // ровно 3 дня после даты оплаты не заплатил -> статус меняется на 'watch'
+      },
+    ],
+  };
+  const day3OverdueContract = evaluateContractStatus(day3OverdueContractInput, DEFAULT_STATUS_RULES);
+  assert.equal(day3OverdueContract.status, 'watch');
+
+  // Частичная оплата просроченного платежа НЕ считается полным погашением -> 'watch' («Под наблюдением»)
   const watchContractInput: ContractEvalInput = {
     id: 'cnt_watch',
     contractNumber: 'ДГ-2026-0003',

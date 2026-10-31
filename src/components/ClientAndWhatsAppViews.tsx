@@ -500,30 +500,66 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
     }
   };
 
+  const allBorrowerGuarantors = useMemo(() => {
+    const list: Array<{
+      contract: ContractDTO;
+      guarantor: NonNullable<ContractDTO['guarantors']>[number];
+    }> = [];
+    for (const cnt of clientContracts) {
+      for (const g of cnt.guarantors || []) {
+        list.push({ contract: cnt, guarantor: g });
+      }
+    }
+    return list;
+  }, [clientContracts]);
+
+  const handleRemoveGuarantor = async (contractId: string, guarantorId: string, fullName: string) => {
+    setError(null);
+    setNotice(null);
+    try {
+      await apiFetch(`/api/v1/contracts/${contractId}/guarantors/${guarantorId}`, {
+        method: 'DELETE',
+      });
+      await onRefresh();
+      setNotice(`Поручитель «${fullName}» откреплён от договора.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка удаления поручителя');
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-4xl max-h-[92vh] overflow-y-auto p-6 space-y-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-2 sm:p-4 overflow-y-auto">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-4xl max-h-[94vh] overflow-y-auto p-4 sm:p-6 space-y-5 shadow-xl">
         {/* Header */}
-        <div className="flex flex-wrap items-start justify-between gap-3 pb-4 border-b border-slate-200">
-          <div>
-            <div className="flex flex-wrap items-center gap-2.5">
-              <h2 className="text-lg font-semibold text-slate-900">{client.fullName}</h2>
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 pb-4 border-b border-slate-200">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900 break-words">
+                {client.fullName}
+              </h2>
               <span
-                className={`px-2.5 py-0.5 text-xs font-medium border rounded-md inline-flex items-center gap-1.5 ${statusMeta.badgeClass}`}
+                className={`px-2.5 py-0.5 text-xs font-medium border rounded-md inline-flex items-center gap-1.5 shrink-0 ${statusMeta.badgeClass}`}
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${statusMeta.dotClass}`} />
                 <span>{statusMeta.label}</span>
               </span>
             </div>
-            <div className="text-xs text-slate-500 mt-1 font-mono">
-              Основной телефон: {client.phone}
-              {client.secondaryPhone ? ` · Доп. телефон: ${client.secondaryPhone}` : ''}
-              {client.documentRef ? ` · Паспорт: ${client.documentRef}` : ''}
-              {client.address ? ` · Адрес: ${client.address}` : ''}
+            <div className="text-xs text-slate-600 mt-1.5 font-mono break-words space-y-0.5">
+              <div>
+                Основной телефон: <span className="font-semibold text-slate-900">{client.phone}</span>
+                {client.secondaryPhone ? ` · Доп. телефон: ${client.secondaryPhone}` : ''}
+              </div>
+              {(client.documentRef || client.address) && (
+                <div className="text-slate-500">
+                  {client.documentRef ? `Паспорт: ${client.documentRef}` : ''}
+                  {client.documentRef && client.address ? ' · ' : ''}
+                  {client.address ? `Адрес: ${client.address}` : ''}
+                </div>
+              )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <QuickCallAndCopyBar
               phone={client.phone}
               clientName={client.fullName}
@@ -533,14 +569,15 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
             <button
               type="button"
               onClick={() => onEditClient(client)}
-              className="px-3 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
             >
               Изменить анкету
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg"
+              className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg hover:bg-slate-100 ml-auto sm:ml-0"
+              aria-label="Закрыть карточку"
             >
               <X className="w-5 h-5" />
             </button>
@@ -548,75 +585,191 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
         </div>
 
         {notice && (
-          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 flex items-center justify-between">
-            <span>{notice}</span>
-            <button onClick={() => setNotice(null)} className="text-emerald-700 font-medium">
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 flex items-center justify-between gap-2">
+            <span className="break-words">{notice}</span>
+            <button onClick={() => setNotice(null)} className="text-emerald-700 font-medium shrink-0">
               Закрыть
             </button>
           </div>
         )}
 
         {error && (
-          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 flex items-center justify-between">
-            <span>{error}</span>
-            <button onClick={() => setError(null)} className="text-red-700 font-medium">
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 flex items-center justify-between gap-2">
+            <span className="break-words">{error}</span>
+            <button onClick={() => setError(null)} className="text-red-700 font-medium shrink-0">
               Закрыть
             </button>
           </div>
         )}
 
         {/* Why this status was assigned */}
-        <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
+        <div className="p-3.5 sm:p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-1.5">
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
-            <Info className="w-4 h-4 text-slate-700" />
+            <Info className="w-4 h-4 text-slate-700 shrink-0" />
             <span>Обоснование присвоенного статуса («{statusMeta.label}»)</span>
           </div>
-          <p className="text-xs text-slate-700 leading-relaxed">
+          <p className="text-xs text-slate-700 leading-relaxed break-words">
             {client.paymentStatusReason || statusMeta.description}
           </p>
         </div>
 
         {/* Summary KPIs */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="p-3.5 border border-slate-200 rounded-xl bg-white">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
+          <div className="p-3 sm:p-3.5 border border-slate-200 rounded-xl bg-white">
             <div className="text-[11px] text-slate-500">Активных договоров</div>
-            <div className="text-base font-semibold font-mono text-slate-900 mt-1">
+            <div className="text-sm sm:text-base font-semibold font-mono text-slate-900 mt-1">
               {client.activeContractsCount ?? 0}
               {client.completedContractsCount ? (
-                <span className="text-xs font-normal text-slate-500 ml-1.5">
-                  (закрыто: {client.completedContractsCount})
+                <span className="text-xs font-normal text-slate-500 ml-1">
+                  (закр.: {client.completedContractsCount})
                 </span>
               ) : null}
             </div>
           </div>
-          <div className="p-3.5 border border-slate-200 rounded-xl bg-white">
+          <div className="p-3 sm:p-3.5 border border-slate-200 rounded-xl bg-white">
             <div className="text-[11px] text-slate-500">Сумма оставшегося долга</div>
-            <div className="text-base font-semibold font-mono text-slate-900 mt-1">
+            <div className="text-sm sm:text-base font-semibold font-mono text-slate-900 mt-1 break-words">
               {formatMoney(client.totalRemainingDebtKopecks || 0)}
             </div>
           </div>
-          <div className="p-3.5 border border-slate-200 rounded-xl bg-white">
+          <div className="p-3 sm:p-3.5 border border-slate-200 rounded-xl bg-white">
             <div className="text-[11px] text-slate-500">Сумма текущей просрочки</div>
             <div
-              className={`text-base font-semibold font-mono mt-1 ${
+              className={`text-sm sm:text-base font-semibold font-mono mt-1 break-words ${
                 (client.totalOverdueKopecks || 0) > 0 ? 'text-red-600' : 'text-emerald-700'
               }`}
             >
               {formatMoney(client.totalOverdueKopecks || 0)}
             </div>
           </div>
-          <div className="p-3.5 border border-slate-200 rounded-xl bg-white">
-            <div className="text-[11px] text-slate-500">Дата ближайшего платежа</div>
-            <div className="text-base font-semibold font-mono text-slate-900 mt-1">
+          <div className="p-3 sm:p-3.5 border border-slate-200 rounded-xl bg-white">
+            <div className="text-[11px] text-slate-500">Ближайший платёж</div>
+            <div className="text-sm sm:text-base font-semibold font-mono text-slate-900 mt-1">
               {client.nextPaymentDate ? formatDateRu(client.nextPaymentDate) : 'Нет предстоящих'}
             </div>
           </div>
         </div>
 
+        {/* Dedicated Guarantors Block for this Borrower */}
+        <div className="p-4 rounded-xl border border-indigo-200 bg-indigo-50/40 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                Поручители заёмщика по оформленным рассрочкам ({allBorrowerGuarantors.length})
+              </h3>
+              <p className="text-[11px] text-slate-600">
+                Контактные данные, паспорта и документы поручителей, привязанных к договорам клиента {client.fullName}.
+              </p>
+            </div>
+          </div>
+
+          {allBorrowerGuarantors.length === 0 ? (
+            <div className="p-3 bg-white/80 border border-slate-200 rounded-lg text-xs text-slate-600">
+              По договорам этого заёмщика поручители не указаны (оформлено без поручителей).
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {allBorrowerGuarantors.map(({ contract: cnt, guarantor: g }) => {
+                const guarantorDocs = documents.filter(
+                  (d) =>
+                    !d.isArchived &&
+                    (d.contractId === cnt.id ||
+                      (d.entityType === 'contract' && d.entityId === cnt.id)) &&
+                    ((d.docCategory as string) === 'guarantor_id' ||
+                      d.title.toLowerCase().includes('поручител') ||
+                      d.title.toLowerCase().includes(g.fullName.toLowerCase()))
+                );
+                return (
+                  <div
+                    key={`${cnt.id}-${g.id}`}
+                    className="p-3.5 bg-white border border-indigo-200 rounded-xl text-xs space-y-2 shadow-2xs"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="px-2 py-0.5 text-[10px] font-semibold bg-indigo-100 text-indigo-900 rounded">
+                            Поручитель №{g.guarantorOrder}
+                          </span>
+                          <span className="font-bold text-slate-900 text-sm break-words">
+                            {g.fullName}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5 font-mono">
+                          Договор: <strong className="text-slate-800">{cnt.contractNumber}</strong> · {cnt.itemTitle}
+                        </div>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 text-[10px] rounded font-medium shrink-0 ${
+                          g.signedGuaranteeReceived
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {g.signedGuaranteeReceived ? 'Поручительство подписано' : 'Без подписи'}
+                      </span>
+                    </div>
+
+                    <div className="text-xs text-slate-700 font-mono space-y-0.5 break-words">
+                      <div>
+                        Тел.: <strong className="text-slate-900">{g.phone}</strong>
+                        {g.secondaryPhone ? ` · Доп.: ${g.secondaryPhone}` : ''}
+                      </div>
+                      {(g.documentRef || g.address) && (
+                        <div className="text-[11px] text-slate-600 font-sans">
+                          {g.documentRef ? `Паспорт: ${g.documentRef}` : ''}
+                          {g.documentRef && g.address ? ' · ' : ''}
+                          {g.address ? `Адрес: ${g.address}` : ''}
+                        </div>
+                      )}
+                      {g.notes && (
+                        <div className="text-[11px] text-slate-500 italic font-sans">
+                          Прим.: {g.notes}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="pt-1.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                      <QuickCallAndCopyBar
+                        phone={g.phone}
+                        clientName={`Поручитель ${g.fullName}`}
+                        onNotice={setNotice}
+                        onError={setError}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveGuarantor(cnt.id, g.id, g.fullName)}
+                        className="text-[11px] text-red-600 hover:text-red-800 underline"
+                      >
+                        Открепить
+                      </button>
+                    </div>
+
+                    {guarantorDocs.length > 0 && (
+                      <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1.5">
+                        {guarantorDocs.map((gDoc) => (
+                          <button
+                            key={gDoc.id}
+                            type="button"
+                            onClick={() => setPreviewDoc(gDoc)}
+                            className="px-2 py-1 text-[11px] bg-slate-50 border border-slate-200 rounded hover:bg-slate-100 inline-flex items-center gap-1 text-slate-700"
+                          >
+                            <Eye className="w-3 h-3 text-slate-500" />
+                            <span className="truncate max-w-[160px]">{gDoc.originalFilename}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         {/* Contracts of this client */}
         <div className="space-y-3">
           <h3 className="text-sm font-semibold text-slate-900">
-            Договоры клиента ({clientContracts.length})
+            Договоры заёмщика ({clientContracts.length})
           </h3>
           {clientContracts.length === 0 ? (
             <div className="p-4 border border-slate-200 rounded-xl text-xs text-slate-500 bg-slate-50">
@@ -637,13 +790,13 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                     key={cnt.id}
                     className="p-3.5 border border-slate-200 rounded-xl bg-white space-y-2.5"
                   >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-2">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-xs font-mono font-semibold text-slate-900">
                             {cnt.contractNumber}
                           </span>
-                          <span className="text-xs font-medium text-slate-800">
+                          <span className="text-xs font-medium text-slate-800 break-words">
                             · {cnt.itemTitle}
                           </span>
                           <span
@@ -652,7 +805,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                             {cMeta.label}
                           </span>
                         </div>
-                        <div className="text-[11px] text-slate-500 mt-0.5">
+                        <div className="text-[11px] text-slate-500 mt-1 break-words">
                           От {formatDateRu(cnt.startDate)} · Цена продажи:{' '}
                           <span className="font-mono">{formatMoney(cnt.salePriceKopecks)}</span> ·
                           Остаток долга:{' '}
@@ -666,14 +819,14 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                           )}
                         </div>
                         {cnt.contractStatusReason && (
-                          <div className="text-[11px] text-slate-500 mt-0.5">
+                          <div className="text-[11px] text-slate-500 mt-0.5 break-words">
                             Статус договора: {cnt.contractStatusReason}
                           </div>
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <label className="px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-300 rounded-lg hover:bg-slate-100 cursor-pointer inline-flex items-center gap-1.5">
+                      <div className="flex items-center gap-2 flex-wrap shrink-0">
+                        <label className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-300 rounded-lg hover:bg-slate-100 cursor-pointer inline-flex items-center gap-1.5">
                           <Paperclip className="w-3.5 h-3.5" />
                           <span>
                             {uploadingForContractId === cnt.id
@@ -700,7 +853,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                             onClose();
                             onOpenWhatsAppForContract(cnt.id);
                           }}
-                          className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 inline-flex items-center gap-1.5"
+                          className="px-2.5 py-1.5 text-xs font-medium text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 inline-flex items-center gap-1.5"
                         >
                           <MessageCircle className="w-3.5 h-3.5" />
                           <span>Отправить в WhatsApp</span>
@@ -708,64 +861,16 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                       </div>
                     </div>
 
-                    {/* Guarantors of this contract */}
-                    {cnt.guarantors && cnt.guarantors.length > 0 && (
-                      <div className="pt-2 border-t border-slate-100 space-y-1.5">
-                        <div className="text-[11px] font-semibold text-slate-700">
-                          Поручители по договору ({cnt.guarantors.length}):
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          {cnt.guarantors.map((g) => (
-                            <div
-                              key={g.id}
-                              className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-1"
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-semibold text-slate-900">
-                                  Поручитель №{g.guarantorOrder}: {g.fullName}
-                                </span>
-                                <span
-                                  className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
-                                    g.signedGuaranteeReceived
-                                      ? 'bg-emerald-100 text-emerald-800'
-                                      : 'bg-amber-100 text-amber-800'
-                                  }`}
-                                >
-                                  {g.signedGuaranteeReceived ? 'Подписано' : 'Без подписи'}
-                                </span>
-                              </div>
-                              <div className="text-[11px] text-slate-600 font-mono">
-                                Тел.: {g.phone}
-                                {g.secondaryPhone ? ` · Доп.: ${g.secondaryPhone}` : ''}
-                              </div>
-                              {(g.documentRef || g.address) && (
-                                <div className="text-[11px] text-slate-500">
-                                  {g.documentRef ? `Паспорт: ${g.documentRef}` : ''}
-                                  {g.documentRef && g.address ? ' · ' : ''}
-                                  {g.address ? `Адрес: ${g.address}` : ''}
-                                </div>
-                              )}
-                              {g.notes && (
-                                <div className="text-[11px] text-slate-500 italic">
-                                  Прим.: {g.notes}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
                     {/* Attached contract files */}
                     {contractDocs.length > 0 && (
                       <div className="pt-2 border-t border-slate-100 flex flex-wrap gap-2">
                         {contractDocs.map((doc) => (
                           <div
                             key={doc.id}
-                            className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs flex items-center gap-2"
+                            className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs flex flex-wrap items-center gap-2 max-w-full"
                           >
                             <FileText className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-                            <span className="truncate max-w-[180px]" title={doc.originalFilename}>
+                            <span className="truncate max-w-[160px] sm:max-w-[220px]" title={doc.originalFilename}>
                               {doc.originalFilename}
                             </span>
                             <span className="text-[10px] text-slate-400 font-mono">
@@ -849,31 +954,27 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
           )}
         </div>
 
-        {/* Participation as Guarantor on other contracts */}
-        <div className="space-y-3 pt-2 border-t border-slate-200">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">
-                Поручительство по договорам других клиентов ({client.guarantorContracts?.length || 0})
-              </h3>
-              <p className="text-[11px] text-slate-500">
-                Договоры, в которых {client.fullName} выступает поручителем. Суммы этих обязательств учитываются справочно и не увеличивают личный долг плательщика.
-              </p>
+        {/* Participation as Guarantor on other contracts (only shown if applicable) */}
+        {client.guarantorContracts && client.guarantorContracts.length > 0 && (
+          <div className="space-y-3 pt-2 border-t border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Поручительство по договорам других клиентов ({client.guarantorContracts.length})
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  Договоры, в которых {client.fullName} выступает поручителем. Суммы этих обязательств учитываются справочно и не увеличивают личный долг плательщика.
+                </p>
+              </div>
             </div>
-          </div>
 
-          {!client.guarantorContracts || client.guarantorContracts.length === 0 ? (
-            <div className="p-3.5 border border-slate-200 rounded-xl text-xs text-slate-500 bg-slate-50">
-              Клиент не выступает поручителем ни по одному договору.
-            </div>
-          ) : (
             <div className="space-y-2">
               {client.guarantorContracts.map((gc) => (
                 <div
                   key={gc.id}
                   className="p-3.5 border border-indigo-200 bg-indigo-50/40 rounded-xl flex flex-wrap items-center justify-between gap-3"
                 >
-                  <div className="space-y-1">
+                  <div className="space-y-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs">
                       <span className="px-2 py-0.5 bg-indigo-100 text-indigo-900 font-semibold rounded text-[11px]">
                         Поручитель №{gc.guarantorOrder}
@@ -881,7 +982,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                       <span className="font-mono font-bold text-slate-900">
                         Договор {gc.contractNumber}
                       </span>
-                      <span className="text-slate-700 font-medium">· {gc.itemTitle}</span>
+                      <span className="text-slate-700 font-medium break-words">· {gc.itemTitle}</span>
                       <span
                         className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
                           gc.signedGuaranteeReceived
@@ -894,20 +995,20 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                           : 'Ожидает подписи'}
                       </span>
                     </div>
-                    <div className="text-xs text-slate-700">
+                    <div className="text-xs text-slate-700 break-words">
                       Основной плательщик:{' '}
                       <strong className="text-slate-900">{gc.borrowerName}</strong> · Тел.:{' '}
                       <span className="font-mono">{gc.borrowerPhone}</span> · Оформлен:{' '}
                       <span className="font-mono">{formatDateRu(gc.startDate)}</span>
                     </div>
                     {gc.notes && (
-                      <div className="text-[11px] text-slate-600 italic">
+                      <div className="text-[11px] text-slate-600 italic break-words">
                         Примечание к поручительству: {gc.notes}
                       </div>
                     )}
                   </div>
 
-                  <div className="text-right space-y-0.5">
+                  <div className="text-left sm:text-right space-y-0.5">
                     <div className="text-[11px] text-slate-500">
                       Остаток долга заёмщика:{' '}
                       <span className="font-mono font-semibold text-slate-900">
@@ -925,8 +1026,8 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                 </div>
               ))}
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* All Client & Contract Documents Section */}
         <div className="space-y-3 pt-2 border-t border-slate-200">
@@ -939,7 +1040,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                 При замене файла старый документ не удаляется, а переводится в архив версий.
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
                 <input
                   type="checkbox"
@@ -973,7 +1074,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
               {clientDocuments.map((doc) => (
                 <div
                   key={doc.id}
-                  className={`p-3 border rounded-xl flex items-center justify-between gap-3 ${
+                  className={`p-3 border rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
                     doc.isArchived
                       ? 'bg-slate-100 border-slate-300 opacity-75'
                       : 'bg-white border-slate-200'
@@ -983,7 +1084,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                     <div className="text-xs font-medium text-slate-900 truncate flex items-center gap-1.5">
                       <span className="truncate">{doc.title}</span>
                       {doc.isArchived && (
-                        <span className="px-1.5 py-0.5 text-[10px] bg-slate-200 text-slate-700 rounded">
+                        <span className="px-1.5 py-0.5 text-[10px] bg-slate-200 text-slate-700 rounded shrink-0">
                           Архив
                         </span>
                       )}
@@ -993,7 +1094,7 @@ export const ClientDetailsModal: React.FC<ClientDetailsModalProps> = ({
                       {formatDateTimeRu(doc.createdAt)}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={() => setPreviewDoc(doc)}
@@ -1140,11 +1241,24 @@ export const FindAndSendContractSection: React.FC<FindAndSendContractSectionProp
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const borrowerClients = useMemo(
+    () =>
+      clients.filter((cl) => {
+        const hasOwnContracts =
+          (cl.activeContractsCount ?? 0) > 0 ||
+          (cl.completedContractsCount ?? 0) > 0 ||
+          contracts.some((c) => c.clientId === cl.id);
+        const isPureGuarantor = !hasOwnContracts && (cl.guarantorContracts?.length || 0) > 0;
+        return !isPureGuarantor;
+      }),
+    [clients, contracts]
+  );
+
   const filteredClients = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const qDigits = q.replace(/\D/g, '');
-    if (!q) return clients;
-    return clients.filter((cl) => {
+    if (!q) return borrowerClients;
+    return borrowerClients.filter((cl) => {
       const nameMatch = cl.fullName.toLowerCase().includes(q);
       const phoneMatch =
         cl.phone.toLowerCase().includes(q) ||
@@ -1156,7 +1270,7 @@ export const FindAndSendContractSection: React.FC<FindAndSendContractSectionProp
       );
       return nameMatch || phoneMatch || contractMatch;
     });
-  }, [clients, contracts, searchQuery]);
+  }, [borrowerClients, contracts, searchQuery]);
 
   const handleAttachFileToContract = async (
     e: React.ChangeEvent<HTMLInputElement>,
@@ -1701,7 +1815,7 @@ export const StatusRulesConfigCard: React.FC<StatusRulesConfigCardProps> = ({
             Правила и пороги автоматического определения статусов клиентов
           </h3>
           <p className="text-xs text-slate-500">
-            Статусы («VIP», «Надёжный», «Под наблюдением», «Сложный», «Рассрочка закрыта») вычисляются автоматически из фактических платежей и графиков
+            Если клиент не внёс платёж в течение указанного числа дней (по умолчанию — 3 дня) после наступления даты оплаты, статус автоматически меняется на «Под наблюдением» или «Сложный»
           </p>
         </div>
       </div>
@@ -1710,7 +1824,7 @@ export const StatusRulesConfigCard: React.FC<StatusRulesConfigCardProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
           <div>
             <label className="block font-medium text-slate-700 mb-1">
-              Льготный период до просрочки (дней)
+              Смена статуса через (дней после даты оплаты)
             </label>
             <input
               type="number"

@@ -549,6 +549,20 @@ export default function App() {
   const isOwner = currentUser?.role === 'owner';
   const canWrite = currentUser?.role === 'owner' || currentUser?.role === 'staff';
 
+  // Separate borrowers ("рассрочники") from pure guarantors ("поручители") so tables don't mix them
+  const borrowerClients = useMemo(
+    () =>
+      clients.filter((cl) => {
+        const hasOwnContracts =
+          (cl.activeContractsCount ?? 0) > 0 ||
+          (cl.completedContractsCount ?? 0) > 0 ||
+          contracts.some((c) => c.clientId === cl.id);
+        const isPureGuarantor = !hasOwnContracts && (cl.guarantorContracts?.length || 0) > 0;
+        return !isPureGuarantor;
+      }),
+    [clients, contracts]
+  );
+
   // Filtered lists by searchQuery
   const q = searchQuery.trim().toLowerCase();
   const qDigits = q.replace(/\D/g, '');
@@ -568,7 +582,7 @@ export default function App() {
       )
   );
   const filteredClients = useMemo(() => {
-    const base = clients.filter((c) => {
+    const base = borrowerClients.filter((c) => {
       if (clientStatusFilter !== 'all' && (c.paymentStatus || 'new') !== clientStatusFilter) {
         return false;
       }
@@ -577,7 +591,17 @@ export default function App() {
       const phoneMatch =
         c.phone.toLowerCase().includes(q) ||
         (qDigits.length >= 3 && c.phone.replace(/\D/g, '').includes(qDigits));
-      return nameMatch || phoneMatch;
+      const guarantorMatch = contracts
+        .filter((cnt) => cnt.clientId === c.id)
+        .some((cnt) =>
+          (cnt.guarantors || []).some(
+            (g) =>
+              g.fullName.toLowerCase().includes(q) ||
+              g.phone.toLowerCase().includes(q) ||
+              (qDigits.length >= 3 && g.phone.replace(/\D/g, '').includes(qDigits))
+          )
+        );
+      return nameMatch || phoneMatch || guarantorMatch;
     });
 
     return [...base].sort((a, b) => {
@@ -595,7 +619,7 @@ export default function App() {
       }
       return a.fullName.localeCompare(b.fullName, 'ru');
     });
-  }, [clients, clientStatusFilter, clientSortBy, q, qDigits]);
+  }, [borrowerClients, contracts, clientStatusFilter, clientSortBy, q, qDigits]);
   const filteredPayments = payments.filter(
     (p) =>
       !q ||
@@ -873,14 +897,14 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F172A]">
+    <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F172A] overflow-x-hidden">
       {/* Top Bar Contract: Zone 1 (Wordmark) — Zone 2 (Quick Top Nav) — Zone 3 (Primary CTA) */}
-      <header className="sticky top-0 z-30 flex items-center justify-between gap-8 px-6 py-3.5 bg-white border-b border-slate-200 no-print">
-        <div className="flex items-center gap-3 shrink-0">
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-2 sm:gap-6 px-3 sm:px-6 py-3 bg-white border-b border-slate-200 no-print">
+        <div className="flex items-center gap-2.5 shrink-0">
           <button
             type="button"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="lg:hidden p-1.5 text-slate-600 hover:text-slate-900 rounded-lg"
+            className="lg:hidden p-1.5 text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100"
             aria-label="Открыть меню разделов"
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -891,13 +915,13 @@ export default function App() {
               e.preventDefault();
               setActiveSection('dashboard');
             }}
-            className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
+            className="text-base sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display"
           >
             РассрочкаПро
           </a>
         </div>
 
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+        <nav className="hidden xl:flex items-center gap-5 text-xs xl:text-sm font-medium text-slate-600 overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveSection('dashboard')}
@@ -968,12 +992,12 @@ export default function App() {
           </button>
         </nav>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => setShowNewContractModal(true)}
             disabled={!canWrite}
-            className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+            className="px-3 sm:px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
           >
             Оформить договор
           </button>
@@ -981,16 +1005,36 @@ export default function App() {
       </header>
 
       {/* Main Workspace Container */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden relative">
+        {mobileMenuOpen && (
+          <div
+            className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+        )}
+
         {/* Sidebar Navigation (14 Required Modules) */}
         <aside
           className={`${
-            mobileMenuOpen ? 'fixed inset-y-0 left-0 z-40 w-72 bg-white shadow-xl' : 'hidden lg:flex lg:w-64'
+            mobileMenuOpen
+              ? 'fixed inset-y-0 left-0 z-40 w-72 max-w-[85vw] bg-white shadow-xl flex'
+              : 'hidden lg:flex lg:w-64'
           } flex-col border-r border-slate-200 bg-white shrink-0 no-print overflow-y-auto`}
         >
           <div className="p-4 border-b border-slate-200 space-y-2">
-            <div className="text-xs text-slate-500">
-              Телефон: <strong className="font-mono text-slate-900">{currentUser.phone || currentUser.fullName}</strong>
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs text-slate-500 min-w-0 truncate">
+                Телефон: <strong className="font-mono text-slate-900">{currentUser.phone || currentUser.fullName}</strong>
+              </div>
+              {mobileMenuOpen && (
+                <button
+                  type="button"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="lg:hidden p-1 text-slate-400 hover:text-slate-900 rounded"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
             <div className="text-[11px] text-slate-500 truncate">{currentUser.fullName}</div>
             <div className="text-xs text-slate-500 flex items-center justify-between pt-1">
@@ -1000,7 +1044,10 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => setShowChangePasswordModal(true)}
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    setShowChangePasswordModal(true);
+                  }}
                   className="text-xs font-medium text-slate-700 hover:text-slate-900 underline"
                 >
                   Пароль
@@ -1039,7 +1086,7 @@ export default function App() {
                               setActiveSection(item.id);
                               setMobileMenuOpen(false);
                             }}
-                            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap truncate ${
+                            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors break-words ${
                               active
                                 ? 'bg-slate-900 text-white'
                                 : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
@@ -1073,9 +1120,9 @@ export default function App() {
         </aside>
 
         {/* Main Content Viewport */}
-        <main className="flex-1 overflow-y-auto p-6 max-w-[1440px] mx-auto w-full space-y-6">
+        <main className="flex-1 overflow-y-auto p-3 sm:p-6 max-w-[1440px] mx-auto w-full min-w-0 space-y-5 sm:space-y-6">
           {/* Workspace Toolbar: Search & Quick Actions */}
-          <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-200 no-print">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 no-print">
             <div className="relative w-full sm:w-80">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
@@ -1087,12 +1134,12 @@ export default function App() {
               />
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setShowNewPaymentModal(true)}
                 disabled={!canWrite}
-                className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0 flex items-center gap-1.5"
+                className="flex-1 sm:flex-initial justify-center px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Принять платёж</span>
@@ -1100,7 +1147,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => loadFullState()}
-                className="px-3 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:text-slate-900 whitespace-nowrap shrink-0 flex items-center gap-1.5"
+                className="flex-1 sm:flex-initial justify-center px-3 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:text-slate-900 whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Сверить регистры</span>
@@ -1116,15 +1163,15 @@ export default function App() {
                   : 'bg-red-50 border-red-200 text-red-900'
               }`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 {bannerNotice.type === 'success' ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
                 ) : (
                   <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
                 )}
-                <span>{bannerNotice.text}</span>
+                <span className="break-words">{bannerNotice.text}</span>
               </div>
-              <button onClick={() => setBannerNotice(null)} className="text-slate-500 hover:text-slate-900">
+              <button onClick={() => setBannerNotice(null)} className="text-slate-500 hover:text-slate-900 shrink-0">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1140,7 +1187,7 @@ export default function App() {
               {activeSection === 'dashboard' && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
                       Финансовая сводка и контроль задолженностей
                     </h1>
                     <p className="text-xs text-slate-500 mt-1">
@@ -1149,44 +1196,44 @@ export default function App() {
                   </div>
 
                   {/* Primary Financial Strip */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
                       <div className="text-xs text-slate-500">
                         Фактические денежные остатки (Касса + Банк)
                       </div>
-                      <div className="text-2xl font-bold font-mono text-slate-900 mt-1.5">
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-1.5 break-words">
                         {formatMoney(financialMetrics.totalLiquidityKopecks)}
                       </div>
-                      <div className="text-xs text-slate-500 mt-2 font-mono">
+                      <div className="text-xs text-slate-500 mt-2 font-mono break-words">
                         Наличные: {formatMoney(financialMetrics.totalCashKopecks)} · Банк:{' '}
                         {formatMoney(financialMetrics.totalBankKopecks)}
                       </div>
                     </div>
 
-                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
                       <div className="text-xs text-slate-500">
                         Общая задолженность клиентов (ожидаемые поступления)
                       </div>
-                      <div className="text-2xl font-bold font-mono text-slate-900 mt-1.5">
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-1.5 break-words">
                         {formatMoney(financialMetrics.totalClientDebtKopecks)}
                       </div>
                       <div className="text-xs text-slate-500 mt-2">
-                        Активных договоров: {contracts.filter((c) => c.status === 'active' || c.status === 'restructured').length} · Клиентов: {clients.length}
+                        Активных договоров: {contracts.filter((c) => c.status === 'active' || c.status === 'restructured').length} · Заёмщиков: {borrowerClients.length}
                       </div>
                     </div>
 
-                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
                       <div className="text-xs text-slate-500">
                         Просроченная задолженность (без авто-штрафов)
                       </div>
                       <div
-                        className={`text-2xl font-bold font-mono mt-1.5 ${
+                        className={`text-xl sm:text-2xl font-bold font-mono mt-1.5 break-words ${
                           financialMetrics.totalOverdueKopecks > 0 ? 'text-red-600' : 'text-emerald-700'
                         }`}
                       >
                         {formatMoney(financialMetrics.totalOverdueKopecks)}
                       </div>
-                      <div className="text-xs text-slate-500 mt-2">
+                      <div className="text-xs text-slate-500 mt-2 break-words">
                         Просроченных платежей: {overdues.length} · Нераспределённых поступлений:{' '}
                         <span className="font-mono font-medium text-amber-700">
                           {formatMoney(financialMetrics.totalUnallocatedPaymentsKopecks)}
@@ -1194,46 +1241,133 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
                       <div className="text-xs text-slate-500">
                         Управленческая прибыль (реализованная наценка − опер. расходы)
                       </div>
-                      <div className="text-2xl font-bold font-mono text-emerald-700 mt-1.5">
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-700 mt-1.5 break-words">
                         {formatMoney(financialMetrics.managementNetProfitKopecks)}
                       </div>
-                      <div className="text-xs text-slate-500 mt-2 font-mono">
+                      <div className="text-xs text-slate-500 mt-2 font-mono break-words">
                         Обязательства поставщикам: {formatMoney(financialMetrics.supplierObligationsKopecks)}
                       </div>
                     </div>
                   </div>
 
-
-
-                  {/* Active Contracts Overview Table */}
+                  {/* Active Contracts Overview Table & Mobile Cards */}
                   <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                    <div className="px-4 sm:px-5 py-3.5 sm:py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
                       <div>
-                        <h2 className="text-base font-semibold text-slate-900">
+                        <h2 className="text-sm sm:text-base font-semibold text-slate-900">
                           Действующие договоры рассрочки
                         </h2>
                         <p className="text-xs text-slate-500 mt-0.5">
-                          Нажмите «График / Досрочное» для просмотра версий графика и расчёта досрочного погашения
+                          Нажмите на ФИО заёмщика для просмотра его карточки и поручителей
                         </p>
                       </div>
                       <button
                         type="button"
                         onClick={() => setActiveSection('contracts')}
-                        className="text-xs font-medium text-slate-700 hover:text-slate-900 underline"
+                        className="text-xs font-medium text-slate-700 hover:text-slate-900 underline shrink-0"
                       >
                         Все договоры ({contracts.length})
                       </button>
                     </div>
-                    <div className="overflow-x-auto">
+
+                    {/* Mobile Card View */}
+                    <div className="md:hidden divide-y divide-slate-100">
+                      {filteredContracts.map((c) => {
+                        const waDirectUrl = buildDirectWhatsAppUrl(c.clientPhone);
+                        return (
+                          <div key={c.id} className="p-4 space-y-3 text-xs">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewingClientCardId(c.clientId)}
+                                  className="text-sm font-bold text-slate-900 hover:underline text-left break-words"
+                                >
+                                  {c.clientName}
+                                </button>
+                                <div className="text-slate-600 mt-0.5 break-words">
+                                  {c.itemTitle}
+                                </div>
+                                <div className="font-mono text-[11px] text-slate-500 mt-0.5">
+                                  {c.contractNumber} · от {formatDateRu(c.startDate)} · {c.termMonths} мес. ({c.markupPercent}%)
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 p-2.5 bg-slate-50 rounded-lg font-mono text-[11px]">
+                              <div>
+                                <div className="font-sans text-slate-500">Себестоимость</div>
+                                <div className="text-slate-800">{formatMoney(c.totalCostKopecks)}</div>
+                              </div>
+                              <div>
+                                <div className="font-sans text-slate-500">Цена продажи</div>
+                                <div className="font-semibold text-slate-900">{formatMoney(c.salePriceKopecks)}</div>
+                              </div>
+                              <div>
+                                <div className="font-sans text-slate-500">Внесено всего</div>
+                                <div className="text-emerald-700 font-medium">{formatMoney(c.totalCollectedKopecks)}</div>
+                              </div>
+                              <div>
+                                <div className="font-sans text-slate-500">Остаток долга</div>
+                                <div className="font-bold text-slate-900">{formatMoney(c.remainingDebtKopecks)}</div>
+                                {c.overdueKopecks > 0 && (
+                                  <div className="text-red-600 text-[10px]">
+                                    Просрочка: {formatMoney(c.overdueKopecks)}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setViewingClientCardId(c.clientId)}
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-900 bg-slate-100 border border-slate-300 rounded-lg"
+                              >
+                                Карточка / Поручители ({c.guarantors?.length || 0})
+                              </button>
+                              {waDirectUrl && (
+                                <a
+                                  href={waDirectUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-2.5 py-1.5 text-xs font-medium text-white bg-emerald-600 border border-emerald-700 rounded-lg inline-flex items-center gap-1"
+                                >
+                                  <MessageCircle className="w-3.5 h-3.5" />
+                                  <span>WA</span>
+                                </a>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setEarlyPayoffContract(c)}
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg"
+                              >
+                                Досрочное
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRestructureContract(c)}
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg"
+                              >
+                                График (v{c.currentScheduleVersion})
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Desktop Table View */}
+                    <div className="hidden md:block overflow-x-auto">
                       <table className="w-full text-left border-collapse text-xs">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
                             <th className="py-3 px-4 font-medium">Договор и дата</th>
-                            <th className="py-3 px-4 font-medium">Клиент и товар</th>
+                            <th className="py-3 px-4 font-medium">Заёмщик и товар</th>
                             <th className="py-3 px-4 font-medium text-right">Себестоимость</th>
                             <th className="py-3 px-4 font-medium text-right">Цена продажи</th>
                             <th className="py-3 px-4 font-medium text-right">Внесено всего</th>
@@ -1256,19 +1390,26 @@ export default function App() {
                                   </div>
                                 </td>
                                 <td className="py-3 px-4">
-                                  <div className="font-medium text-slate-900">{c.clientName}</div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setViewingClientCardId(c.clientId)}
+                                    className="font-semibold text-slate-900 hover:underline text-left"
+                                    title="Открыть карточку заёмщика и список поручителей"
+                                  >
+                                    {c.clientName}
+                                  </button>
                                   <div className="text-slate-500 mt-0.5">{c.itemTitle}</div>
                                 </td>
-                                <td className="py-3 px-4 font-mono text-right text-slate-700">
+                                <td className="py-3 px-4 font-mono text-right text-slate-700 whitespace-nowrap">
                                   {formatMoney(c.totalCostKopecks)}
                                 </td>
-                                <td className="py-3 px-4 font-mono text-right font-medium text-slate-900">
+                                <td className="py-3 px-4 font-mono text-right font-medium text-slate-900 whitespace-nowrap">
                                   {formatMoney(c.salePriceKopecks)}
                                 </td>
-                                <td className="py-3 px-4 font-mono text-right text-emerald-700">
+                                <td className="py-3 px-4 font-mono text-right text-emerald-700 whitespace-nowrap">
                                   {formatMoney(c.totalCollectedKopecks)}
                                 </td>
-                                <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
+                                <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900 whitespace-nowrap">
                                   {formatMoney(c.remainingDebtKopecks)}
                                   {c.overdueKopecks > 0 && (
                                     <div className="text-[11px] text-red-600 font-normal">
@@ -1320,21 +1461,29 @@ export default function App() {
               {activeSection === 'clients' && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">Реестр клиентов</h1>
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
+                      Реестр клиентов (рассрочников) и статусы
+                    </h1>
                     <p className="text-xs text-slate-500 mt-1">
-                      Минимизация персональных данных: хранятся только необходимые для исполнения договора контакты и проверочная отметка документа.
+                      В таблице отображаются только клиенты-заёмщики. Если в течение{' '}
+                      <strong className="text-slate-800">
+                        {statusRules?.gracePeriodDays ?? 3} дн.
+                      </strong>{' '}
+                      после наступления даты платежа оплата не внесена, статус клиента автоматически меняется на{' '}
+                      <strong className="text-amber-800">«Под наблюдением»</strong> (или{' '}
+                      <strong className="text-red-800">«Сложный»</strong> при длительной просрочке). Нажмите на ФИО клиента или кнопку «Карточка», чтобы посмотреть его поручителей и договоры.
                     </p>
                   </div>
 
                   {canWrite && (
                     <form
                       onSubmit={handleCreateClient}
-                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
                     >
                       <h2 className="text-sm font-semibold text-slate-900">
                         Добавить нового клиента
                       </h2>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                         <input
                           type="text"
                           value={clientForm.fullName}
@@ -1342,7 +1491,7 @@ export default function App() {
                             setClientForm((p) => ({ ...p, fullName: e.target.value }))
                           }
                           placeholder="ФИО клиента полностью *"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -1350,7 +1499,7 @@ export default function App() {
                           value={clientForm.phone}
                           onChange={(e) => setClientForm((p) => ({ ...p, phone: e.target.value }))}
                           placeholder="Основной телефон *"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -1360,7 +1509,7 @@ export default function App() {
                             setClientForm((p) => ({ ...p, secondaryPhone: e.target.value }))
                           }
                           placeholder="Дополнительный телефон"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1369,7 +1518,7 @@ export default function App() {
                             setClientForm((p) => ({ ...p, documentRef: e.target.value }))
                           }
                           placeholder="Отметка о документе (без лишних ПДн)"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1378,20 +1527,20 @@ export default function App() {
                             setClientForm((p) => ({ ...p, address: e.target.value }))
                           }
                           placeholder="Адрес доставки / проживания"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
                           value={clientForm.notes}
                           onChange={(e) => setClientForm((p) => ({ ...p, notes: e.target.value }))}
                           placeholder="Примечание"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                         />
                       </div>
                       <div className="flex justify-end">
                         <button
                           type="submit"
-                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                          className="w-full sm:w-auto px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
                         >
                           Сохранить карточку клиента
                         </button>
@@ -1423,21 +1572,21 @@ export default function App() {
                           notify('error', err instanceof Error ? err.message : 'Ошибка обновления клиента');
                         }
                       }}
-                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-900 rounded-xl p-4 sm:p-5 space-y-4"
                     >
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-slate-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-slate-900 break-words">
                           Редактирование карточки клиента: {editingClient.fullName}
                         </h3>
                         <button
                           type="button"
                           onClick={() => setEditingClient(null)}
-                          className="text-xs text-slate-500 hover:text-slate-900"
+                          className="text-xs text-slate-500 hover:text-slate-900 shrink-0"
                         >
                           Отмена
                         </button>
                       </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                         <input
                           type="text"
                           value={editingClient.fullName}
@@ -1445,7 +1594,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, fullName: e.target.value } : null))
                           }
                           placeholder="ФИО клиента полностью *"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -1455,7 +1604,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, phone: e.target.value } : null))
                           }
                           placeholder="Основной телефон *"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -1467,7 +1616,7 @@ export default function App() {
                             )
                           }
                           placeholder="Дополнительный телефон"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1476,7 +1625,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, documentRef: e.target.value } : null))
                           }
                           placeholder="Отметка о документе"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1485,7 +1634,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, address: e.target.value } : null))
                           }
                           placeholder="Адрес доставки / проживания"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1494,10 +1643,10 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, notes: e.target.value } : null))
                           }
                           placeholder="Примечание"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                         />
                       </div>
-                      <div className="flex items-center justify-between">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
                         <select
                           value={editingClient.status}
                           onChange={(e) =>
@@ -1521,41 +1670,41 @@ export default function App() {
                   )}
 
                   {/* Filter & Sort Controls for Clients */}
-                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="bg-white border border-slate-200 rounded-xl p-3.5 sm:p-4 space-y-3">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         {(
                           [
-                            { id: 'all', label: 'Все клиенты', count: clients.length },
+                            { id: 'all', label: 'Все заёмщики', count: borrowerClients.length },
                             {
                               id: 'vip',
                               label: 'VIP',
-                              count: clients.filter((c) => c.paymentStatus === 'vip').length,
+                              count: borrowerClients.filter((c) => c.paymentStatus === 'vip').length,
                             },
                             {
                               id: 'reliable',
                               label: 'Надёжный',
-                              count: clients.filter((c) => c.paymentStatus === 'reliable').length,
+                              count: borrowerClients.filter((c) => c.paymentStatus === 'reliable').length,
                             },
                             {
                               id: 'watch',
                               label: 'Под наблюдением',
-                              count: clients.filter((c) => c.paymentStatus === 'watch').length,
+                              count: borrowerClients.filter((c) => c.paymentStatus === 'watch').length,
                             },
                             {
                               id: 'complex',
                               label: 'Сложный',
-                              count: clients.filter((c) => c.paymentStatus === 'complex').length,
+                              count: borrowerClients.filter((c) => c.paymentStatus === 'complex').length,
                             },
                             {
                               id: 'closed',
                               label: 'Рассрочка закрыта',
-                              count: clients.filter((c) => c.paymentStatus === 'closed').length,
+                              count: borrowerClients.filter((c) => c.paymentStatus === 'closed').length,
                             },
                             {
                               id: 'new',
                               label: 'Новый клиент',
-                              count: clients.filter((c) => (c.paymentStatus || 'new') === 'new')
+                              count: borrowerClients.filter((c) => (c.paymentStatus || 'new') === 'new')
                                 .length,
                             },
                           ] as Array<{ id: 'all' | ClientPaymentStatus; label: string; count: number }>
@@ -1564,7 +1713,7 @@ export default function App() {
                             key={tab.id}
                             type="button"
                             onClick={() => setClientStatusFilter(tab.id)}
-                            className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                            className={`px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
                               clientStatusFilter === tab.id
                                 ? 'bg-slate-900 text-white border-slate-900'
                                 : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
@@ -1575,12 +1724,12 @@ export default function App() {
                         ))}
                       </div>
 
-                      <div className="flex items-center gap-2">
-                        <label className="text-xs text-slate-500">Сортировка:</label>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <label className="text-xs text-slate-500 whitespace-nowrap">Сортировка:</label>
                         <select
                           value={clientSortBy}
                           onChange={(e) => setClientSortBy(e.target.value as any)}
-                          className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                          className="w-full sm:w-auto px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
                         >
                           <option value="status_severity">По статусу (проблемные сверху)</option>
                           <option value="debt_desc">По сумме остатка долга (убыв.)</option>
@@ -1591,143 +1740,263 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Clients List: Mobile/Tablet Cards + Desktop Scrollable Table */}
                   <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">ФИО клиента и статус</th>
-                          <th className="py-3 px-4 font-medium">Телефон и быстрый звонок</th>
-                          <th className="py-3 px-4 font-medium text-right">Активных договоров</th>
-                          <th className="py-3 px-4 font-medium text-right">Сумма оставшегося долга</th>
-                          <th className="py-3 px-4 font-medium text-right">Сумма просрочки</th>
-                          <th className="py-3 px-4 font-medium text-right">Ближайший платёж</th>
-                          <th className="py-3 px-4 font-medium text-right">Действия</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {filteredClients.map((cl) => {
+                    {/* Mobile & Tablet Cards (<1024px) */}
+                    <div className="lg:hidden divide-y divide-slate-100">
+                      {filteredClients.length === 0 ? (
+                        <div className="p-8 text-center text-xs text-slate-500">
+                          Клиенты по выбранному фильтру не найдены.
+                        </div>
+                      ) : (
+                        filteredClients.map((cl) => {
                           const statusMeta = getClientPaymentStatusMeta(cl.paymentStatus);
                           const remainingDebt =
                             cl.totalRemainingDebtKopecks ?? (cl as any).totalDebtKopecks ?? 0;
                           const overdueDebt =
                             cl.totalOverdueKopecks ?? (cl as any).overdueDebtKopecks ?? 0;
                           return (
-                            <tr key={cl.id} className="hover:bg-slate-50/80">
-                              <td className="py-3 px-4">
-                                <div className="flex flex-wrap items-center gap-2">
+                            <div key={cl.id} className="p-4 space-y-3 text-xs">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0">
                                   <button
                                     type="button"
                                     onClick={() => setViewingClientCardId(cl.id)}
-                                    className="font-semibold text-slate-900 hover:underline text-left"
+                                    className="text-sm font-bold text-slate-900 hover:underline text-left break-words"
                                   >
                                     {cl.fullName}
                                   </button>
-                                  <span
-                                    onClick={() => setViewingClientCardId(cl.id)}
-                                    title={cl.paymentStatusReason || statusMeta.description}
-                                    className={`px-2 py-0.5 text-[11px] font-medium border rounded-md inline-flex items-center gap-1 cursor-pointer ${statusMeta.badgeClass}`}
-                                  >
-                                    <span
-                                      className={`w-1.5 h-1.5 rounded-full ${statusMeta.dotClass}`}
-                                    />
-                                    <span>{statusMeta.label}</span>
-                                  </span>
-                                  {(cl.guarantorContracts?.length || 0) > 0 && (
-                                    <span
-                                      onClick={() => setViewingClientCardId(cl.id)}
-                                      title="Клиент выступает поручителем по договорам других заёмщиков"
-                                      className="px-2 py-0.5 text-[11px] font-medium bg-indigo-50 text-indigo-800 border border-indigo-200 rounded-md cursor-pointer"
-                                    >
-                                      Поручитель: {cl.guarantorContracts?.length} дог.
-                                    </span>
-                                  )}
+                                  <div className="font-mono text-slate-700 mt-0.5 break-words">
+                                    {cl.phone}
+                                    {cl.secondaryPhone ? ` · ${cl.secondaryPhone}` : ''}
+                                  </div>
                                 </div>
-                                <div className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">
-                                  {cl.paymentStatusReason || cl.address || '—'}
+                                <span
+                                  onClick={() => setViewingClientCardId(cl.id)}
+                                  className={`px-2 py-0.5 text-[11px] font-medium border rounded-md inline-flex items-center gap-1 shrink-0 cursor-pointer ${statusMeta.badgeClass}`}
+                                >
+                                  <span className={`w-1.5 h-1.5 rounded-full ${statusMeta.dotClass}`} />
+                                  <span>{statusMeta.label}</span>
+                                </span>
+                              </div>
+
+                              <div className="text-[11px] text-slate-500 break-words">
+                                {cl.paymentStatusReason || cl.address || 'Нажмите на ФИО клиента для просмотра карточки и поручителей'}
+                              </div>
+
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2.5 bg-slate-50 rounded-lg font-mono text-[11px]">
+                                <div>
+                                  <div className="font-sans text-slate-500">Активных дог.</div>
+                                  <div className="font-semibold text-slate-900">
+                                    {cl.activeContractsCount ?? 0}
+                                    {cl.completedContractsCount ? ` (закр.: ${cl.completedContractsCount})` : ''}
+                                  </div>
                                 </div>
-                              </td>
-                              <td className="py-3 px-4">
-                                <div className="font-mono text-slate-800 mb-1">
-                                  {cl.phone}
-                                  {cl.secondaryPhone ? ` · ${cl.secondaryPhone}` : ''}
+                                <div>
+                                  <div className="font-sans text-slate-500">Остаток долга</div>
+                                  <div className="font-semibold text-slate-900">{formatMoney(remainingDebt)}</div>
                                 </div>
+                                <div>
+                                  <div className="font-sans text-slate-500">Просрочка</div>
+                                  <div className={overdueDebt > 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}>
+                                    {formatMoney(overdueDebt)}
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="font-sans text-slate-500">Ближ. платёж</div>
+                                  <div className="text-slate-800">
+                                    {cl.nextPaymentDate ? formatDateRu(cl.nextPaymentDate) : '—'}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="pt-0.5">
                                 <QuickCallAndCopyBar
                                   phone={cl.phone}
                                   clientName={cl.fullName}
                                   onNotice={(msg) => notify('success', msg)}
                                   onError={(err) => notify('error', err)}
                                 />
-                              </td>
-                              <td className="py-3 px-4 font-mono text-right">
-                                {cl.activeContractsCount ?? 0}
-                                {cl.completedContractsCount ? (
-                                  <div className="text-[10px] text-slate-400">
-                                    закрыто: {cl.completedContractsCount}
-                                  </div>
-                                ) : null}
-                              </td>
-                              <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
-                                {formatMoney(remainingDebt)}
-                              </td>
-                              <td
-                                className={`py-3 px-4 font-mono text-right font-medium ${
-                                  overdueDebt > 0 ? 'text-red-600' : 'text-slate-500'
-                                }`}
-                              >
-                                {formatMoney(overdueDebt)}
-                              </td>
-                              <td className="py-3 px-4 font-mono text-right text-slate-700">
-                                {cl.nextPaymentDate ? formatDateRu(cl.nextPaymentDate) : '—'}
-                              </td>
-                              <td className="py-3 px-4 text-right">
-                                <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-100">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewingClientCardId(cl.id)}
+                                  className="px-3 py-1.5 text-xs font-medium text-slate-900 bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200"
+                                >
+                                  Карточка и поручители
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const firstCnt = contracts.find((c) => c.clientId === cl.id);
+                                    setWhatsappTargetContractId(firstCnt?.id || null);
+                                    setActiveSection('whatsapp_contracts');
+                                  }}
+                                  className="px-2.5 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 inline-flex items-center gap-1"
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                  <span>Договор в WA</span>
+                                </button>
+                                {canWrite && (
                                   <button
                                     type="button"
-                                    onClick={() => setViewingClientCardId(cl.id)}
-                                    className="px-2.5 py-1 text-xs font-medium text-slate-900 bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200"
+                                    onClick={() =>
+                                      setEditingClient({
+                                        id: cl.id,
+                                        fullName: cl.fullName,
+                                        phone: cl.phone,
+                                        secondaryPhone: cl.secondaryPhone || '',
+                                        documentRef: cl.documentRef || '',
+                                        address: cl.address || '',
+                                        notes: cl.notes || '',
+                                        status: cl.status,
+                                      })
+                                    }
+                                    className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100"
                                   >
-                                    Карточка и статус
+                                    Изменить
                                   </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const firstCnt = contracts.find((c) => c.clientId === cl.id);
-                                      setWhatsappTargetContractId(firstCnt?.id || null);
-                                      setActiveSection('whatsapp_contracts');
-                                    }}
-                                    className="px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 inline-flex items-center gap-1"
-                                    title="Найти договор и отправить скан в WhatsApp"
-                                  >
-                                    <FileText className="w-3.5 h-3.5" />
-                                    <span>Договор в WA</span>
-                                  </button>
-                                  {canWrite && (
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {/* Desktop Table (>=1024px) */}
+                    <div className="hidden lg:block overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium">ФИО заёмщика и статус</th>
+                            <th className="py-3 px-4 font-medium">Телефон и быстрый звонок</th>
+                            <th className="py-3 px-3 font-medium text-right">Договоров</th>
+                            <th className="py-3 px-3 font-medium text-right">Остаток долга</th>
+                            <th className="py-3 px-3 font-medium text-right">Просрочка</th>
+                            <th className="py-3 px-3 font-medium text-right">Ближ. платёж</th>
+                            <th className="py-3 px-4 font-medium text-right">Действия</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {filteredClients.map((cl) => {
+                            const statusMeta = getClientPaymentStatusMeta(cl.paymentStatus);
+                            const remainingDebt =
+                              cl.totalRemainingDebtKopecks ?? (cl as any).totalDebtKopecks ?? 0;
+                            const overdueDebt =
+                              cl.totalOverdueKopecks ?? (cl as any).overdueDebtKopecks ?? 0;
+                            return (
+                              <tr key={cl.id} className="hover:bg-slate-50/80 align-top">
+                                <td className="py-3 px-4 max-w-[280px]">
+                                  <div className="flex flex-wrap items-center gap-1.5">
                                     <button
                                       type="button"
-                                      onClick={() =>
-                                        setEditingClient({
-                                          id: cl.id,
-                                          fullName: cl.fullName,
-                                          phone: cl.phone,
-                                          secondaryPhone: cl.secondaryPhone || '',
-                                          documentRef: cl.documentRef || '',
-                                          address: cl.address || '',
-                                          notes: cl.notes || '',
-                                          status: cl.status,
-                                        })
-                                      }
-                                      className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100"
+                                      onClick={() => setViewingClientCardId(cl.id)}
+                                      className="font-semibold text-slate-900 hover:underline text-left break-words"
+                                      title="Открыть карточку заёмщика и посмотреть поручителей"
                                     >
-                                      Изменить
+                                      {cl.fullName}
                                     </button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                                    <span
+                                      onClick={() => setViewingClientCardId(cl.id)}
+                                      title={cl.paymentStatusReason || statusMeta.description}
+                                      className={`px-2 py-0.5 text-[11px] font-medium border rounded-md inline-flex items-center gap-1 cursor-pointer ${statusMeta.badgeClass}`}
+                                    >
+                                      <span
+                                        className={`w-1.5 h-1.5 rounded-full ${statusMeta.dotClass}`}
+                                      />
+                                      <span>{statusMeta.label}</span>
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 mt-1 line-clamp-2 break-words">
+                                    {cl.paymentStatusReason || cl.address || '—'}
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="font-mono text-slate-800 mb-1.5 whitespace-nowrap">
+                                    {cl.phone}
+                                    {cl.secondaryPhone ? ` · ${cl.secondaryPhone}` : ''}
+                                  </div>
+                                  <QuickCallAndCopyBar
+                                    phone={cl.phone}
+                                    clientName={cl.fullName}
+                                    onNotice={(msg) => notify('success', msg)}
+                                    onError={(err) => notify('error', err)}
+                                  />
+                                </td>
+                                <td className="py-3 px-3 font-mono text-right whitespace-nowrap">
+                                  {cl.activeContractsCount ?? 0}
+                                  {cl.completedContractsCount ? (
+                                    <div className="text-[10px] text-slate-400">
+                                      закр.: {cl.completedContractsCount}
+                                    </div>
+                                  ) : null}
+                                </td>
+                                <td className="py-3 px-3 font-mono text-right font-semibold text-slate-900 whitespace-nowrap">
+                                  {formatMoney(remainingDebt)}
+                                </td>
+                                <td
+                                  className={`py-3 px-3 font-mono text-right font-medium whitespace-nowrap ${
+                                    overdueDebt > 0 ? 'text-red-600' : 'text-slate-500'
+                                  }`}
+                                >
+                                  {formatMoney(overdueDebt)}
+                                </td>
+                                <td className="py-3 px-3 font-mono text-right text-slate-700 whitespace-nowrap">
+                                  {cl.nextPaymentDate ? formatDateRu(cl.nextPaymentDate) : '—'}
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                    <button
+                                      type="button"
+                                      onClick={() => setViewingClientCardId(cl.id)}
+                                      className="px-2.5 py-1 text-xs font-medium text-slate-900 bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200 whitespace-nowrap"
+                                    >
+                                      Карточка / Поручители
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const firstCnt = contracts.find((c) => c.clientId === cl.id);
+                                        setWhatsappTargetContractId(firstCnt?.id || null);
+                                        setActiveSection('whatsapp_contracts');
+                                      }}
+                                      className="px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 inline-flex items-center gap-1 whitespace-nowrap"
+                                      title="Найти договор и отправить скан в WhatsApp"
+                                    >
+                                      <FileText className="w-3.5 h-3.5" />
+                                      <span>Договор в WA</span>
+                                    </button>
+                                    {canWrite && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setEditingClient({
+                                            id: cl.id,
+                                            fullName: cl.fullName,
+                                            phone: cl.phone,
+                                            secondaryPhone: cl.secondaryPhone || '',
+                                            documentRef: cl.documentRef || '',
+                                            address: cl.address || '',
+                                            notes: cl.notes || '',
+                                            status: cl.status,
+                                          })
+                                        }
+                                        className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 whitespace-nowrap"
+                                      >
+                                        Изменить
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -1750,20 +2019,20 @@ export default function App() {
               {/* ==================== 3. ДОГОВОРЫ И ГРАФИКИ ==================== */}
               {activeSection === 'contracts' && (
                 <div className="space-y-6">
-                  <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
-                      <h1 className="text-2xl font-bold text-slate-900">
+                      <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
                         Договоры продажи в рассрочку и графики платежей
                       </h1>
                       <p className="text-xs text-slate-500 mt-1">
-                        Каждый договор хранит зафиксированную версию правил рассрочки, историю версий графика и прикреплённые сканы/фотографии договора.
+                        Нажмите на ФИО заёмщика или кнопку «Поручители и карточка», чтобы открыть данные заёмщика и его поручителей.
                       </p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         onClick={() => setActiveSection('whatsapp_contracts')}
-                        className="px-3.5 py-2 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5"
+                        className="px-3.5 py-2 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 inline-flex items-center gap-1.5"
                       >
                         <MessageCircle className="w-4 h-4" />
                         <span>Найти и отправить договор в WhatsApp</span>
@@ -1772,7 +2041,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setShowNewContractModal(true)}
-                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                          className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 inline-flex items-center gap-1.5"
                         >
                           <Plus className="w-4 h-4" />
                           <span>Оформить новый договор</span>
@@ -1791,10 +2060,11 @@ export default function App() {
                           !d.isArchived
                       );
                       const attachedFilesCount = contractDocs.length;
+                      const guarantorsCount = c.guarantors?.length || 0;
                       return (
-                        <div key={c.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-                          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 pb-4">
-                            <div>
+                        <div key={c.id} className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+                          <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3 border-b border-slate-200 pb-4">
+                            <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2 text-sm">
                                 <span className="font-mono font-bold text-slate-900">
                                   {c.contractNumber}
@@ -1803,7 +2073,8 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => setViewingClientCardId(c.clientId)}
-                                  className="font-semibold text-slate-900 hover:underline"
+                                  className="font-semibold text-slate-900 hover:underline text-left break-words"
+                                  title="Нажмите, чтобы открыть карточку заёмщика и его поручителей"
                                 >
                                   {c.clientName}
                                 </button>
@@ -1821,7 +2092,7 @@ export default function App() {
                                   {translateContractStatus(c.status)}
                                 </span>
                               </div>
-                              <div className="text-xs text-slate-600 mt-1">
+                              <div className="text-xs text-slate-600 mt-1 break-words">
                                 Товар: <strong>{c.itemTitle}</strong> · Оформлен:{' '}
                                 <span className="font-mono">{formatDateRu(c.startDate)}</span> · Срок:{' '}
                                 <span className="font-mono">{c.termMonths} мес.</span> · Версия графика:{' '}
@@ -1831,12 +2102,19 @@ export default function App() {
                             </div>
 
                             <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setViewingClientCardId(c.clientId)}
+                                className="px-3 py-1.5 text-xs font-medium text-indigo-900 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 inline-flex items-center gap-1.5"
+                              >
+                                <span>Карточка и поручители ({guarantorsCount})</span>
+                              </button>
                               {buildDirectWhatsAppUrl(c.clientPhone) && (
                                 <a
                                   href={buildDirectWhatsAppUrl(c.clientPhone)!}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 border border-emerald-700 rounded-lg hover:bg-emerald-700 flex items-center gap-1.5"
+                                  className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 border border-emerald-700 rounded-lg hover:bg-emerald-700 inline-flex items-center gap-1.5"
                                 >
                                   <MessageCircle className="w-3.5 h-3.5" />
                                   <span>Написать в WhatsApp</span>
@@ -1848,7 +2126,7 @@ export default function App() {
                                   setWhatsappTargetContractId(c.id);
                                   setActiveSection('whatsapp_contracts');
                                 }}
-                                className="px-3 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5"
+                                className="px-3 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 inline-flex items-center gap-1.5"
                               >
                                 <FileText className="w-3.5 h-3.5" />
                                 <span>Отправить договор / Скан ({attachedFilesCount})</span>
@@ -1856,15 +2134,15 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={() => setEarlyPayoffContract(c)}
-                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 inline-flex items-center gap-1.5"
                               >
                                 <Calculator className="w-3.5 h-3.5" />
-                                <span>Калькулятор досрочного погашения</span>
+                                <span>Досрочное погашение</span>
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setRestructureContract(c)}
-                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 inline-flex items-center gap-1.5"
                               >
                                 <History className="w-3.5 h-3.5" />
                                 <span>История графика (v{c.currentScheduleVersion})</span>
@@ -1872,161 +2150,13 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={() => setPrintTemplateModal({ contract: c, type: 'contract' })}
-                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 inline-flex items-center gap-1.5"
                               >
                                 <Printer className="w-3.5 h-3.5" />
                                 <span>Печать договора</span>
                               </button>
                             </div>
                           </div>
-
-                        {/* Guarantors of this Contract */}
-                        {c.guarantors && c.guarantors.length > 0 && (
-                          <div className="p-3.5 bg-indigo-50/40 border border-indigo-200 rounded-lg space-y-2.5">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-xs font-semibold text-slate-900">
-                                Поручители по договору ({c.guarantors.length}):
-                              </div>
-                            </div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                              {c.guarantors.map((g) => (
-                                <div
-                                  key={g.id}
-                                  className="p-3 bg-white border border-slate-200 rounded-lg text-xs space-y-1.5"
-                                >
-                                  <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div className="flex items-center gap-1.5">
-                                      <span className="px-2 py-0.5 bg-slate-900 text-white font-semibold rounded text-[11px]">
-                                        Поручитель №{g.guarantorOrder}
-                                      </span>
-                                      <button
-                                        type="button"
-                                        onClick={() => setViewingClientCardId(g.clientId)}
-                                        className="font-semibold text-slate-900 hover:underline text-left"
-                                      >
-                                        {g.fullName}
-                                      </button>
-                                    </div>
-                                    <div className="flex items-center gap-1.5">
-                                      <span
-                                        className={`px-1.5 py-0.5 text-[10px] rounded font-medium ${
-                                          g.signedGuaranteeReceived
-                                            ? 'bg-emerald-100 text-emerald-800'
-                                            : 'bg-amber-100 text-amber-800'
-                                        }`}
-                                      >
-                                        {g.signedGuaranteeReceived
-                                          ? 'Поручительство подписано'
-                                          : 'Без отметки о подписи'}
-                                      </span>
-                                      {canWrite &&
-                                        (confirmRemoveGuarantorId === g.id ? (
-                                          <span className="inline-flex items-center gap-1 bg-red-50 border border-red-200 px-2 py-0.5 rounded">
-                                            <button
-                                              type="button"
-                                              onClick={async () => {
-                                                try {
-                                                  await apiFetch(
-                                                    `/api/v1/contracts/${c.id}/guarantors/${g.id}`,
-                                                    { method: 'DELETE' }
-                                                  );
-                                                  setConfirmRemoveGuarantorId(null);
-                                                  await loadFullState();
-                                                  notify(
-                                                    'success',
-                                                    `Поручитель «${g.fullName}» откреплён от договора.`
-                                                  );
-                                                } catch (err) {
-                                                  notify(
-                                                    'error',
-                                                    err instanceof Error
-                                                      ? err.message
-                                                      : 'Ошибка удаления поручителя'
-                                                  );
-                                                }
-                                              }}
-                                              className="text-[11px] font-semibold text-red-700 hover:underline"
-                                            >
-                                              Да, открепить
-                                            </button>
-                                            <button
-                                              type="button"
-                                              onClick={() => setConfirmRemoveGuarantorId(null)}
-                                              className="text-[11px] text-slate-500 hover:text-slate-800"
-                                            >
-                                              Отмена
-                                            </button>
-                                          </span>
-                                        ) : (
-                                          <button
-                                            type="button"
-                                            onClick={() => setConfirmRemoveGuarantorId(g.id)}
-                                            className="p-1 text-slate-400 hover:text-red-600 rounded"
-                                            title="Убрать поручителя из договора"
-                                          >
-                                            <Trash2 className="w-3.5 h-3.5" />
-                                          </button>
-                                        ))}
-                                    </div>
-                                  </div>
-
-                                  <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                                    <div className="font-mono text-slate-700">
-                                      Тел.: {g.phone}
-                                      {g.secondaryPhone ? ` · Доп.: ${g.secondaryPhone}` : ''}
-                                    </div>
-                                    <QuickCallAndCopyBar
-                                      phone={g.phone}
-                                      clientName={g.fullName}
-                                      onNotice={(msg) => notify('success', msg)}
-                                      onError={(err) => notify('error', err)}
-                                    />
-                                  </div>
-
-                                  {(g.documentRef || g.address) && (
-                                    <div className="text-[11px] text-slate-600">
-                                      {g.documentRef ? `Паспорт: ${g.documentRef}` : ''}
-                                      {g.documentRef && g.address ? ' · ' : ''}
-                                      {g.address ? `Адрес: ${g.address}` : ''}
-                                    </div>
-                                  )}
-
-                                  {g.notes && (
-                                    <div className="text-[11px] text-slate-500 italic">
-                                      Примечание: {g.notes}
-                                    </div>
-                                  )}
-
-                                  {g.documents && g.documents.length > 0 && (
-                                    <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1.5">
-                                      {g.documents.map((gDoc) => (
-                                        <div
-                                          key={gDoc.id}
-                                          className="px-2 py-1 bg-slate-50 border border-slate-200 rounded text-[11px] inline-flex items-center gap-1.5"
-                                        >
-                                          <FileText className="w-3 h-3 text-slate-500" />
-                                          <span
-                                            className="truncate max-w-[150px]"
-                                            title={gDoc.title || gDoc.originalFilename}
-                                          >
-                                            {gDoc.originalFilename}
-                                          </span>
-                                          <button
-                                            type="button"
-                                            onClick={() => setPreviewingDocument(gDoc)}
-                                            className="text-slate-700 hover:text-slate-900 font-medium"
-                                          >
-                                            Просмотр
-                                          </button>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
 
                         {/* Attached Photos / Scans of this Contract */}
                         {contractDocs.length > 0 && (
@@ -2038,11 +2168,11 @@ export default function App() {
                               {contractDocs.map((doc) => (
                                 <div
                                   key={doc.id}
-                                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs flex items-center gap-2"
+                                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs flex flex-wrap items-center gap-2 max-w-full"
                                 >
                                   <FileText className="w-3.5 h-3.5 text-slate-600 shrink-0" />
                                   <span
-                                    className="font-medium text-slate-900 truncate max-w-[220px]"
+                                    className="font-medium text-slate-900 truncate max-w-[160px] sm:max-w-[220px]"
                                     title={doc.originalFilename}
                                   >
                                     {doc.originalFilename}
@@ -2132,10 +2262,10 @@ export default function App() {
                         )}
 
                         {/* Contract Financial Breakdown */}
-                        <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs font-mono bg-slate-50 p-3.5 rounded-lg border border-slate-200">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono bg-slate-50 p-3.5 rounded-lg border border-slate-200">
                           <div>
                             <div className="font-sans text-slate-500">Полная себестоимость</div>
-                            <div className="font-semibold text-slate-900 mt-0.5">
+                            <div className="font-semibold text-slate-900 mt-0.5 break-words">
                               {formatMoney(c.totalCostKopecks)}
                             </div>
                           </div>
@@ -2143,13 +2273,13 @@ export default function App() {
                             <div className="font-sans text-slate-500">
                               Наценка ({c.markupPercent}%)
                             </div>
-                            <div className="font-semibold text-emerald-700 mt-0.5">
+                            <div className="font-semibold text-emerald-700 mt-0.5 break-words">
                               +{formatMoney(c.markupKopecks)}
                             </div>
                           </div>
                           <div>
                             <div className="font-sans text-slate-500">Цена продажи</div>
-                            <div className="font-semibold text-slate-900 mt-0.5">
+                            <div className="font-semibold text-slate-900 mt-0.5 break-words">
                               {formatMoney(c.salePriceKopecks)}
                             </div>
                           </div>
@@ -2157,19 +2287,19 @@ export default function App() {
                             <div className="font-sans text-slate-500">
                               1-й взнос ({c.downPaymentPercent}%)
                             </div>
-                            <div className="font-semibold text-slate-900 mt-0.5">
+                            <div className="font-semibold text-slate-900 mt-0.5 break-words">
                               {formatMoney(c.downPaymentKopecks)}
                             </div>
                           </div>
                           <div>
                             <div className="font-sans text-slate-500">Фактически оплачено</div>
-                            <div className="font-semibold text-emerald-700 mt-0.5">
+                            <div className="font-semibold text-emerald-700 mt-0.5 break-words">
                               {formatMoney(c.totalCollectedKopecks)}
                             </div>
                           </div>
                           <div>
                             <div className="font-sans text-slate-500">Текущий остаток долга</div>
-                            <div className="font-bold text-slate-900 mt-0.5">
+                            <div className="font-bold text-slate-900 mt-0.5 break-words">
                               {formatMoney(c.remainingDebtKopecks)}
                             </div>
                           </div>
@@ -2177,7 +2307,7 @@ export default function App() {
 
                         {/* Active Schedule Table */}
                         <div className="overflow-x-auto">
-                          <table className="w-full text-left border-collapse text-xs">
+                          <table className="w-full text-left border-collapse text-xs min-w-[540px]">
                             <thead>
                               <tr className="border-b border-slate-200 text-slate-500">
                                 <th className="py-2 pr-3 font-medium">Платёж</th>
@@ -2191,17 +2321,17 @@ export default function App() {
                             <tbody className="divide-y divide-slate-100">
                               {c.schedule.map((item) => (
                                 <tr key={item.id}>
-                                  <td className="py-2 pr-3 font-mono font-medium">
+                                  <td className="py-2 pr-3 font-mono font-medium whitespace-nowrap">
                                     №{item.installmentNumber}
                                   </td>
-                                  <td className="py-2 pr-3 font-mono">{formatDateRu(item.dueDate)}</td>
-                                  <td className="py-2 pr-3 font-mono text-right">
+                                  <td className="py-2 pr-3 font-mono whitespace-nowrap">{formatDateRu(item.dueDate)}</td>
+                                  <td className="py-2 pr-3 font-mono text-right whitespace-nowrap">
                                     {formatMoney(item.plannedKopecks)}
                                   </td>
-                                  <td className="py-2 pr-3 font-mono text-right text-emerald-700">
+                                  <td className="py-2 pr-3 font-mono text-right text-emerald-700 whitespace-nowrap">
                                     {formatMoney(item.paidKopecks)}
                                   </td>
-                                  <td className="py-2 pr-3 font-mono text-right font-semibold">
+                                  <td className="py-2 pr-3 font-mono text-right font-semibold whitespace-nowrap">
                                     {formatMoney(item.remainingKopecks)}
                                   </td>
                                   <td className="py-2 text-slate-700">
@@ -2243,11 +2373,11 @@ export default function App() {
               {activeSection === 'payments' && (
                 <div className="space-y-6">
                   <div className="flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                      <h1 className="text-2xl font-bold text-slate-900">
+                    <div className="min-w-0">
+                      <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                         Платежи клиентов и распределение (авто и ручное)
                       </h1>
-                      <p className="text-xs text-slate-500 mt-1">
+                      <p className="text-xs text-slate-500 mt-1 break-words">
                         По умолчанию закрывает текущий месяц, а сумму сверху равномерно распределяет на все оставшиеся месяцы (также доступен режим по очереди по месяцам и ручной ввод).
                       </p>
                     </div>
@@ -2255,125 +2385,258 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setShowNewPaymentModal(true)}
-                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                        className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5 shrink-0"
                       >
-                        <Plus className="w-4 h-4" />
+                        <Plus className="w-4 h-4 shrink-0" />
                         <span>Зарегистрировать поступление</span>
                       </button>
                     )}
                   </div>
 
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">Дата и ID операции</th>
-                          <th className="py-3 px-4 font-medium">Клиент и договор</th>
-                          <th className="py-3 px-4 font-medium">Касса / Счёт</th>
-                          <th className="py-3 px-4 font-medium text-right">Сумма поступления</th>
-                          <th className="py-3 px-4 font-medium text-right">Распределено</th>
-                          <th className="py-3 px-4 font-medium text-right">Не распределено</th>
-                          <th className="py-3 px-4 font-medium text-right">Действия</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {filteredPayments.map((p) => (
-                          <tr
-                            key={p.id}
-                            className={`hover:bg-slate-50/80 ${
-                              p.status === 'reversed' ? 'opacity-50' : ''
-                            }`}
-                          >
-                            <td className="py-3 px-4">
-                              <div className="font-mono font-medium text-slate-900">
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    {/* Mobile Cards View */}
+                    <div className="md:hidden divide-y divide-slate-200">
+                      {filteredPayments.map((p) => (
+                        <div
+                          key={p.id}
+                          className={`p-4 space-y-3 ${p.status === 'reversed' ? 'opacity-50 bg-slate-50/60' : ''}`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <button
+                                type="button"
+                                onClick={() => setViewingClientCardId(p.clientId)}
+                                className="font-semibold text-sm text-slate-900 hover:underline text-left break-words"
+                              >
+                                {p.clientName}
+                              </button>
+                              <div className="text-xs text-slate-500 mt-0.5 break-words">
+                                {p.contractNumber ? `Договор ${p.contractNumber}` : 'Без договора (ожидает выбора)'}{' '}
+                                · {p.accountName}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <div className="font-mono text-sm font-bold text-slate-900">
+                                {formatMoney(p.amountKopecks)}
+                              </div>
+                              <div className="font-mono text-[11px] text-slate-500">
                                 {formatDateRu(p.eventDate)}
                               </div>
-                              <div className="font-mono text-[11px] text-slate-400">{p.id}</div>
-                            </td>
-                            <td className="py-3 px-4">
-                              <div className="font-semibold text-slate-900">{p.clientName}</div>
-                              <div className="text-slate-500 mt-0.5">
-                                {p.contractNumber ? `Договор ${p.contractNumber}` : 'Без договора (ожидает выбора)'}{' '}
-                                · {p.notes}
+                            </div>
+                          </div>
+
+                          {p.notes && (
+                            <div className="text-xs text-slate-600 break-words">{p.notes}</div>
+                          )}
+
+                          <div className="grid grid-cols-2 gap-2 p-2.5 bg-slate-50 rounded-lg border border-slate-200/80 text-xs">
+                            <div>
+                              <div className="text-[11px] text-slate-500">Распределено</div>
+                              <div className="font-mono font-semibold text-emerald-700 mt-0.5">
+                                {formatMoney(p.allocatedKopecks)}
                               </div>
-                              {p.allocations.length > 0 && (
-                                <div className="text-[11px] text-slate-500 mt-1 font-mono">
-                                  Распределено на:{' '}
-                                  {p.allocations
-                                    .map(
-                                      (a) =>
-                                        `№${a.installmentNumber} (${formatMoney(a.amountKopecks)})`
-                                    )
-                                    .join(', ')}
-                                </div>
-                              )}
-                            </td>
-                            <td className="py-3 px-4 text-slate-700">{p.accountName}</td>
-                            <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
-                              {formatMoney(p.amountKopecks)}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right text-emerald-700">
-                              {formatMoney(p.allocatedKopecks)}
-                            </td>
-                            <td
-                              className={`py-3 px-4 font-mono text-right font-semibold ${
-                                p.unallocatedKopecks > 0 ? 'text-amber-700' : 'text-slate-400'
+                            </div>
+                            <div>
+                              <div className="text-[11px] text-slate-500">Не распределено</div>
+                              <div
+                                className={`font-mono font-semibold mt-0.5 ${
+                                  p.unallocatedKopecks > 0 ? 'text-amber-700' : 'text-slate-400'
+                                }`}
+                              >
+                                {formatMoney(p.unallocatedKopecks)}
+                              </div>
+                            </div>
+                          </div>
+
+                          {p.allocations.length > 0 && (
+                            <div className="text-[11px] text-slate-500 font-mono break-words">
+                              Распределено на:{' '}
+                              {p.allocations
+                                .map((a) => `№${a.installmentNumber} (${formatMoney(a.amountKopecks)})`)
+                                .join(', ')}
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                            {p.status === 'confirmed' && p.unallocatedKopecks > 0 && canWrite && (
+                              <button
+                                type="button"
+                                onClick={() => setAllocatingPayment(p)}
+                                className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap flex items-center gap-1.5"
+                              >
+                                <span>Распределить</span>
+                              </button>
+                            )}
+                            {p.status === 'confirmed' && !p.isDownPayment && isOwner && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await apiFetch(`/api/v1/payments/${p.id}/reverse`, {
+                                      method: 'POST',
+                                      body: JSON.stringify({
+                                        reason: 'Корректирующее сторно платежа по решению владельца',
+                                      }),
+                                    });
+                                    await loadFullState();
+                                    notify(
+                                      'success',
+                                      'Платёж сторнирован с сохранением записи в истории и возвратом сумм в графике.'
+                                    );
+                                  } catch (err) {
+                                    notify(
+                                      'error',
+                                      err instanceof Error ? err.message : 'Ошибка сторнирования'
+                                    );
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50 flex items-center gap-1 whitespace-nowrap"
+                              >
+                                <RotateCcw className="w-3 h-3 shrink-0" />
+                                <span>Сторно</span>
+                              </button>
+                            )}
+                            {p.status === 'reversed' && (
+                              <span className="text-xs text-red-600 break-words">
+                                Сторнирован ({p.reversalReason})
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {filteredPayments.length === 0 && (
+                        <div className="p-8 text-center text-xs text-slate-500">
+                          Нет зарегистрированных платежей по заданному фильтру.
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Desktop Table View */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full min-w-[780px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium whitespace-nowrap">Дата и ID операции</th>
+                            <th className="py-3 px-4 font-medium">Клиент и договор</th>
+                            <th className="py-3 px-4 font-medium">Касса / Счёт</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Сумма поступления</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Распределено</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Не распределено</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Действия</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {filteredPayments.map((p) => (
+                            <tr
+                              key={p.id}
+                              className={`hover:bg-slate-50/80 ${
+                                p.status === 'reversed' ? 'opacity-50' : ''
                               }`}
                             >
-                              {formatMoney(p.unallocatedKopecks)}
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <div className="flex items-center justify-end gap-2">
-                                {p.status === 'confirmed' && p.unallocatedKopecks > 0 && canWrite && (
-                                  <button
-                                    type="button"
-                                    onClick={() => setAllocatingPayment(p)}
-                                    className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap flex items-center gap-1.5"
-                                  >
-                                    <span>Распределить</span>
-                                  </button>
+                              <td className="py-3 px-4 whitespace-nowrap">
+                                <div className="font-mono font-medium text-slate-900">
+                                  {formatDateRu(p.eventDate)}
+                                </div>
+                                <div className="font-mono text-[11px] text-slate-400">{p.id}</div>
+                              </td>
+                              <td className="py-3 px-4">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewingClientCardId(p.clientId)}
+                                  className="font-semibold text-slate-900 hover:underline text-left"
+                                >
+                                  {p.clientName}
+                                </button>
+                                <div className="text-slate-500 mt-0.5 break-words">
+                                  {p.contractNumber ? `Договор ${p.contractNumber}` : 'Без договора (ожидает выбора)'}{' '}
+                                  · {p.notes}
+                                </div>
+                                {p.allocations.length > 0 && (
+                                  <div className="text-[11px] text-slate-500 mt-1 font-mono break-words">
+                                    Распределено на:{' '}
+                                    {p.allocations
+                                      .map(
+                                        (a) =>
+                                          `№${a.installmentNumber} (${formatMoney(a.amountKopecks)})`
+                                      )
+                                      .join(', ')}
+                                  </div>
                                 )}
-                                {p.status === 'confirmed' && !p.isDownPayment && isOwner && (
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      try {
-                                        await apiFetch(`/api/v1/payments/${p.id}/reverse`, {
-                                          method: 'POST',
-                                          body: JSON.stringify({
-                                            reason:
-                                              'Корректирующее сторно платежа по решению владельца',
-                                          }),
-                                        });
-                                        await loadFullState();
-                                        notify(
-                                          'success',
-                                          'Платёж сторнирован с сохранением записи в истории и возвратом сумм в графике.'
-                                        );
-                                      } catch (err) {
-                                        notify(
-                                          'error',
-                                          err instanceof Error ? err.message : 'Ошибка сторнирования'
-                                        );
-                                      }
-                                    }}
-                                    className="px-2.5 py-1.5 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50 flex items-center gap-1 whitespace-nowrap"
-                                  >
-                                    <RotateCcw className="w-3 h-3" />
-                                    <span>Сторно</span>
-                                  </button>
-                                )}
-                                {p.status === 'reversed' && (
-                                  <span className="text-xs text-red-600">
-                                    Сторнирован ({p.reversalReason})
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                              </td>
+                              <td className="py-3 px-4 text-slate-700">{p.accountName}</td>
+                              <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900 whitespace-nowrap">
+                                {formatMoney(p.amountKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right text-emerald-700 whitespace-nowrap">
+                                {formatMoney(p.allocatedKopecks)}
+                              </td>
+                              <td
+                                className={`py-3 px-4 font-mono text-right font-semibold whitespace-nowrap ${
+                                  p.unallocatedKopecks > 0 ? 'text-amber-700' : 'text-slate-400'
+                                }`}
+                              >
+                                {formatMoney(p.unallocatedKopecks)}
+                              </td>
+                              <td className="py-3 px-4 text-right whitespace-nowrap">
+                                <div className="flex items-center justify-end gap-2">
+                                  {p.status === 'confirmed' && p.unallocatedKopecks > 0 && canWrite && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setAllocatingPayment(p)}
+                                      className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap flex items-center gap-1.5"
+                                    >
+                                      <span>Распределить</span>
+                                    </button>
+                                  )}
+                                  {p.status === 'confirmed' && !p.isDownPayment && isOwner && (
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          await apiFetch(`/api/v1/payments/${p.id}/reverse`, {
+                                            method: 'POST',
+                                            body: JSON.stringify({
+                                              reason:
+                                                'Корректирующее сторно платежа по решению владельца',
+                                            }),
+                                          });
+                                          await loadFullState();
+                                          notify(
+                                            'success',
+                                            'Платёж сторнирован с сохранением записи в истории и возвратом сумм в графике.'
+                                          );
+                                        } catch (err) {
+                                          notify(
+                                            'error',
+                                            err instanceof Error ? err.message : 'Ошибка сторнирования'
+                                          );
+                                        }
+                                      }}
+                                      className="px-2.5 py-1.5 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50 flex items-center gap-1 whitespace-nowrap"
+                                    >
+                                      <RotateCcw className="w-3 h-3 shrink-0" />
+                                      <span>Сторно</span>
+                                    </button>
+                                  )}
+                                  {p.status === 'reversed' && (
+                                    <span className="text-xs text-red-600">
+                                      Сторнирован ({p.reversalReason})
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                          {filteredPayments.length === 0 && (
+                            <tr>
+                              <td colSpan={7} className="py-8 text-center text-slate-500">
+                                Нет зарегистрированных платежей по заданному фильтру.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2382,10 +2645,10 @@ export default function App() {
               {activeSection === 'overdues' && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                       Контроль просроченных платежей
                     </h1>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-500 mt-1 break-words">
                       Автоматические штрафы и пени не начисляются. Фиксируйте результаты контактов с клиентом, обещанную дату оплаты или согласованный перенос срока.
                     </p>
                   </div>
@@ -2393,16 +2656,16 @@ export default function App() {
                   {overdueContactForm && (
                     <form
                       onSubmit={handleSaveOverdueContact}
-                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-900 rounded-xl p-4 sm:p-5 space-y-4"
                     >
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-slate-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-slate-900 break-words">
                           Зафиксировать контакт с клиентом / обещанную дату оплаты
                         </h3>
                         <button
                           type="button"
                           onClick={() => setOverdueContactForm(null)}
-                          className="text-xs text-slate-500 hover:text-slate-900"
+                          className="text-xs text-slate-500 hover:text-slate-900 shrink-0"
                         >
                           Закрыть
                         </button>
@@ -2486,83 +2749,111 @@ export default function App() {
                   )}
 
                   <div className="space-y-4">
-                    {overdues.map((o) => (
-                      <div
-                        key={o.scheduleItemId}
-                        className="bg-white border border-slate-200 rounded-xl p-5 space-y-3"
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-4">
-                          <div className="space-y-1.5">
-                            <div className="text-sm font-semibold text-slate-900">
-                              {o.clientName} · <span className="font-mono">{o.clientPhone}</span>
+                    {overdues.map((o) => {
+                      const overdueContract = contracts.find((c) => c.id === o.contractId);
+                      return (
+                        <div
+                          key={o.scheduleItemId}
+                          className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 sm:gap-4">
+                            <div className="space-y-1.5 min-w-0">
+                              <div className="text-sm font-semibold text-slate-900 break-words">
+                                {overdueContract ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setViewingClientCardId(overdueContract.clientId)}
+                                    className="hover:underline text-left font-bold"
+                                  >
+                                    {o.clientName}
+                                  </button>
+                                ) : (
+                                  <span>{o.clientName}</span>
+                                )}{' '}
+                                · <span className="font-mono">{o.clientPhone}</span>
+                              </div>
+                              <div className="text-xs text-slate-600 break-words">
+                                Договор <span className="font-mono font-medium">{o.contractNumber}</span>{' '}
+                                · Товар: {o.itemTitle} · Платёж №{o.installmentNumber} от{' '}
+                                <span className="font-mono">{formatDateRu(o.dueDate)}</span>
+                              </div>
+                              <div className="pt-0.5 flex flex-wrap items-center gap-2">
+                                <QuickCallAndCopyBar
+                                  phone={o.clientPhone}
+                                  clientName={o.clientName}
+                                  onNotice={(msg) => notify('success', msg)}
+                                  onError={(err) => notify('error', err)}
+                                />
+                                {overdueContract && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setViewingClientCardId(overdueContract.clientId)}
+                                    className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-slate-100 border border-slate-200 rounded-md hover:bg-slate-200"
+                                  >
+                                    Карточка и поручители ({overdueContract.guarantors.length})
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                            <div className="text-xs text-slate-600">
-                              Договор <span className="font-mono font-medium">{o.contractNumber}</span>{' '}
-                              · Товар: {o.itemTitle} · Платёж №{o.installmentNumber} от{' '}
-                              <span className="font-mono">{formatDateRu(o.dueDate)}</span>
-                            </div>
-                            <div className="pt-0.5">
-                              <QuickCallAndCopyBar
-                                phone={o.clientPhone}
-                                clientName={o.clientName}
-                                onNotice={(msg) => notify('success', msg)}
-                                onError={(err) => notify('error', err)}
-                              />
+
+                            <div className="sm:text-right shrink-0">
+                              <div className="text-xs text-slate-500">
+                                Просрочка: <strong className="text-red-600">{o.daysOverdue} дн.</strong>
+                              </div>
+                              <div className="text-base font-bold font-mono text-red-600">
+                                {formatMoney(o.overdueKopecks)}
+                              </div>
+                              {o.promisedDate && (
+                                <div className="text-xs text-slate-600">
+                                  Обещанная дата: <span className="font-mono">{formatDateRu(o.promisedDate)}</span>
+                                </div>
+                              )}
                             </div>
                           </div>
 
-                          <div className="text-right">
-                            <div className="text-xs text-slate-500">
-                              Просрочка: <strong className="text-red-600">{o.daysOverdue} дн.</strong>
+                          {o.contacts.length > 0 && (
+                            <div className="pt-2 border-t border-slate-100 space-y-1.5 text-xs">
+                              <div className="font-medium text-slate-700">История контактов:</div>
+                              {o.contacts.map((ct) => (
+                                <div key={ct.id} className="text-slate-600 break-words">
+                                  <span className="font-mono text-slate-500">
+                                    {formatDateTimeRu(ct.createdAt)}
+                                  </span>{' '}
+                                  · {ct.summary}
+                                  {ct.promisedDate ? ` (обещано к ${formatDateRu(ct.promisedDate)})` : ''}
+                                </div>
+                              ))}
                             </div>
-                            <div className="text-base font-bold font-mono text-red-600">
-                              {formatMoney(o.overdueKopecks)}
+                          )}
+
+                          {canWrite && (
+                            <div className="pt-2 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setOverdueContactForm({
+                                    scheduleItemId: o.scheduleItemId,
+                                    contractId: o.contractId,
+                                    contactChannel: 'phone',
+                                    summary: '',
+                                    promisedDate: o.promisedDate || '',
+                                    agreedNewDueDate: '',
+                                  })
+                                }
+                                className="px-3 py-1.5 text-xs font-medium text-slate-800 border border-slate-300 rounded-lg hover:bg-slate-50"
+                              >
+                                Зафиксировать звонок / перенос даты
+                              </button>
                             </div>
-                            {o.promisedDate && (
-                              <div className="text-xs text-slate-600">
-                                Обещанная дата: <span className="font-mono">{formatDateRu(o.promisedDate)}</span>
-                              </div>
-                            )}
-                          </div>
+                          )}
                         </div>
-
-                        {o.contacts.length > 0 && (
-                          <div className="pt-2 border-t border-slate-100 space-y-1.5 text-xs">
-                            <div className="font-medium text-slate-700">История контактов:</div>
-                            {o.contacts.map((ct) => (
-                              <div key={ct.id} className="text-slate-600">
-                                <span className="font-mono text-slate-500">
-                                  {formatDateTimeRu(ct.createdAt)}
-                                </span>{' '}
-                                · {ct.summary}
-                                {ct.promisedDate ? ` (обещано к ${formatDateRu(ct.promisedDate)})` : ''}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {canWrite && (
-                          <div className="pt-2 flex justify-end">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setOverdueContactForm({
-                                  scheduleItemId: o.scheduleItemId,
-                                  contractId: o.contractId,
-                                  contactChannel: 'phone',
-                                  summary: '',
-                                  promisedDate: o.promisedDate || '',
-                                  agreedNewDueDate: '',
-                                })
-                              }
-                              className="px-3 py-1.5 text-xs font-medium text-slate-800 border border-slate-300 rounded-lg hover:bg-slate-50"
-                            >
-                              Зафиксировать звонок / перенос даты
-                            </button>
-                          </div>
-                        )}
+                      );
+                    })}
+                    {overdues.length === 0 && (
+                      <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-xs text-slate-500">
+                        Просроченных платежей не обнаружено. Все клиенты платят по графику.
                       </div>
-                    ))}
+                    )}
                   </div>
                 </div>
               )}
@@ -2571,10 +2862,10 @@ export default function App() {
               {activeSection === 'purchases' && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                       Целевые закупки товаров под клиентов
                     </h1>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-500 mt-1 break-words">
                       Полная себестоимость = Цена покупки в магазине + Доставка + Прочие прямые затраты.
                     </p>
                   </div>
@@ -2582,7 +2873,7 @@ export default function App() {
                   {canWrite && (
                     <form
                       onSubmit={handleCreatePurchase}
-                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
                     >
                       <h2 className="text-sm font-semibold text-slate-900">
                         Зарегистрировать новую покупку товара
@@ -2609,7 +2900,7 @@ export default function App() {
                           className="px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
                         >
                           <option value="">— Под клиента (опционально) —</option>
-                          {clients.map((cl) => (
+                          {borrowerClients.map((cl) => (
                             <option key={cl.id} value={cl.id}>
                               {cl.fullName}
                             </option>
@@ -2671,54 +2962,111 @@ export default function App() {
                     </form>
                   )}
 
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">Дата и товар</th>
-                          <th className="py-3 px-4 font-medium">Магазин / Клиент</th>
-                          <th className="py-3 px-4 font-medium text-right">Цена покупки</th>
-                          <th className="py-3 px-4 font-medium text-right">Доставка</th>
-                          <th className="py-3 px-4 font-medium text-right">Полная себестоимость</th>
-                          <th className="py-3 px-4 font-medium text-right">Долг поставщику</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {purchases.map((p) => (
-                          <tr key={p.id} className="hover:bg-slate-50/80">
-                            <td className="py-3 px-4">
-                              <div className="font-semibold text-slate-900">{p.itemName}</div>
-                              <div className="text-slate-500 mt-0.5">
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    {/* Mobile Cards */}
+                    <div className="md:hidden divide-y divide-slate-200">
+                      {purchases.map((p) => (
+                        <div key={p.id} className="p-4 space-y-2.5 text-xs">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-semibold text-sm text-slate-900 break-words">
+                                {p.itemName}
+                              </div>
+                              <div className="text-slate-500 mt-0.5 break-words">
                                 {formatDateRu(p.purchaseDate)} ·{' '}
                                 {p.contractNumber ? `Договор ${p.contractNumber}` : 'Свободен к оформлению'}
                               </div>
-                            </td>
-                            <td className="py-3 px-4">
-                              <div className="text-slate-900">{p.supplierName}</div>
-                              <div className="text-slate-500 mt-0.5">{p.clientName || '—'}</div>
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right">
-                              {formatMoney(p.purchasePriceKopecks)}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right">
-                              {formatMoney(p.deliveryCostKopecks + p.otherCostKopecks)}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900">
-                              {formatMoney(p.totalCostKopecks)}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right">
+                            </div>
+                            <div className="text-right shrink-0">
                               {p.supplierDebtKopecks > 0 ? (
-                                <span className="text-amber-700 font-semibold">
-                                  {formatMoney(p.supplierDebtKopecks)}
+                                <span className="inline-flex px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 font-mono font-semibold text-[11px]">
+                                  Долг: {formatMoney(p.supplierDebtKopecks)}
                                 </span>
                               ) : (
-                                <span className="text-emerald-700">Оплачено</span>
+                                <span className="inline-flex px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-medium text-[11px]">
+                                  Оплачено
+                                </span>
                               )}
-                            </td>
+                            </div>
+                          </div>
+                          <div className="text-slate-700 break-words">
+                            Магазин: <span className="font-medium">{p.supplierName}</span>
+                            {p.clientName ? ` · Клиент: ${p.clientName}` : ''}
+                          </div>
+                          <div className="grid grid-cols-3 gap-2 p-2.5 bg-slate-50 rounded-lg border border-slate-200/80">
+                            <div>
+                              <div className="text-[10px] text-slate-500">Закупка</div>
+                              <div className="font-mono font-medium text-slate-900 mt-0.5">
+                                {formatMoney(p.purchasePriceKopecks)}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-slate-500">Доставка</div>
+                              <div className="font-mono font-medium text-slate-900 mt-0.5">
+                                {formatMoney(p.deliveryCostKopecks + p.otherCostKopecks)}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-slate-500">Себестоимость</div>
+                              <div className="font-mono font-semibold text-slate-900 mt-0.5">
+                                {formatMoney(p.totalCostKopecks)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Desktop Table */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full min-w-[720px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium">Дата и товар</th>
+                            <th className="py-3 px-4 font-medium">Магазин / Клиент</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Цена покупки</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Доставка</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Полная себестоимость</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Долг поставщику</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {purchases.map((p) => (
+                            <tr key={p.id} className="hover:bg-slate-50/80">
+                              <td className="py-3 px-4">
+                                <div className="font-semibold text-slate-900 break-words">{p.itemName}</div>
+                                <div className="text-slate-500 mt-0.5">
+                                  {formatDateRu(p.purchaseDate)} ·{' '}
+                                  {p.contractNumber ? `Договор ${p.contractNumber}` : 'Свободен к оформлению'}
+                                </div>
+                              </td>
+                              <td className="py-3 px-4">
+                                <div className="text-slate-900 break-words">{p.supplierName}</div>
+                                <div className="text-slate-500 mt-0.5 break-words">{p.clientName || '—'}</div>
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right whitespace-nowrap">
+                                {formatMoney(p.purchasePriceKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right whitespace-nowrap">
+                                {formatMoney(p.deliveryCostKopecks + p.otherCostKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900 whitespace-nowrap">
+                                {formatMoney(p.totalCostKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right whitespace-nowrap">
+                                {p.supplierDebtKopecks > 0 ? (
+                                  <span className="text-amber-700 font-semibold">
+                                    {formatMoney(p.supplierDebtKopecks)}
+                                  </span>
+                                ) : (
+                                  <span className="text-emerald-700">Оплачено</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2727,8 +3075,10 @@ export default function App() {
               {activeSection === 'suppliers' && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">Магазины и поставщики</h1>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
+                      Магазины и поставщики
+                    </h1>
+                    <p className="text-xs text-slate-500 mt-1 break-words">
                       Учёт магазинов приобретения товаров, объёмов закупок и текущих обязательств перед поставщиками.
                     </p>
                   </div>
@@ -2736,7 +3086,7 @@ export default function App() {
                   {canWrite && (
                     <form
                       onSubmit={handleCreateSupplier}
-                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
                     >
                       <h2 className="text-sm font-semibold text-slate-900">
                         Добавить магазин или поставщика
@@ -2780,40 +3130,83 @@ export default function App() {
                     </form>
                   )}
 
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">Магазин / Поставщик</th>
-                          <th className="py-3 px-4 font-medium">Контакты</th>
-                          <th className="py-3 px-4 font-medium text-right">Закупок</th>
-                          <th className="py-3 px-4 font-medium text-right">Объём закупок</th>
-                          <th className="py-3 px-4 font-medium text-right">Оплачено</th>
-                          <th className="py-3 px-4 font-medium text-right">Наш долг поставщику</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {suppliers.map((s) => (
-                          <tr key={s.id} className="hover:bg-slate-50/80">
-                            <td className="py-3 px-4">
-                              <div className="font-semibold text-slate-900">{s.name}</div>
-                              <div className="text-slate-500 mt-0.5">{s.category}</div>
-                            </td>
-                            <td className="py-3 px-4 text-slate-600">{s.contactInfo || '—'}</td>
-                            <td className="py-3 px-4 font-mono text-right">{s.purchasesCount}</td>
-                            <td className="py-3 px-4 font-mono text-right">
-                              {formatMoney(s.totalPurchasedKopecks)}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right text-emerald-700">
-                              {formatMoney(s.totalPaidKopecks)}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right font-semibold text-amber-700">
-                              {formatMoney(s.totalDebtKopecks)}
-                            </td>
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    {/* Mobile Cards */}
+                    <div className="md:hidden divide-y divide-slate-200">
+                      {suppliers.map((s) => (
+                        <div key={s.id} className="p-4 space-y-2.5 text-xs">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-semibold text-sm text-slate-900 break-words">{s.name}</div>
+                              <div className="text-slate-500 mt-0.5 break-words">{s.category}</div>
+                            </div>
+                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[11px] shrink-0">
+                              Закупок: {s.purchasesCount}
+                            </span>
+                          </div>
+                          {s.contactInfo && (
+                            <div className="text-slate-600 break-words">{s.contactInfo}</div>
+                          )}
+                          <div className="grid grid-cols-3 gap-2 p-2.5 bg-slate-50 rounded-lg border border-slate-200/80">
+                            <div>
+                              <div className="text-[10px] text-slate-500">Объём закупок</div>
+                              <div className="font-mono font-medium text-slate-900 mt-0.5">
+                                {formatMoney(s.totalPurchasedKopecks)}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-slate-500">Оплачено</div>
+                              <div className="font-mono font-medium text-emerald-700 mt-0.5">
+                                {formatMoney(s.totalPaidKopecks)}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-slate-500">Наш долг</div>
+                              <div className="font-mono font-semibold text-amber-700 mt-0.5">
+                                {formatMoney(s.totalDebtKopecks)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Desktop Table */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full min-w-[680px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium">Магазин / Поставщик</th>
+                            <th className="py-3 px-4 font-medium">Контакты</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Закупок</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Объём закупок</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Оплачено</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Наш долг поставщику</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {suppliers.map((s) => (
+                            <tr key={s.id} className="hover:bg-slate-50/80">
+                              <td className="py-3 px-4">
+                                <div className="font-semibold text-slate-900 break-words">{s.name}</div>
+                                <div className="text-slate-500 mt-0.5 break-words">{s.category}</div>
+                              </td>
+                              <td className="py-3 px-4 text-slate-600 break-words">{s.contactInfo || '—'}</td>
+                              <td className="py-3 px-4 font-mono text-right whitespace-nowrap">{s.purchasesCount}</td>
+                              <td className="py-3 px-4 font-mono text-right whitespace-nowrap">
+                                {formatMoney(s.totalPurchasedKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right text-emerald-700 whitespace-nowrap">
+                                {formatMoney(s.totalPaidKopecks)}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right font-semibold text-amber-700 whitespace-nowrap">
+                                {formatMoney(s.totalDebtKopecks)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2822,39 +3215,39 @@ export default function App() {
               {(activeSection === 'cash_bank' || activeSection === 'expenses') && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                       {activeSection === 'cash_bank'
                         ? 'Касса, банковские счета и движение денежных средств'
                         : 'Операционные расходы бизнеса'}
                     </h1>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-500 mt-1 break-words">
                       Подтверждённые денежные операции не удаляются бесследно. Пополнения собственными средствами и внутренние переводы не искажают выручку.
                     </p>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     {accounts.map((acc) => (
-                      <div key={acc.id} className="bg-white border border-slate-200 rounded-xl p-5">
+                      <div key={acc.id} className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
                         <div className="text-xs text-slate-500">
                           {acc.accountType === 'cash' ? 'Наличная касса' : 'Банковский счёт'}
                         </div>
-                        <div className="text-sm font-semibold text-slate-900 mt-0.5">{acc.name}</div>
-                        <div className="text-2xl font-bold font-mono text-slate-900 mt-2">
+                        <div className="text-sm font-semibold text-slate-900 mt-0.5 break-words">{acc.name}</div>
+                        <div className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-2 break-words">
                           {formatMoney(acc.balanceKopecks)}
                         </div>
                       </div>
                     ))}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
                       <div className="text-xs text-slate-500">Статус сверки регистров</div>
                       <div className="text-sm font-semibold text-emerald-700 mt-1 flex items-center gap-1.5">
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span className="break-words">
                           {reconciliation?.isHealthy
                             ? 'Балансы счетов = сумме проводок'
                             : 'Обнаружено расхождение'}
                         </span>
                       </div>
-                      <div className="text-xs font-mono text-slate-500 mt-2">
+                      <div className="text-xs font-mono text-slate-500 mt-2 break-words">
                         Сальдо: {formatMoney(reconciliation?.calculatedLedgerBalanceKopecks || 0)}
                       </div>
                     </div>
@@ -2863,7 +3256,7 @@ export default function App() {
                   {canWrite && (
                     <form
                       onSubmit={handleRecordLedgerOperation}
-                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
                     >
                       <h2 className="text-sm font-semibold text-slate-900">
                         Провести операцию по кассе или банковскому счёту
@@ -2996,51 +3389,99 @@ export default function App() {
                     </form>
                   )}
 
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">Дата</th>
-                          <th className="py-3 px-4 font-medium">Счёт / Касса</th>
-                          <th className="py-3 px-4 font-medium">Вид операции и категория</th>
-                          <th className="py-3 px-4 font-medium">Основание</th>
-                          <th className="py-3 px-4 font-medium text-right">Сумма</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {ledger
-                          .filter(
-                            (l) =>
-                              activeSection === 'cash_bank' ||
-                              l.entryType === 'operating_expense' ||
-                              l.entryType === 'delivery_expense'
-                          )
-                          .map((l) => (
-                            <tr
-                              key={l.id}
-                              className={l.status === 'reversed' ? 'opacity-50 line-through' : ''}
-                            >
-                              <td className="py-3 px-4 font-mono">{formatDateRu(l.eventDate)}</td>
-                              <td className="py-3 px-4">{l.accountName}</td>
-                              <td className="py-3 px-4">
-                                <div className="font-medium text-slate-900">
-                                  {translateEntryType(l.entryType)}
-                                </div>
-                                <div className="text-slate-500">{l.category}</div>
-                              </td>
-                              <td className="py-3 px-4 text-slate-700">{l.description}</td>
-                              <td
-                                className={`py-3 px-4 font-mono text-right font-semibold ${
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    {/* Mobile Cards */}
+                    <div className="md:hidden divide-y divide-slate-200">
+                      {ledger
+                        .filter(
+                          (l) =>
+                            activeSection === 'cash_bank' ||
+                            l.entryType === 'operating_expense' ||
+                            l.entryType === 'delivery_expense'
+                        )
+                        .map((l) => (
+                          <div
+                            key={l.id}
+                            className={`p-4 space-y-1.5 text-xs ${
+                              l.status === 'reversed' ? 'opacity-50 line-through bg-slate-50' : ''
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="font-semibold text-slate-900 break-words">
+                                {translateEntryType(l.entryType)}
+                              </div>
+                              <div
+                                className={`font-mono font-bold shrink-0 ${
                                   l.direction === 'in' ? 'text-emerald-700' : 'text-slate-900'
                                 }`}
                               >
                                 {l.direction === 'in' ? '+' : '−'}
                                 {formatMoney(l.amountKopecks)}
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
+                              </div>
+                            </div>
+                            <div className="text-slate-500 flex flex-wrap items-center gap-2">
+                              <span className="font-mono">{formatDateRu(l.eventDate)}</span>
+                              <span>·</span>
+                              <span>{l.accountName}</span>
+                              {l.category && (
+                                <>
+                                  <span>·</span>
+                                  <span>{l.category}</span>
+                                </>
+                              )}
+                            </div>
+                            <div className="text-slate-700 break-words pt-0.5">{l.description}</div>
+                          </div>
+                        ))}
+                    </div>
+
+                    {/* Desktop Table */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full min-w-[680px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium whitespace-nowrap">Дата</th>
+                            <th className="py-3 px-4 font-medium">Счёт / Касса</th>
+                            <th className="py-3 px-4 font-medium">Вид операции и категория</th>
+                            <th className="py-3 px-4 font-medium">Основание</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Сумма</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {ledger
+                            .filter(
+                              (l) =>
+                                activeSection === 'cash_bank' ||
+                                l.entryType === 'operating_expense' ||
+                                l.entryType === 'delivery_expense'
+                            )
+                            .map((l) => (
+                              <tr
+                                key={l.id}
+                                className={l.status === 'reversed' ? 'opacity-50 line-through' : ''}
+                              >
+                                <td className="py-3 px-4 font-mono whitespace-nowrap">{formatDateRu(l.eventDate)}</td>
+                                <td className="py-3 px-4">{l.accountName}</td>
+                                <td className="py-3 px-4">
+                                  <div className="font-medium text-slate-900">
+                                    {translateEntryType(l.entryType)}
+                                  </div>
+                                  <div className="text-slate-500">{l.category}</div>
+                                </td>
+                                <td className="py-3 px-4 text-slate-700 break-words">{l.description}</td>
+                                <td
+                                  className={`py-3 px-4 font-mono text-right font-semibold whitespace-nowrap ${
+                                    l.direction === 'in' ? 'text-emerald-700' : 'text-slate-900'
+                                  }`}
+                                >
+                                  {l.direction === 'in' ? '+' : '−'}
+                                  {formatMoney(l.amountKopecks)}
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3049,11 +3490,11 @@ export default function App() {
               {activeSection === 'reports' && (
                 <div className="space-y-6">
                   <div className="flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                      <h1 className="text-2xl font-bold text-slate-900">
+                    <div className="min-w-0">
+                      <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                         Управленческая прибыль и отчёты за период
                       </h1>
-                      <p className="text-xs text-slate-500 mt-1">
+                      <p className="text-xs text-slate-500 mt-1 break-words">
                         До уточнения налогового режима владельца показатель именуется «Управленческая прибыль (до налогообложения)».
                       </p>
                     </div>
@@ -3087,15 +3528,15 @@ export default function App() {
                         }}
                         className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
                       >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>Экспорт Excel / CSV (безопасный)</span>
+                        <Download className="w-3.5 h-3.5 shrink-0" />
+                        <span>Экспорт Excel / CSV</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => window.print()}
                         className="px-3.5 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
                       >
-                        <Printer className="w-3.5 h-3.5" />
+                        <Printer className="w-3.5 h-3.5 shrink-0" />
                         <span>Печать отчёта (PDF)</span>
                       </button>
                     </div>
@@ -3103,54 +3544,54 @@ export default function App() {
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* P&L vs Cost of Goods */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-                      <h2 className="text-base font-semibold text-slate-900 border-b border-slate-200 pb-2">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
+                      <h2 className="text-sm sm:text-base font-semibold text-slate-900 border-b border-slate-200 pb-2 break-words">
                         1. Отчёт по портфелю договоров и управленческой прибыли
                       </h2>
                       <div className="space-y-2.5 text-xs">
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">
                             Объём продаж по оформленным договорам (с наценкой):
                           </span>
-                          <span className="font-mono font-semibold">
+                          <span className="font-mono font-semibold whitespace-nowrap shrink-0">
                             {formatMoney(financialMetrics.portfolioSaleVolumeKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">
                             Полная себестоимость реализованных по договорам товаров (закупка + доставка):
                           </span>
-                          <span className="font-mono">
+                          <span className="font-mono whitespace-nowrap shrink-0">
                             {formatMoney(financialMetrics.portfolioCostOfGoodsKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">
                             Ожидаемая валовая наценка по действующему портфелю:
                           </span>
-                          <span className="font-mono font-semibold text-emerald-700">
+                          <span className="font-mono font-semibold text-emerald-700 whitespace-nowrap shrink-0">
                             {formatMoney(financialMetrics.totalExpectedMarkupKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">
                             Фактически реализованная наценка в поступивших платежах:
                           </span>
-                          <span className="font-mono font-semibold text-emerald-700">
+                          <span className="font-mono font-semibold text-emerald-700 whitespace-nowrap shrink-0">
                             {formatMoney(financialMetrics.realizedGrossMarginKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">
                             Операционные расходы за период ({formatDateRu(periodFrom)} — {formatDateRu(periodTo)}):
                           </span>
-                          <span className="font-mono text-red-600">
+                          <span className="font-mono text-red-600 whitespace-nowrap shrink-0">
                             −{formatMoney(financialMetrics.operatingExpensesKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-2 bg-slate-50 px-3 rounded-lg font-semibold text-sm">
-                          <span>Управленческая прибыль (до налогообложения):</span>
-                          <span className="font-mono text-emerald-700">
+                        <div className="flex flex-wrap items-center justify-between gap-2 py-2.5 bg-slate-50 px-3 rounded-lg font-semibold text-xs sm:text-sm">
+                          <span className="break-words">Управленческая прибыль (до налогообложения):</span>
+                          <span className="font-mono text-emerald-700 whitespace-nowrap">
                             {formatMoney(financialMetrics.managementNetProfitKopecks)}
                           </span>
                         </div>
@@ -3158,50 +3599,50 @@ export default function App() {
                     </div>
 
                     {/* Cash Flow Statement */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-                      <h2 className="text-base font-semibold text-slate-900 border-b border-slate-200 pb-2">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
+                      <h2 className="text-sm sm:text-base font-semibold text-slate-900 border-b border-slate-200 pb-2 break-words">
                         2. Отчёт о движении денежных средств (ДДС) за период
                       </h2>
                       <div className="space-y-2.5 text-xs">
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">Поступления от клиентов по рассрочке:</span>
-                          <span className="font-mono font-semibold text-emerald-700">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">Поступления от клиентов по рассрочке:</span>
+                          <span className="font-mono font-semibold text-emerald-700 whitespace-nowrap shrink-0">
                             +{formatMoney(financialMetrics.clientInflowsKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">
                             Оплата закупок товаров и доставки поставщикам:
                           </span>
-                          <span className="font-mono">
+                          <span className="font-mono whitespace-nowrap shrink-0">
                             −{formatMoney(financialMetrics.purchaseOutflowsKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">Оплата операционных расходов:</span>
-                          <span className="font-mono">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">Оплата операционных расходов:</span>
+                          <span className="font-mono whitespace-nowrap shrink-0">
                             −{formatMoney(financialMetrics.operatingExpensesKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">
                             Собственные пополнения владельца (капитал, не выручка):
                           </span>
-                          <span className="font-mono text-slate-800">
+                          <span className="font-mono text-slate-800 whitespace-nowrap shrink-0">
                             +{formatMoney(financialMetrics.ownerInjectionsKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1 border-b border-slate-100">
-                          <span className="text-slate-600">Личные изъятия владельца:</span>
-                          <span className="font-mono text-slate-800">
+                        <div className="flex items-start justify-between gap-3 py-1 border-b border-slate-100">
+                          <span className="text-slate-600 break-words">Личные изъятия владельца:</span>
+                          <span className="font-mono text-slate-800 whitespace-nowrap shrink-0">
                             −{formatMoney(financialMetrics.ownerWithdrawalsKopecks)}
                           </span>
                         </div>
-                        <div className="flex justify-between py-1">
-                          <span className="text-slate-600">
+                        <div className="flex items-start justify-between gap-3 py-1">
+                          <span className="text-slate-600 break-words">
                             Внутренние переводы между счетами (нейтрально к прибыли):
                           </span>
-                          <span className="font-mono text-slate-500">
+                          <span className="font-mono text-slate-500 whitespace-nowrap shrink-0">
                             {formatMoney(financialMetrics.internalTransfersKopecks)}
                           </span>
                         </div>
@@ -3215,18 +3656,18 @@ export default function App() {
               {activeSection === 'documents' && (
                 <div className="space-y-6">
                   <div className="flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                      <h1 className="text-2xl font-bold text-slate-900">
+                    <div className="min-w-0">
+                      <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                         Защищённое хранилище документов и печатные шаблоны
                       </h1>
-                      <p className="text-xs text-slate-500 mt-1">
+                      <p className="text-xs text-slate-500 mt-1 break-words">
                         При загрузке проверяются расширение, размер (до 10 МБ) и бинарная сигнатура содержимого (magic bytes: PDF, PNG, JPEG).
                       </p>
                     </div>
                     {canWrite && (
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <label className="px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer flex items-center gap-1.5">
-                          <Upload className="w-3.5 h-3.5" />
+                          <Upload className="w-3.5 h-3.5 shrink-0" />
                           <span>Загрузить файл (PDF/PNG/JPG)</span>
                           <input
                             type="file"
@@ -3247,7 +3688,7 @@ export default function App() {
                   </div>
 
                   {/* Document Templates Generator */}
-                  <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
                     <h2 className="text-sm font-semibold text-slate-900">
                       Генерация документов по шаблонам для действующих договоров
                     </h2>
@@ -3257,11 +3698,11 @@ export default function App() {
                           key={c.id}
                           className="p-3.5 border border-slate-200 rounded-lg flex flex-wrap items-center justify-between gap-3 text-xs"
                         >
-                          <div>
-                            <div className="font-semibold text-slate-900">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-900 break-words">
                               {c.contractNumber} · {c.clientName}
                             </div>
-                            <div className="text-slate-500">{c.itemTitle}</div>
+                            <div className="text-slate-500 break-words">{c.itemTitle}</div>
                           </div>
                           <div className="flex flex-wrap gap-1.5">
                             <button
@@ -3304,101 +3745,181 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">Наименование документа</th>
-                          <th className="py-3 px-4 font-medium">Исходный файл и MIME</th>
-                          <th className="py-3 px-4 font-medium">Контрольная сумма SHA-256</th>
-                          <th className="py-3 px-4 font-medium text-right">Размер</th>
-                          <th className="py-3 px-4 font-medium text-right">Дата загрузки</th>
-                          <th className="py-3 px-4 font-medium text-right">Действия</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {documents.map((d) => (
-                          <tr key={d.id}>
-                            <td className="py-3 px-4 font-medium text-slate-900 flex items-center gap-2">
-                              <FileText className="w-4 h-4 text-slate-500 shrink-0" />
-                              <span>{d.title}</span>
-                            </td>
-                            <td className="py-3 px-4 font-mono text-slate-600">
-                              {d.originalFilename} · {d.mimeType}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-[11px] text-slate-500">
-                              {d.sha256Hash.slice(0, 24)}...
-                            </td>
-                            <td className="py-3 px-4 font-mono text-right">{d.sizeBytes} Б</td>
-                            <td className="py-3 px-4 font-mono text-right">
-                              {formatDateTimeRu(d.createdAt)}
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => setPreviewingDocument(d)}
-                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
-                                >
-                                  <Eye className="w-3 h-3" />
-                                  <span>Просмотр</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={async () => {
-                                    try {
-                                      await downloadProtectedFile(
-                                        `/api/v1/documents/${d.id}/download`,
-                                        d.originalFilename || `${d.id}.bin`
-                                      );
-                                      notify('success', `Файл «${d.originalFilename}» скачан (SHA-256 проверен).`);
-                                    } catch (err) {
-                                      notify(
-                                        'error',
-                                        err instanceof Error ? err.message : 'Ошибка скачивания документа'
-                                      );
-                                    }
-                                  }}
-                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
-                                >
-                                  <Download className="w-3 h-3" />
-                                  <span>Скачать</span>
-                                </button>
-                                {isOwner && (
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    {/* Mobile Cards */}
+                    <div className="md:hidden divide-y divide-slate-200">
+                      {documents.map((d) => (
+                        <div key={d.id} className="p-4 space-y-2.5 text-xs">
+                          <div className="flex items-start gap-2">
+                            <FileText className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                            <div className="min-w-0 flex-1">
+                              <div className="font-semibold text-slate-900 break-words">{d.title}</div>
+                              <div className="font-mono text-[11px] text-slate-500 break-all mt-0.5">
+                                {d.originalFilename} · {d.sizeBytes} Б · {formatDateTimeRu(d.createdAt)}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => setPreviewingDocument(d)}
+                              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
+                            >
+                              <Eye className="w-3 h-3 shrink-0" />
+                              <span>Просмотр</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  await downloadProtectedFile(
+                                    `/api/v1/documents/${d.id}/download`,
+                                    d.originalFilename || `${d.id}.bin`
+                                  );
+                                  notify('success', `Файл «${d.originalFilename}» скачан (SHA-256 проверен).`);
+                                } catch (err) {
+                                  notify(
+                                    'error',
+                                    err instanceof Error ? err.message : 'Ошибка скачивания документа'
+                                  );
+                                }
+                              }}
+                              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
+                            >
+                              <Download className="w-3 h-3 shrink-0" />
+                              <span>Скачать</span>
+                            </button>
+                            {isOwner && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await apiFetch(`/api/v1/documents/${d.id}`, {
+                                      method: 'DELETE',
+                                    });
+                                    await loadFullState();
+                                    notify('success', `Документ «${d.title}» удалён.`);
+                                  } catch (err) {
+                                    notify(
+                                      'error',
+                                      err instanceof Error ? err.message : 'Ошибка удаления документа'
+                                    );
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                              >
+                                Удалить
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {documents.length === 0 && (
+                        <div className="p-8 text-center text-xs text-slate-500">
+                          Нет загруженных файлов. Нажмите «Сформировать тестовый чек PDF» или загрузите файл.
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Desktop Table */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full min-w-[760px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium">Наименование документа</th>
+                            <th className="py-3 px-4 font-medium">Исходный файл и MIME</th>
+                            <th className="py-3 px-4 font-medium">Контрольная сумма SHA-256</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Размер</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Дата загрузки</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Действия</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {documents.map((d) => (
+                            <tr key={d.id}>
+                              <td className="py-3 px-4 font-medium text-slate-900">
+                                <div className="flex items-center gap-2">
+                                  <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                                  <span className="break-words">{d.title}</span>
+                                </div>
+                              </td>
+                              <td className="py-3 px-4 font-mono text-slate-600 break-all">
+                                {d.originalFilename} · {d.mimeType}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                                {d.sha256Hash.slice(0, 24)}...
+                              </td>
+                              <td className="py-3 px-4 font-mono text-right whitespace-nowrap">{d.sizeBytes} Б</td>
+                              <td className="py-3 px-4 font-mono text-right whitespace-nowrap">
+                                {formatDateTimeRu(d.createdAt)}
+                              </td>
+                              <td className="py-3 px-4 text-right whitespace-nowrap">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewingDocument(d)}
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
+                                  >
+                                    <Eye className="w-3 h-3 shrink-0" />
+                                    <span>Просмотр</span>
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={async () => {
                                       try {
-                                        await apiFetch(`/api/v1/documents/${d.id}`, {
-                                          method: 'DELETE',
-                                        });
-                                        await loadFullState();
-                                        notify('success', `Документ «${d.title}» удалён.`);
+                                        await downloadProtectedFile(
+                                          `/api/v1/documents/${d.id}/download`,
+                                          d.originalFilename || `${d.id}.bin`
+                                        );
+                                        notify('success', `Файл «${d.originalFilename}» скачан (SHA-256 проверен).`);
                                       } catch (err) {
                                         notify(
                                           'error',
-                                          err instanceof Error ? err.message : 'Ошибка удаления документа'
+                                          err instanceof Error ? err.message : 'Ошибка скачивания документа'
                                         );
                                       }
                                     }}
-                                    className="px-2.5 py-1 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 flex items-center gap-1"
                                   >
-                                    Удалить
+                                    <Download className="w-3 h-3 shrink-0" />
+                                    <span>Скачать</span>
                                   </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                        {documents.length === 0 && (
-                          <tr>
-                            <td colSpan={6} className="py-8 text-center text-slate-500">
-                              Нет загруженных файлов. Нажмите «Сформировать тестовый чек PDF» или загрузите файл.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                                  {isOwner && (
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          await apiFetch(`/api/v1/documents/${d.id}`, {
+                                            method: 'DELETE',
+                                          });
+                                          await loadFullState();
+                                          notify('success', `Документ «${d.title}» удалён.`);
+                                        } catch (err) {
+                                          notify(
+                                            'error',
+                                            err instanceof Error ? err.message : 'Ошибка удаления документа'
+                                          );
+                                        }
+                                      }}
+                                      className="px-2.5 py-1 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                                    >
+                                      Удалить
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                          {documents.length === 0 && (
+                            <tr>
+                              <td colSpan={6} className="py-8 text-center text-slate-500">
+                                Нет загруженных файлов. Нажмите «Сформировать тестовый чек PDF» или загрузите файл.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3407,10 +3928,10 @@ export default function App() {
               {activeSection === 'users' && isOwner && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                       Управление пользователями (только для администратора)
                     </h1>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-500 mt-1 break-words">
                       Самостоятельная регистрация отключена. Учётные записи создаются, активируются и блокируются вручную администратором. Первоначальный пароль передаётся сотруднику по защищённому каналу.
                     </p>
                   </div>
@@ -3437,7 +3958,7 @@ export default function App() {
                         notify('error', err instanceof Error ? err.message : 'Ошибка создания пользователя');
                       }
                     }}
-                    className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                    className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
                   >
                     <h2 className="text-sm font-semibold text-slate-900">
                       Создать новую учётную запись
@@ -3553,9 +4074,9 @@ export default function App() {
                           notify('error', err instanceof Error ? err.message : 'Ошибка обновления');
                         }
                       }}
-                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-900 rounded-xl p-4 sm:p-5 space-y-4"
                     >
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-2">
                         <h3 className="text-sm font-semibold text-slate-900">
                           Изменение номера телефона и роли пользователя
                         </h3>
@@ -3648,16 +4169,16 @@ export default function App() {
                           notify('error', err instanceof Error ? err.message : 'Ошибка сброса пароля');
                         }
                       }}
-                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-900 rounded-xl p-4 sm:p-5 space-y-4"
                     >
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-slate-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-slate-900 break-words">
                           Сброс пароля для номера {resetPasswordModal.phone}
                         </h3>
                         <button
                           type="button"
                           onClick={() => setResetPasswordModal(null)}
-                          className="text-xs text-slate-500 hover:text-slate-900"
+                          className="text-xs text-slate-500 hover:text-slate-900 shrink-0"
                         >
                           Отмена
                         </button>
@@ -3680,7 +4201,7 @@ export default function App() {
                             required
                           />
                         </div>
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
                           <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
                             <input
                               type="checkbox"
@@ -3704,134 +4225,248 @@ export default function App() {
                     </form>
                   )}
 
-                  {/* Users List Table */}
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-3 px-4 font-medium">Номер телефона и описание</th>
-                          <th className="py-3 px-4 font-medium">Статус аккаунта</th>
-                          <th className="py-3 px-4 font-medium">Статус пароля</th>
-                          <th className="py-3 px-4 font-medium">Роль</th>
-                          <th className="py-3 px-4 font-medium">Дата создания</th>
-                          <th className="py-3 px-4 font-medium text-right">Действия администратора</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {users.map((u) => (
-                          <tr key={u.id}>
-                            <td className="py-3 px-4">
-                              <div className="font-mono font-semibold text-slate-900">{u.phone}</div>
-                              <div className="text-slate-500">{u.fullName}</div>
-                            </td>
-                            <td className="py-3 px-4">
+                  {/* Users List */}
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    {/* Mobile Cards */}
+                    <div className="md:hidden divide-y divide-slate-200">
+                      {users.map((u) => (
+                        <div key={u.id} className="p-4 space-y-3 text-xs">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-mono font-bold text-sm text-slate-900">{u.phone}</div>
+                              <div className="text-slate-500 break-words">{u.fullName}</div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[11px]">
+                                {u.role}
+                              </span>
                               {u.status === 'active' ? (
-                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200">
                                   Активен
                                 </span>
                               ) : (
-                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium text-red-700 bg-red-50 border border-red-200">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-red-700 bg-red-50 border border-red-200">
                                   Заблокирован
                                 </span>
                               )}
-                            </td>
-                            <td className="py-3 px-4">
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                            <div>
+                              Пароль:{' '}
                               {u.passwordChangedAt ? (
-                                <div className="space-y-0.5">
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
-                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                                    Изменён
-                                  </span>
-                                  <div className="text-[10px] font-mono text-slate-500">
-                                    {formatDateTimeRu(u.passwordChangedAt)}
-                                  </div>
-                                </div>
+                                <span className="text-emerald-700 font-medium">
+                                  Изменён ({formatDateTimeRu(u.passwordChangedAt)})
+                                </span>
                               ) : u.mustChangePassword ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
-                                  ⏳ Временный (запрошена смена)
-                                </span>
+                                <span className="text-amber-700 font-medium">Временный (запрошена смена)</span>
                               ) : (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
-                                  🔑 Первоначальный (активен)
-                                </span>
+                                <span className="text-slate-700 font-medium">Первоначальный</span>
                               )}
-                            </td>
-                            <td className="py-3 px-4 font-mono">{u.role}</td>
-                            <td className="py-3 px-4 font-mono text-slate-600">
-                              {formatDateTimeRu(u.createdAt)}
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <div className="flex flex-wrap items-center justify-end gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setEditingUser({
-                                      id: u.id,
-                                      phone: u.phone,
-                                      fullName: u.fullName,
-                                      role: u.role,
-                                    })
-                                  }
-                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
-                                >
-                                  Изменить номер / роль
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setResetPasswordModal({
-                                      id: u.id,
-                                      phone: u.phone,
-                                      newPassword: '',
-                                      mustChangePassword: false,
-                                    })
-                                  }
-                                  className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
-                                >
-                                  Сбросить пароль
-                                </button>
-                                {u.status === 'blocked' && (
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      await apiFetch(`/api/v1/users/${u.id}`, {
-                                        method: 'PATCH',
-                                        body: JSON.stringify({ status: 'active' }),
-                                      });
-                                      await loadFullState();
-                                      notify('success', `Аккаунт ${u.phone} активирован.`);
-                                    }}
-                                    className="px-2.5 py-1 text-xs font-medium text-white bg-slate-900 rounded-lg"
-                                  >
-                                    Активировать
-                                  </button>
-                                )}
-                                {u.id !== currentUser?.id && u.status === 'active' && (
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      await apiFetch(`/api/v1/users/${u.id}/block`, {
-                                        method: 'POST',
-                                      });
-                                      await loadFullState();
-                                      notify(
-                                        'success',
-                                        `Аккаунт ${u.phone} заблокирован, активные сессии отозваны.`
-                                      );
-                                    }}
-                                    className="px-2.5 py-1 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
-                                  >
-                                    Заблокировать
-                                  </button>
-                                )}
-                              </div>
-                            </td>
+                            </div>
+                            <div className="font-mono text-slate-400">
+                              Создан: {formatDateTimeRu(u.createdAt)}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingUser({
+                                  id: u.id,
+                                  phone: u.phone,
+                                  fullName: u.fullName,
+                                  role: u.role,
+                                })
+                              }
+                              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                            >
+                              Изменить номер / роль
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setResetPasswordModal({
+                                  id: u.id,
+                                  phone: u.phone,
+                                  newPassword: '',
+                                  mustChangePassword: false,
+                                })
+                              }
+                              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                            >
+                              Сбросить пароль
+                            </button>
+                            {u.status === 'blocked' && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  await apiFetch(`/api/v1/users/${u.id}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ status: 'active' }),
+                                  });
+                                  await loadFullState();
+                                  notify('success', `Аккаунт ${u.phone} активирован.`);
+                                }}
+                                className="px-2.5 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                              >
+                                Активировать
+                              </button>
+                            )}
+                            {u.id !== currentUser?.id && u.status === 'active' && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  await apiFetch(`/api/v1/users/${u.id}/block`, {
+                                    method: 'POST',
+                                  });
+                                  await loadFullState();
+                                  notify(
+                                    'success',
+                                    `Аккаунт ${u.phone} заблокирован, активные сессии отозваны.`
+                                  );
+                                }}
+                                className="px-2.5 py-1.5 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                              >
+                                Заблокировать
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Desktop Table */}
+                    <div className="hidden md:block overflow-x-auto">
+                      <table className="w-full min-w-[780px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-3 px-4 font-medium">Номер телефона и описание</th>
+                            <th className="py-3 px-4 font-medium whitespace-nowrap">Статус аккаунта</th>
+                            <th className="py-3 px-4 font-medium whitespace-nowrap">Статус пароля</th>
+                            <th className="py-3 px-4 font-medium whitespace-nowrap">Роль</th>
+                            <th className="py-3 px-4 font-medium whitespace-nowrap">Дата создания</th>
+                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Действия администратора</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {users.map((u) => (
+                            <tr key={u.id}>
+                              <td className="py-3 px-4">
+                                <div className="font-mono font-semibold text-slate-900">{u.phone}</div>
+                                <div className="text-slate-500 break-words">{u.fullName}</div>
+                              </td>
+                              <td className="py-3 px-4 whitespace-nowrap">
+                                {u.status === 'active' ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                    Активен
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium text-red-700 bg-red-50 border border-red-200">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                                    Заблокирован
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-4 whitespace-nowrap">
+                                {u.passwordChangedAt ? (
+                                  <div className="space-y-0.5">
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                      Изменён
+                                    </span>
+                                    <div className="text-[10px] font-mono text-slate-500">
+                                      {formatDateTimeRu(u.passwordChangedAt)}
+                                    </div>
+                                  </div>
+                                ) : u.mustChangePassword ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
+                                    ⏳ Временный (запрошена смена)
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-700 border border-slate-200">
+                                    🔑 Первоначальный (активен)
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-4 font-mono whitespace-nowrap">{u.role}</td>
+                              <td className="py-3 px-4 font-mono text-slate-600 whitespace-nowrap">
+                                {formatDateTimeRu(u.createdAt)}
+                              </td>
+                              <td className="py-3 px-4 text-right whitespace-nowrap">
+                                <div className="flex flex-wrap items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setEditingUser({
+                                        id: u.id,
+                                        phone: u.phone,
+                                        fullName: u.fullName,
+                                        role: u.role,
+                                      })
+                                    }
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                                  >
+                                    Изменить номер / роль
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setResetPasswordModal({
+                                        id: u.id,
+                                        phone: u.phone,
+                                        newPassword: '',
+                                        mustChangePassword: false,
+                                      })
+                                    }
+                                    className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50"
+                                  >
+                                    Сбросить пароль
+                                  </button>
+                                  {u.status === 'blocked' && (
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        await apiFetch(`/api/v1/users/${u.id}`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ status: 'active' }),
+                                        });
+                                        await loadFullState();
+                                        notify('success', `Аккаунт ${u.phone} активирован.`);
+                                      }}
+                                      className="px-2.5 py-1 text-xs font-medium text-white bg-slate-900 rounded-lg"
+                                    >
+                                      Активировать
+                                    </button>
+                                  )}
+                                  {u.id !== currentUser?.id && u.status === 'active' && (
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        await apiFetch(`/api/v1/users/${u.id}/block`, {
+                                          method: 'POST',
+                                        });
+                                        await loadFullState();
+                                        notify(
+                                          'success',
+                                          `Аккаунт ${u.phone} заблокирован, активные сессии отозваны.`
+                                        );
+                                      }}
+                                      className="px-2.5 py-1 text-xs text-red-700 border border-red-200 rounded-lg hover:bg-red-50"
+                                    >
+                                      Заблокировать
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3840,10 +4475,10 @@ export default function App() {
               {activeSection === 'installment_settings' && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                       Гибкие версионируемые настройки рассрочки
                     </h1>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-500 mt-1 break-words">
                       Изменение сроков, процентов наценки, первоначального взноса и правил округления применяется к новым договорам. Уже оформленные договоры сохраняют свои зафиксированные условия.
                     </p>
                   </div>
@@ -3862,11 +4497,11 @@ export default function App() {
                     {plans.map((p) => (
                       <div
                         key={p.id}
-                        className="bg-white border border-slate-200 rounded-xl p-5 space-y-3"
+                        className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3"
                       >
-                        <div className="flex items-start justify-between">
-                          <div>
-                            <div className="text-base font-bold text-slate-900">{p.name}</div>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-base font-bold text-slate-900 break-words">{p.name}</div>
                             <div className="text-xs text-slate-500 font-mono">
                               Версия v{p.version} · {p.isActive ? 'Активен' : 'Отключён для новых'}
                             </div>
@@ -3887,7 +4522,7 @@ export default function App() {
                                   reason: 'Плановое изменение условий тарифа владельцем',
                                 })
                               }
-                              className="text-xs font-medium text-slate-900 underline"
+                              className="text-xs font-medium text-slate-900 underline shrink-0"
                             >
                               Изменить
                             </button>
@@ -3895,23 +4530,23 @@ export default function App() {
                         </div>
 
                         <div className="space-y-1.5 text-xs border-t border-slate-100 pt-3">
-                          <div className="flex justify-between">
+                          <div className="flex justify-between gap-2">
                             <span className="text-slate-500">Срок рассрочки:</span>
                             <span className="font-mono font-semibold">{p.termMonths} мес.</span>
                           </div>
-                          <div className="flex justify-between">
+                          <div className="flex justify-between gap-2">
                             <span className="text-slate-500">Наценка на себестоимость:</span>
                             <span className="font-mono font-semibold text-emerald-700">
                               {p.markupPercent}%
                             </span>
                           </div>
-                          <div className="flex justify-between">
+                          <div className="flex justify-between gap-2">
                             <span className="text-slate-500">Стандартный первый взнос:</span>
                             <span className="font-mono font-semibold">{p.downPaymentPercent}%</span>
                           </div>
-                          <div className="flex justify-between">
+                          <div className="flex justify-between gap-2">
                             <span className="text-slate-500">Округление графика:</span>
-                            <span className="font-mono">{p.roundingRule}</span>
+                            <span className="font-mono">{translateRoundingRule(p.roundingRule)}</span>
                           </div>
                         </div>
                       </div>
@@ -3922,16 +4557,16 @@ export default function App() {
                   {editingPlan && isOwner && (
                     <form
                       onSubmit={handleUpdatePlan}
-                      className="bg-white border border-slate-900 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-900 rounded-xl p-4 sm:p-5 space-y-4"
                     >
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold text-slate-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-slate-900 break-words">
                           Редактирование тарифа «{editingPlan.name}» (создаст новую версию настроек)
                         </h3>
                         <button
                           type="button"
                           onClick={() => setEditingPlan(null)}
-                          className="text-xs text-slate-500"
+                          className="text-xs text-slate-500 shrink-0"
                         >
                           Отмена
                         </button>
@@ -4048,7 +4683,7 @@ export default function App() {
                   {isOwner && (
                     <form
                       onSubmit={handleCreatePlan}
-                      className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
+                      className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
                     >
                       <h2 className="text-sm font-semibold text-slate-900">
                         Добавить новый срок / тариф рассрочки без изменения кода
@@ -4107,40 +4742,42 @@ export default function App() {
                   )}
 
                   {/* Settings Change History */}
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <div className="px-5 py-3.5 border-b border-slate-200">
-                      <h3 className="text-sm font-semibold text-slate-900">
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200">
+                      <h3 className="text-sm font-semibold text-slate-900 break-words">
                         Журнал истории изменений настроек рассрочки (старое и новое значение, автор, время)
                       </h3>
                     </div>
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-2.5 px-4 font-medium">Время</th>
-                          <th className="py-2.5 px-4 font-medium">Пользователь</th>
-                          <th className="py-2.5 px-4 font-medium">Старое значение</th>
-                          <th className="py-2.5 px-4 font-medium">Новое значение</th>
-                          <th className="py-2.5 px-4 font-medium">Основание</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {settingsHistory.map((sh) => (
-                          <tr key={sh.id}>
-                            <td className="py-2.5 px-4 font-mono">
-                              {formatDateTimeRu(sh.createdAt)}
-                            </td>
-                            <td className="py-2.5 px-4 font-mono">{sh.changedByEmail}</td>
-                            <td className="py-2.5 px-4 font-mono text-[11px] text-slate-500">
-                              {sh.oldValueJson}
-                            </td>
-                            <td className="py-2.5 px-4 font-mono text-[11px] text-slate-900">
-                              {sh.newValueJson}
-                            </td>
-                            <td className="py-2.5 px-4 text-slate-600">{sh.reason}</td>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[680px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-2.5 px-4 font-medium whitespace-nowrap">Время</th>
+                            <th className="py-2.5 px-4 font-medium whitespace-nowrap">Пользователь</th>
+                            <th className="py-2.5 px-4 font-medium">Старое значение</th>
+                            <th className="py-2.5 px-4 font-medium">Новое значение</th>
+                            <th className="py-2.5 px-4 font-medium">Основание</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {settingsHistory.map((sh) => (
+                            <tr key={sh.id}>
+                              <td className="py-2.5 px-4 font-mono whitespace-nowrap">
+                                {formatDateTimeRu(sh.createdAt)}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono whitespace-nowrap">{sh.changedByEmail}</td>
+                              <td className="py-2.5 px-4 font-mono text-[11px] text-slate-500 break-all">
+                                {sh.oldValueJson}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono text-[11px] text-slate-900 break-all">
+                                {sh.newValueJson}
+                              </td>
+                              <td className="py-2.5 px-4 text-slate-600 break-words">{sh.reason}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -4149,20 +4786,20 @@ export default function App() {
               {activeSection === 'security_settings' && isOwner && (
                 <div className="space-y-6">
                   <div>
-                    <h1 className="text-2xl font-bold text-slate-900">
+                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
                       Настройки безопасности, шифрованные резервные копии и журнал аудита
                     </h1>
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-500 mt-1 break-words">
                       Управление вторым фактором (TOTP MFA), резервное копирование AES-256-GCM с тестом восстановления и неизменяемый журнал событий.
                     </p>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* TOTP MFA Configuration */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
                       <div className="flex items-center gap-2">
-                        <Lock className="w-4 h-4 text-slate-900" />
-                        <h2 className="text-sm font-semibold text-slate-900">
+                        <Lock className="w-4 h-4 text-slate-900 shrink-0" />
+                        <h2 className="text-sm font-semibold text-slate-900 break-words">
                           Двухфакторная аутентификация владельца (TOTP MFA, RFC 6238)
                         </h2>
                       </div>
@@ -4193,7 +4830,7 @@ export default function App() {
 
                           {mfaSetupInfo && (
                             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs space-y-2">
-                              <div>
+                              <div className="break-all">
                                 Секрет Base32:{' '}
                                 <span className="font-mono font-bold">{mfaSetupInfo.secret}</span>
                               </div>
@@ -4203,7 +4840,7 @@ export default function App() {
                                   {mfaSetupInfo.currentSampleCode}
                                 </span>
                               </div>
-                              <div className="flex items-center gap-2 pt-1">
+                              <div className="flex flex-wrap items-center gap-2 pt-1">
                                 <input
                                   type="text"
                                   value={mfaConfirmCode}
@@ -4247,9 +4884,9 @@ export default function App() {
                     </div>
 
                     {/* Encrypted Backups & Restore Verification */}
-                    <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h2 className="text-sm font-semibold text-slate-900">
+                        <h2 className="text-sm font-semibold text-slate-900 break-words">
                           Шифрованное резервное копирование (AES-256-GCM)
                         </h2>
                         <div className="flex flex-wrap items-center gap-2">
@@ -4312,24 +4949,24 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="space-y-2 max-h-48 overflow-y-auto">
+                      <div className="space-y-2 max-h-60 overflow-y-auto">
                         {backups.map((b) => (
                           <div
                             key={b.id}
-                            className="p-3 border border-slate-200 rounded-lg flex items-center justify-between gap-2 text-xs"
+                            className="p-3 border border-slate-200 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
                           >
-                            <div>
-                              <div className="font-mono font-medium text-slate-900">
+                            <div className="min-w-0">
+                              <div className="font-mono font-medium text-slate-900 break-all">
                                 {b.filename}
                               </div>
-                              <div className="text-slate-500 mt-0.5">
+                              <div className="text-slate-500 mt-0.5 break-words">
                                 {b.encryptedAlg} · SHA-256: {b.sha256Hash.slice(0, 12)}... ·{' '}
                                 {b.verifiedRestoreAt
                                   ? `Восстановление проверено: ${formatDateTimeRu(b.verifiedRestoreAt)}`
                                   : 'Ожидает теста восстановления'}
                               </div>
                             </div>
-                            <div className="flex flex-wrap items-center gap-1.5">
+                            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                               <button
                                 type="button"
                                 onClick={async () => {
@@ -4409,16 +5046,16 @@ export default function App() {
                   </div>
 
                   {/* Clean Production Reset Card (Owner Only) */}
-                  <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4">
                     <div className="space-y-1 max-w-2xl">
                       <h3 className="text-sm font-semibold text-slate-900">
                         Чистый старт для продакшена (очистка демо и тестовых записей)
                       </h3>
-                      <p className="text-xs text-slate-600">
+                      <p className="text-xs text-slate-600 break-words">
                         Перед очисткой автоматически создаётся зашифрованная резервная копия (AES-256-GCM). Удаляются только тестовые договоры, клиенты, платежи и проводки; ваша учётная запись владельца ({currentUser?.phone}), тарифы рассрочки и счета кассы/банка (с балансом 0,00 ₽) полностью сохраняются.
                       </p>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {!confirmCleanResetDb ? (
                         <button
                           type="button"
@@ -4428,7 +5065,7 @@ export default function App() {
                           Очистить базу для чистого старта
                         </button>
                       ) : (
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <button
                             type="button"
                             onClick={async () => {
@@ -4467,34 +5104,36 @@ export default function App() {
                   </div>
 
                   {/* Immutable Audit Log */}
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <div className="px-5 py-3.5 border-b border-slate-200">
-                      <h3 className="text-sm font-semibold text-slate-900">
+                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200">
+                      <h3 className="text-sm font-semibold text-slate-900 break-words">
                         Защищённый журнал аудита безопасности и финансовых действий
                       </h3>
                     </div>
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                          <th className="py-2.5 px-4 font-medium">Время (UTC)</th>
-                          <th className="py-2.5 px-4 font-medium">Пользователь</th>
-                          <th className="py-2.5 px-4 font-medium">Код события</th>
-                          <th className="py-2.5 px-4 font-medium">Описание действия</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {auditLogs.map((a) => (
-                          <tr key={a.id}>
-                            <td className="py-2.5 px-4 font-mono whitespace-nowrap">
-                              {formatDateTimeRu(a.createdAt)}
-                            </td>
-                            <td className="py-2.5 px-4 font-mono">{a.actorEmail}</td>
-                            <td className="py-2.5 px-4 font-mono text-slate-800">{a.action}</td>
-                            <td className="py-2.5 px-4 text-slate-700">{a.summary}</td>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[640px] text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                            <th className="py-2.5 px-4 font-medium whitespace-nowrap">Время (UTC)</th>
+                            <th className="py-2.5 px-4 font-medium whitespace-nowrap">Пользователь</th>
+                            <th className="py-2.5 px-4 font-medium whitespace-nowrap">Код события</th>
+                            <th className="py-2.5 px-4 font-medium">Описание действия</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {auditLogs.map((a) => (
+                            <tr key={a.id}>
+                              <td className="py-2.5 px-4 font-mono whitespace-nowrap">
+                                {formatDateTimeRu(a.createdAt)}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono whitespace-nowrap">{a.actorEmail}</td>
+                              <td className="py-2.5 px-4 font-mono text-slate-800 whitespace-nowrap">{a.action}</td>
+                              <td className="py-2.5 px-4 text-slate-700 break-words">{a.summary}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -4576,7 +5215,7 @@ export default function App() {
 
       {showNewPaymentModal && (
         <NewPaymentModal
-          clients={clients}
+          clients={borrowerClients}
           contracts={contracts}
           accounts={accounts}
           onClose={() => setShowNewPaymentModal(false)}
