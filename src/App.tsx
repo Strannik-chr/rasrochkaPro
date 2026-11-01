@@ -1517,7 +1517,7 @@ export default function App() {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Быстрый поиск по клиенту, договору, товару..."
-                  className="w-full pl-9 pr-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                  className="w-full pl-9 pr-3 py-2 text-base sm:text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
                 />
               </div>
 
@@ -1796,7 +1796,7 @@ export default function App() {
                                 setClientForm((p) => ({ ...p, fullName: e.target.value }))
                               }
                               placeholder="ФИО клиента полностью *"
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                               required
                             />
                             <input
@@ -1806,7 +1806,7 @@ export default function App() {
                                 setClientForm((p) => ({ ...p, phone: e.target.value }))
                               }
                               placeholder="Основной телефон *"
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                               required
                             />
                             <input
@@ -1816,7 +1816,7 @@ export default function App() {
                                 setClientForm((p) => ({ ...p, secondaryPhone: e.target.value }))
                               }
                               placeholder="Дополнительный телефон"
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             />
                             <input
                               type="text"
@@ -1825,7 +1825,7 @@ export default function App() {
                                 setClientForm((p) => ({ ...p, documentRef: e.target.value }))
                               }
                               placeholder="Отметка о документе (без лишних ПДн)"
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             />
                             <input
                               type="text"
@@ -1834,7 +1834,7 @@ export default function App() {
                                 setClientForm((p) => ({ ...p, address: e.target.value }))
                               }
                               placeholder="Адрес доставки / проживания"
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             />
                             <input
                               type="text"
@@ -1843,7 +1843,7 @@ export default function App() {
                                 setClientForm((p) => ({ ...p, notes: e.target.value }))
                               }
                               placeholder="Примечание"
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             />
                           </div>
                           <div className="flex flex-col sm:flex-row sm:justify-end gap-2">
@@ -1912,7 +1912,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, fullName: e.target.value } : null))
                           }
                           placeholder="ФИО клиента полностью *"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -1922,7 +1922,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, phone: e.target.value } : null))
                           }
                           placeholder="Основной телефон *"
-                          className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -1934,7 +1934,7 @@ export default function App() {
                             )
                           }
                           placeholder="Дополнительный телефон"
-                          className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1943,7 +1943,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, documentRef: e.target.value } : null))
                           }
                           placeholder="Отметка о документе"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1952,7 +1952,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, address: e.target.value } : null))
                           }
                           placeholder="Адрес доставки / проживания"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -1961,7 +1961,7 @@ export default function App() {
                             setEditingClient((p) => (p ? { ...p, notes: e.target.value } : null))
                           }
                           placeholder="Примечание"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                         />
                       </div>
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1972,7 +1972,7 @@ export default function App() {
                               p ? { ...p, status: e.target.value as 'active' | 'archived' } : null
                             )
                           }
-                          className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                          className="px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                         >
                           <option value="active">Статус: Активен</option>
                           <option value="archived">Статус: В архиве</option>
@@ -2047,7 +2047,7 @@ export default function App() {
                         <select
                           value={clientSortBy}
                           onChange={(e) => setClientSortBy(e.target.value as any)}
-                          className="w-full sm:w-auto px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                          className="w-full sm:w-auto px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                         >
                           <option value="status_severity">По статусу (проблемные сверху)</option>
                           <option value="debt_desc">По сумме остатка долга (убыв.)</option>
@@ -3025,7 +3025,7 @@ export default function App() {
                                 p ? { ...p, contactChannel: e.target.value as any } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                           >
                             <option value="phone">Телефонный звонок</option>
                             <option value="messenger">Сообщение в мессенджере</option>
@@ -3044,7 +3044,7 @@ export default function App() {
                                 p ? { ...p, promisedDate: e.target.value } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           />
                         </div>
                         <div>
@@ -3059,7 +3059,7 @@ export default function App() {
                                 p ? { ...p, agreedNewDueDate: e.target.value } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           />
                         </div>
                         <div className="sm:col-span-3">
@@ -3075,7 +3075,7 @@ export default function App() {
                               )
                             }
                             placeholder="Например: Клиент предупредил о задержке зарплаты, обязуется внести остаток 31.10.2026"
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             required
                           />
                         </div>
@@ -3227,7 +3227,7 @@ export default function App() {
                           onChange={(e) =>
                             setPurchaseForm((p) => ({ ...p, supplierId: e.target.value }))
                           }
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          className="px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                         >
                           {suppliers.map((s) => (
                             <option key={s.id} value={s.id}>
@@ -3240,7 +3240,7 @@ export default function App() {
                           onChange={(e) =>
                             setPurchaseForm((p) => ({ ...p, clientId: e.target.value }))
                           }
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          className="px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                         >
                           <option value="">— Под клиента (опционально) —</option>
                           {borrowerClients.map((cl) => (
@@ -3256,7 +3256,7 @@ export default function App() {
                             setPurchaseForm((p) => ({ ...p, itemName: e.target.value }))
                           }
                           placeholder="Наименование товара *"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -3268,7 +3268,7 @@ export default function App() {
                             setPurchaseForm((p) => ({ ...p, purchaseRubles: e.target.value }))
                           }
                           placeholder="Цена покупки в магазине (₽) *"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -3280,7 +3280,7 @@ export default function App() {
                             setPurchaseForm((p) => ({ ...p, deliveryRubles: e.target.value }))
                           }
                           placeholder="Стоимость доставки (₽)"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                         />
                         <input
                           type="number"
@@ -3291,7 +3291,7 @@ export default function App() {
                             setPurchaseForm((p) => ({ ...p, paidSupplierRubles: e.target.value }))
                           }
                           placeholder="Оплачено поставщику сразу (₽)"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                         />
                       </div>
                       <div className="flex justify-end">
@@ -3440,7 +3440,7 @@ export default function App() {
                           value={supplierForm.name}
                           onChange={(e) => setSupplierForm((p) => ({ ...p, name: e.target.value }))}
                           placeholder="Название магазина / поставщика *"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -3450,7 +3450,7 @@ export default function App() {
                             setSupplierForm((p) => ({ ...p, category: e.target.value }))
                           }
                           placeholder="Направление (Электроника, Мебель, Автотовары)"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                         />
                         <input
                           type="text"
@@ -3459,7 +3459,7 @@ export default function App() {
                             setSupplierForm((p) => ({ ...p, contactInfo: e.target.value }))
                           }
                           placeholder="Контакты и адрес магазина"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                         />
                       </div>
                       <div className="flex justify-end">
@@ -3634,7 +3634,7 @@ export default function App() {
                                     : 'Аренда и операционные расходы',
                               }));
                             }}
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                           >
                             <option value="operating_expense">Операционный расход бизнеса</option>
                             <option value="internal_transfer">
@@ -3662,7 +3662,7 @@ export default function App() {
                             onChange={(e) =>
                               setLedgerForm((p) => ({ ...p, accountId: e.target.value }))
                             }
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                           >
                             {accounts.map((a) => (
                               <option key={a.id} value={a.id}>
@@ -3682,7 +3682,7 @@ export default function App() {
                               onChange={(e) =>
                                 setLedgerForm((p) => ({ ...p, targetAccountId: e.target.value }))
                               }
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                             >
                               {accounts.map((a) => (
                                 <option key={a.id} value={a.id}>
@@ -3702,7 +3702,7 @@ export default function App() {
                               onChange={(e) =>
                                 setLedgerForm((p) => ({ ...p, category: e.target.value }))
                               }
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             />
                           </div>
                         )}
@@ -3720,7 +3720,7 @@ export default function App() {
                               setLedgerForm((p) => ({ ...p, amountRubles: e.target.value }))
                             }
                             placeholder="0.00"
-                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                             required
                           />
                         </div>
@@ -3743,7 +3743,7 @@ export default function App() {
                                   ? `Напр.: ${currentUser?.fullName || 'Владелец бизнеса'}`
                                   : 'Напр.: Арендодатель / Курьер / Сервис'
                               }
-                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             />
                           </div>
                         )}
@@ -3765,7 +3765,7 @@ export default function App() {
                               setLedgerForm((p) => ({ ...p, description: e.target.value }))
                             }
                             placeholder="За что именно (назначение операции)"
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             required
                           />
                         </div>
@@ -4003,14 +4003,14 @@ export default function App() {
                         type="date"
                         value={periodFrom}
                         onChange={(e) => setPeriodFrom(e.target.value)}
-                        className="px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg"
+                        className="px-2.5 py-1.5 text-base sm:text-xs font-mono bg-white border border-slate-300 rounded-lg"
                       />
                       <span className="text-xs text-slate-500">—</span>
                       <input
                         type="date"
                         value={periodTo}
                         onChange={(e) => setPeriodTo(e.target.value)}
-                        className="px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg"
+                        className="px-2.5 py-1.5 text-base sm:text-xs font-mono bg-white border border-slate-300 rounded-lg"
                       />
                       <button
                         type="button"
@@ -4533,7 +4533,7 @@ export default function App() {
                             setAdminNewUserForm((p) => ({ ...p, phone: e.target.value }))
                           }
                           placeholder="+7 928 000-00-00"
-                          className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           required
                         />
                       </div>
@@ -4548,7 +4548,7 @@ export default function App() {
                             setAdminNewUserForm((p) => ({ ...p, password: e.target.value }))
                           }
                           placeholder="Минимум 8 символов"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                           required
                         />
                       </div>
@@ -4563,7 +4563,7 @@ export default function App() {
                             setAdminNewUserForm((p) => ({ ...p, fullName: e.target.value }))
                           }
                           placeholder="Напр.: Оператор кассы"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                         />
                       </div>
                       <div>
@@ -4578,7 +4578,7 @@ export default function App() {
                               role: e.target.value as UserRole,
                             }))
                           }
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                          className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                         >
                           <option value="staff">Оператор (staff)</option>
                           <option value="readonly">Только чтение (readonly)</option>
@@ -4657,7 +4657,7 @@ export default function App() {
                             onChange={(e) =>
                               setEditingUser((p) => (p ? { ...p, phone: e.target.value } : null))
                             }
-                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                             required
                           />
                         </div>
@@ -4671,7 +4671,7 @@ export default function App() {
                             onChange={(e) =>
                               setEditingUser((p) => (p ? { ...p, fullName: e.target.value } : null))
                             }
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                           />
                         </div>
                         <div>
@@ -4685,7 +4685,7 @@ export default function App() {
                                 p ? { ...p, role: e.target.value as UserRole } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                           >
                             <option value="staff">staff (Оператор)</option>
                             <option value="readonly">readonly (Только чтение)</option>
@@ -4755,7 +4755,7 @@ export default function App() {
                               )
                             }
                             placeholder="Введите новый пароль"
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                             required
                           />
                         </div>
@@ -5140,7 +5140,7 @@ export default function App() {
                             onChange={(e) =>
                               setEditingPlan((p) => (p ? { ...p, name: e.target.value } : null))
                             }
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                           />
                         </div>
                         <div>
@@ -5155,7 +5155,7 @@ export default function App() {
                                 p ? { ...p, termMonths: e.target.value } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           />
                         </div>
                         <div>
@@ -5171,7 +5171,7 @@ export default function App() {
                                 p ? { ...p, markupPercent: e.target.value } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           />
                         </div>
                         <div>
@@ -5187,7 +5187,7 @@ export default function App() {
                                 p ? { ...p, downPaymentPercent: e.target.value } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                            className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           />
                         </div>
                         <div>
@@ -5201,7 +5201,7 @@ export default function App() {
                                 p ? { ...p, roundingRule: e.target.value as RoundingRule } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                           >
                             <option value="kopeck">До копейки</option>
                             <option value="ruble">До рубля</option>
@@ -5219,7 +5219,7 @@ export default function App() {
                                 p ? { ...p, isActive: e.target.value === '1' } : null
                               )
                             }
-                            className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                            className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                           >
                             <option value="1">Включён для новых договоров</option>
                             <option value="0">Отключён (старые договоры продолжают действовать)</option>
@@ -5252,7 +5252,7 @@ export default function App() {
                           value={newPlanForm.name}
                           onChange={(e) => setNewPlanForm((p) => ({ ...p, name: e.target.value }))}
                           placeholder="Название (напр. 9 месяцев) *"
-                          className="px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -5264,7 +5264,7 @@ export default function App() {
                             setNewPlanForm((p) => ({ ...p, termMonths: e.target.value }))
                           }
                           placeholder="Месяцев *"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -5275,7 +5275,7 @@ export default function App() {
                             setNewPlanForm((p) => ({ ...p, markupPercent: e.target.value }))
                           }
                           placeholder="Наценка % *"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           required
                         />
                         <input
@@ -5286,7 +5286,7 @@ export default function App() {
                             setNewPlanForm((p) => ({ ...p, downPaymentPercent: e.target.value }))
                           }
                           placeholder="Первый взнос % *"
-                          className="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                          className="px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                           required
                         />
                         <button
@@ -5403,7 +5403,7 @@ export default function App() {
                                   type="text"
                                   value={mfaConfirmCode}
                                   onChange={(e) => setMfaConfirmCode(e.target.value)}
-                                  className="px-3 py-1.5 text-xs font-mono border border-slate-300 rounded-lg w-32 bg-white"
+                                  className="px-3 py-1.5 text-base sm:text-xs font-mono border border-slate-300 rounded-lg w-32 bg-white"
                                 />
                                 <button
                                   type="button"
@@ -5922,7 +5922,7 @@ export default function App() {
                   setSelfPasswordForm((p) => ({ ...p, currentPassword: e.target.value }))
                 }
                 placeholder="Введите текущий пароль"
-                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
                 required
               />
             </div>
@@ -5937,7 +5937,7 @@ export default function App() {
                   setSelfPasswordForm((p) => ({ ...p, newPassword: e.target.value }))
                 }
                 placeholder="Введите новый пароль"
-                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
                 required
               />
             </div>

@@ -248,7 +248,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                 setSelectedContractId(e.target.value);
                 setAllocMap({});
               }}
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+              className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
             >
               {clientContracts.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -445,7 +445,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                                   setAllocationMode('manual');
                                   setAllocMap((prev) => ({ ...prev, [item.id]: e.target.value }));
                                 }}
-                                className={`w-28 px-2.5 py-1 text-xs font-mono text-right border rounded-lg ${
+                                className={`w-28 px-2.5 py-1 text-base sm:text-xs font-mono text-right border rounded-lg ${
                                   isFull
                                     ? 'border-emerald-300 bg-emerald-50/50 font-semibold text-emerald-900'
                                     : isPartial
@@ -685,7 +685,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                   setContractId('');
                   setAllocMap({});
                 }}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
               >
                 {clients.map((cl) => (
                   <option key={cl.id} value={cl.id}>
@@ -705,7 +705,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                   setContractId(e.target.value);
                   setAllocMap({});
                 }}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
               >
                 <option value="">
                   — Без указания договора (сохранить как нераспределённый аванс) —
@@ -729,7 +729,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                 value={amountRubles}
                 onChange={(e) => setAmountRubles(e.target.value)}
                 placeholder="Например: 18000"
-                className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                 required
               />
             </div>
@@ -741,7 +741,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
               <select
                 value={accountId}
                 onChange={(e) => setAccountId(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
               >
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -756,7 +756,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
               <select
                 value={paymentMethod}
                 onChange={(e) => setPaymentMethod(e.target.value as 'cash' | 'bank_transfer')}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
               >
                 <option value="bank_transfer">Банковский перевод / СБП</option>
                 <option value="cash">Наличные в кассу</option>
@@ -769,7 +769,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                 type="date"
                 value={eventDate}
                 onChange={(e) => setEventDate(e.target.value)}
-                className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
               />
             </div>
 
@@ -782,7 +782,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Например: Оплата по договору от клиента"
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg"
               />
             </div>
           </div>
@@ -966,7 +966,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                                     setAllocationMode('manual');
                                     setAllocMap((prev) => ({ ...prev, [item.id]: e.target.value }));
                                   }}
-                                  className={`w-28 px-2 py-1 text-xs font-mono text-right border rounded ${
+                                  className={`w-28 px-2 py-1 text-base sm:text-xs font-mono text-right border rounded ${
                                     isFull
                                       ? 'border-emerald-300 bg-emerald-50/50 font-semibold text-emerald-900'
                                       : isPartial

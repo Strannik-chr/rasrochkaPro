@@ -1410,7 +1410,7 @@ export const FindAndSendContractSection: React.FC<FindAndSendContractSectionProp
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Введите фамилию, имя, отчество, телефон (+7...) или номер договора..."
-            className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-xl bg-white"
+            className="w-full pl-10 pr-4 py-2.5 text-base sm:text-sm border border-slate-300 rounded-xl bg-white"
           />
         </div>
 
@@ -1528,7 +1528,7 @@ export const FindAndSendContractSection: React.FC<FindAndSendContractSectionProp
                               [client.id]: e.target.value,
                             }))
                           }
-                          className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white max-w-full"
+                          className="w-full px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white max-w-full"
                         >
                           {clientContracts.map((c) => (
                             <option key={c.id} value={c.id}>
@@ -1706,7 +1706,7 @@ export const FindAndSendContractSection: React.FC<FindAndSendContractSectionProp
                               }))
                             }
                             placeholder={`Здравствуйте, ${client.fullName}! Направляем информацию по вашему договору № ${activeContract.contractNumber}...`}
-                            className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                            className="w-full px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                           />
                         </div>
 
@@ -1869,7 +1869,7 @@ export const StatusRulesConfigCard: React.FC<StatusRulesConfigCardProps> = ({
               disabled={!isOwner}
               value={gracePeriodDays}
               onChange={(e) => setGracePeriodDays(e.target.value)}
-              className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg"
+              className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
             />
           </div>
           <div>
@@ -1883,7 +1883,7 @@ export const StatusRulesConfigCard: React.FC<StatusRulesConfigCardProps> = ({
               disabled={!isOwner}
               value={complexMinOverdueDays}
               onChange={(e) => setComplexMinOverdueDays(e.target.value)}
-              className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg"
+              className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
             />
           </div>
           <div>
@@ -1897,7 +1897,7 @@ export const StatusRulesConfigCard: React.FC<StatusRulesConfigCardProps> = ({
               disabled={!isOwner}
               value={complexConsecutiveMissedCount}
               onChange={(e) => setComplexConsecutiveMissedCount(e.target.value)}
-              className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg"
+              className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
             />
           </div>
           <div>
@@ -1911,7 +1911,7 @@ export const StatusRulesConfigCard: React.FC<StatusRulesConfigCardProps> = ({
               disabled={!isOwner}
               value={complexMinOverdueRubles}
               onChange={(e) => setComplexMinOverdueRubles(e.target.value)}
-              className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg"
+              className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
             />
           </div>
           <div>
@@ -1925,7 +1925,7 @@ export const StatusRulesConfigCard: React.FC<StatusRulesConfigCardProps> = ({
               disabled={!isOwner}
               value={reliableMaxPastLateCount}
               onChange={(e) => setReliableMaxPastLateCount(e.target.value)}
-              className="w-full px-3 py-2 font-mono border border-slate-300 rounded-lg"
+              className="w-full px-3 py-2 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
             />
           </div>
         </div>

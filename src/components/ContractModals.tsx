@@ -990,7 +990,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     }
                   }}
                   placeholder="Начните вводить фамилию, имя, отчество или телефон клиента..."
-                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                  className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
                   required={clientMode === 'existing'}
                 />
 
@@ -1088,7 +1088,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       value={newClientSecondaryPhone}
                       onChange={(e) => setNewClientSecondaryPhone(e.target.value)}
                       placeholder="+7 928 111-22-33"
-                      className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-lg"
+                      className="w-full px-2.5 py-1.5 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -1100,7 +1100,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       value={newClientDocumentRef}
                       onChange={(e) => setNewClientDocumentRef(e.target.value)}
                       placeholder="Серия и номер паспорта"
-                      className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                      className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -1112,7 +1112,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       value={newClientAddress}
                       onChange={(e) => setNewClientAddress(e.target.value)}
                       placeholder="Город, улица, дом"
-                      className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                      className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg"
                     />
                   </div>
                 </div>
@@ -1138,7 +1138,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                         handlePayerPartsChange(e.target.value, payerFirstName, payerPatronymic)
                       }
                       placeholder="Фамилия"
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -1152,7 +1152,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                         handlePayerPartsChange(payerLastName, e.target.value, payerPatronymic)
                       }
                       placeholder="Имя"
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -1166,7 +1166,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                         handlePayerPartsChange(payerLastName, payerFirstName, e.target.value)
                       }
                       placeholder="Отчество"
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg"
                     />
                   </div>
                 </div>
@@ -1181,7 +1181,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       value={newClientPhone}
                       onChange={(e) => setNewClientPhone(e.target.value)}
                       placeholder="+7 928 000-00-00"
-                      className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                       required={clientMode === 'new'}
                     />
                   </div>
@@ -1194,7 +1194,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       value={newClientSecondaryPhone}
                       onChange={(e) => setNewClientSecondaryPhone(e.target.value)}
                       placeholder="+7 928 111-22-33"
-                      className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -1206,7 +1206,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       value={newClientDocumentRef}
                       onChange={(e) => setNewClientDocumentRef(e.target.value)}
                       placeholder="Серия и номер паспорта"
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -1218,7 +1218,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       value={newClientAddress}
                       onChange={(e) => setNewClientAddress(e.target.value)}
                       placeholder="Город, улица, дом"
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg"
                     />
                   </div>
                 </div>
@@ -1537,7 +1537,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                 }));
                               }}
                               placeholder="Введите фамилию, имя, отчество или телефон для быстрого поиска..."
-                              className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                              className="w-full px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                             />
 
                             {g.showSuggestions && (
@@ -1626,7 +1626,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }));
                                   }}
                                   placeholder="Фамилия"
-                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
                                 />
                               </div>
                               <div>
@@ -1650,7 +1650,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }));
                                   }}
                                   placeholder="Имя"
-                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
                                 />
                               </div>
                               <div>
@@ -1674,7 +1674,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }));
                                   }}
                                   placeholder="Отчество"
-                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
                                 />
                               </div>
                             </div>
@@ -1695,7 +1695,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }))
                                   }
                                   placeholder="+7 928 000-00-00"
-                                  className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-lg disabled:bg-slate-100"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs font-mono border border-slate-300 rounded-lg disabled:bg-slate-100"
                                 />
                               </div>
                               <div>
@@ -1712,7 +1712,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }))
                                   }
                                   placeholder="+7 928 111-22-33"
-                                  className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-lg"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs font-mono border border-slate-300 rounded-lg"
                                 />
                               </div>
                             </div>
@@ -1738,7 +1738,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }))
                                   }
                                   placeholder="Серия и номер паспорта"
-                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg"
                                 />
                               </div>
                               <div>
@@ -1755,7 +1755,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }))
                                   }
                                   placeholder="Город, улица, дом, кв."
-                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg"
                                 />
                               </div>
                               <div>
@@ -1772,7 +1772,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     }))
                                   }
                                   placeholder="Родство, место работы и т.д."
-                                  className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg"
+                                  className="w-full px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg"
                                 />
                               </div>
                             </div>
@@ -1833,7 +1833,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                       selectedDocType: e.target.value,
                                     }))
                                   }
-                                  className="px-2.5 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                                  className="px-2.5 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                                 >
                                   <option value="guarantor_passport">Фото / скан паспорта</option>
                                   <option value="signed_guarantee">
@@ -1924,7 +1924,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
               <select
                 value={purchaseId}
                 onChange={(e) => handleSelectPurchase(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
               >
                 <option value="">— Ввести параметры товара вручную —</option>
                 {purchases
@@ -1946,7 +1946,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                 value={itemTitle}
                 onChange={(e) => setItemTitle(e.target.value)}
                 placeholder="Например: Смартфон Samsung Galaxy S25 Ultra 512GB Titanium"
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg"
                 required
               />
             </div>
@@ -1965,7 +1965,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   setPurchaseRubles(e.target.value);
                   setPreviewConfirmed(false);
                 }}
-                className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                 required
               />
             </div>
@@ -1983,7 +1983,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     setDeliveryRubles(e.target.value);
                     setPreviewConfirmed(false);
                   }}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                 />
               </div>
               <div>
@@ -2000,7 +2000,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     setOtherRubles(e.target.value);
                     setPreviewConfirmed(false);
                   }}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                 />
               </div>
             </div>
@@ -2012,7 +2012,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
               <select
                 value={planId}
                 onChange={(e) => handleSelectPlan(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
               >
                 <option value="">Выберите тарифный профиль (или настройте условия вручную)</option>
                 {activePlans.map((p) => (
@@ -2036,7 +2036,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     setTermMonths(e.target.value);
                     setPreviewConfirmed(false);
                   }}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                   required
                 />
               </div>
@@ -2052,7 +2052,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     setMarkupPercent(e.target.value);
                     setPreviewConfirmed(false);
                   }}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                   required
                 />
               </div>
@@ -2069,7 +2069,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     setDownPaymentPercent(e.target.value);
                     setPreviewConfirmed(false);
                   }}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                   required
                 />
               </div>
@@ -2085,7 +2085,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   setRoundingRule(e.target.value as RoundingRule);
                   setPreviewConfirmed(false);
                 }}
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                className="w-full px-3 py-2 text-base sm:text-sm border border-slate-300 rounded-lg bg-white"
               >
                 <option value="kopeck">Точно до копейки (корректировка в последнем платеже)</option>
                 <option value="ruble">До целого рубля (остаток в последнем платеже)</option>
@@ -2105,7 +2105,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     setStartDate(e.target.value);
                     setPreviewConfirmed(false);
                   }}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                 />
               </div>
 
@@ -2119,7 +2119,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     setPaymentDayOfMonth(e.target.value);
                     setPreviewConfirmed(false);
                   }}
-                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg bg-white"
+                  className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg bg-white"
                   required
                 >
                   <option value="">Выберите число месяца (1–31)</option>
@@ -2191,7 +2191,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                           setConfirmedCustomSchedule(false);
                         }}
                         placeholder="Введите сумму, которую клиент действительно заплатил"
-                        className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                        className="w-full px-3 py-2 text-base sm:text-sm font-mono border border-slate-300 rounded-lg"
                       />
                     </div>
                     <div className="text-[11px] text-slate-500 leading-relaxed">
@@ -2540,7 +2540,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     <select
                       value={downPaymentAccountId}
                       onChange={(e) => setDownPaymentAccountId(e.target.value)}
-                      className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                      className="px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                     >
                       {accounts.map((a) => (
                         <option key={a.id} value={a.id}>
@@ -2553,7 +2553,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                       onChange={(e) =>
                         setDownPaymentMethod(e.target.value as 'cash' | 'bank_transfer')
                       }
-                      className="px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                      className="px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                     >
                       <option value="cash">Способ: Наличные ₽</option>
                       <option value="bank_transfer">Способ: Банковский перевод</option>
@@ -2751,7 +2751,7 @@ export const EarlyPayoffModal: React.FC<EarlyPayoffModalProps> = ({
                       min="0"
                       value={manualRubles}
                       onChange={(e) => setManualRubles(e.target.value)}
-                      className="px-3 py-1.5 text-xs font-mono border border-slate-300 rounded-lg bg-white w-44"
+                      className="px-3 py-1.5 text-base sm:text-xs font-mono border border-slate-300 rounded-lg bg-white w-44"
                     />
                   </div>
                 )}
@@ -2770,7 +2770,7 @@ export const EarlyPayoffModal: React.FC<EarlyPayoffModalProps> = ({
                 <select
                   value={accountId}
                   onChange={(e) => setAccountId(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                  className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg bg-white"
                 >
                   {accounts.map((a) => (
                     <option key={a.id} value={a.id}>
@@ -2787,7 +2787,7 @@ export const EarlyPayoffModal: React.FC<EarlyPayoffModalProps> = ({
                   type="text"
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                  className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                 />
               </div>
             </div>
@@ -2842,6 +2842,7 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
   const [selectedPaymentDay, setSelectedPaymentDay] = useState<string>(
     contract.paymentDayOfMonth ? String(contract.paymentDayOfMonth) : ''
   );
+  const [isPaymentDayEditOpen, setIsPaymentDayEditOpen] = useState(false);
   const [updatingPaymentDay, setUpdatingPaymentDay] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -2878,6 +2879,7 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
         }),
       });
       await onSuccess();
+      setIsPaymentDayEditOpen(false);
       setNotice(
         `Дата ежемесячного платежа изменена на ${dayNum}-е число каждого месяца. Пересчитано будущих неоплаченных платежей: ${res.updatedCount ?? unpaidItems.length}, уже оплаченные платежи (${res.preservedPaidCount ?? completedMonthsCount}) сохранены без изменений.`
       );
@@ -2961,42 +2963,65 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
           </div>
         </div>
 
-        {/* Change monthly payment day for future unpaid installments */}
+        {/* Collapsible monthly payment day adjustment for future unpaid installments */}
         {contract.remainingDebtKopecks > 0 && (
-          <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/70 space-y-2.5 text-xs">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                  <Calendar className="w-4 h-4 text-slate-700" />
-                  <span>Дата ежемесячного платежа (число месяца 1–31)</span>
-                </div>
-                <p className="text-[11px] text-slate-500 mt-0.5">
+          <div className="border border-slate-200 rounded-xl bg-white overflow-hidden text-xs">
+            <button
+              type="button"
+              onClick={() => setIsPaymentDayEditOpen((prev) => !prev)}
+              aria-expanded={isPaymentDayEditOpen}
+              className="w-full px-3.5 py-2.5 flex items-center justify-between gap-3 text-left hover:bg-slate-50/80 transition-colors"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <Calendar className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="font-medium text-slate-700 truncate">
+                  Дата ежемесячного платежа
+                </span>
+                {contract.paymentDayOfMonth && (
+                  <span className="text-[11px] font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded shrink-0">
+                    каждое {contract.paymentDayOfMonth}-е число
+                  </span>
+                )}
+              </div>
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 hover:text-slate-800 shrink-0">
+                <span>{isPaymentDayEditOpen ? 'Свернуть' : 'Изменить число'}</span>
+                {isPaymentDayEditOpen ? (
+                  <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+                )}
+              </span>
+            </button>
+
+            {isPaymentDayEditOpen && (
+              <div className="px-3.5 pb-3.5 pt-2.5 border-t border-slate-100 bg-slate-50/60 space-y-2.5">
+                <p className="text-[11px] text-slate-500">
                   При изменении числа месяца автоматически пересчитываются только будущие неоплаченные платежи. Уже оплаченные платежи не меняются.
                 </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={selectedPaymentDay}
+                    onChange={(e) => setSelectedPaymentDay(e.target.value)}
+                    className="px-3 py-1.5 text-base sm:text-xs font-mono border border-slate-300 rounded-lg bg-white"
+                  >
+                    <option value="">Выберите число (1–31)</option>
+                    {Array.from({ length: 31 }, (_, idx) => idx + 1).map((day) => (
+                      <option key={day} value={String(day)}>
+                        Каждое {day}-е число месяца
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={updatingPaymentDay || !selectedPaymentDay}
+                    onClick={handleUpdatePaymentDay}
+                    className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    {updatingPaymentDay ? 'Пересчёт...' : 'Пересчитать даты будущих платежей'}
+                  </button>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  value={selectedPaymentDay}
-                  onChange={(e) => setSelectedPaymentDay(e.target.value)}
-                  className="px-3 py-1.5 text-xs font-mono border border-slate-300 rounded-lg bg-white"
-                >
-                  <option value="">Выберите число (1–31)</option>
-                  {Array.from({ length: 31 }, (_, idx) => idx + 1).map((day) => (
-                    <option key={day} value={String(day)}>
-                      Каждое {day}-е число месяца
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  disabled={updatingPaymentDay || !selectedPaymentDay}
-                  onClick={handleUpdatePaymentDay}
-                  className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50"
-                >
-                  {updatingPaymentDay ? 'Пересчёт...' : 'Пересчитать даты будущих платежей'}
-                </button>
-              </div>
-            </div>
+            )}
           </div>
         )}
 
@@ -3102,7 +3127,7 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
                 type="text"
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
-                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                className="w-full px-3 py-2 text-base sm:text-xs border border-slate-300 rounded-lg"
                 required
               />
             </div>
@@ -3184,7 +3209,7 @@ export const PrintableDocumentModal: React.FC<PrintableDocumentModalProps> = ({
             type="text"
             value={sellerTitle}
             onChange={(e) => setSellerTitle(e.target.value)}
-            className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+            className="w-full px-3 py-1.5 text-base sm:text-xs border border-slate-300 rounded-lg"
           />
         </div>
 

@@ -1,6 +1,11 @@
 @import "tailwindcss";
 
 @layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
   body {
     font-family: 'Public Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     color: #0F172A;
@@ -18,9 +23,25 @@
   }
 }
 
+/*
+ * Prevent automatic viewport zoom-in on iOS Safari, iOS Chrome, and mobile browsers
+ * whenever any input, textarea, or select receives focus.
+ * Mobile browsers automatically zoom if the computed font-size of a focused form
+ * control is smaller than 16px (1rem). This centralized rule guarantees >= 16px
+ * across all forms, modals, search bars, and inline table inputs on mobile/touch
+ * without disabling manual pinch-to-zoom accessibility in the viewport meta tag.
+ */
+@media screen and (max-width: 767px), (hover: none) and (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"]),
+  textarea,
+  select,
+  [contenteditable="true"] {
+    font-size: 16px !important;
+  }
+}
+
 @media print {
   .no-print {
     display: none !important;
   }
 }
-

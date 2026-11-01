@@ -132,7 +132,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
             onChange={(e) => setPhone(e.target.value)}
             placeholder="+7 ___ ___-__-__"
             disabled={loading}
-            className="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-500"
+            className="w-full px-3.5 py-2.5 text-base sm:text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-500"
             required
           />
         </div>
@@ -153,7 +153,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Введите пароль"
               disabled={loading}
-              className="w-full pl-3.5 pr-10 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-500"
+              className="w-full pl-3.5 pr-10 py-2.5 text-base sm:text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-500"
               required
             />
             <button
@@ -185,7 +185,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               onChange={(e) => setTotpCode(e.target.value)}
               placeholder="000000"
               disabled={loading}
-              className="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+              className="w-full px-3.5 py-2.5 text-base sm:text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
               required
             />
           </div>
