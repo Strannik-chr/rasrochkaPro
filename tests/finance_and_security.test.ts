@@ -7,8 +7,20 @@ import {
   calculateEarlyPayoffComparison,
   calculateTotalCostKopecks,
   computeAutomaticScheduleAllocations,
+  recalculateUnpaidScheduleDates,
   sanitizeSpreadsheetCell,
 } from '../src/server/finance/calculator';
+import {
+  applyTariffProfileToContractTerms,
+  createInitialContractClientState,
+  createInitialContractTermsState,
+  formatWelcomeGreeting,
+  getSafeInitialLaunchSection,
+  shouldLoadConfidentialState,
+  switchContractFormToExistingClient,
+  switchContractFormToNewClient,
+  validateContractTermsState,
+} from '../src/shared/contractFormHelpers';
 import {
   computeTotpCode,
   decryptBackupPayload,
@@ -833,8 +845,871 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     assert.equal(stateAfterRestore.data.contracts.length, 3);
     assert.equal(stateAfterRestore.data.clients.length, 3);
     assert.equal(stateAfterRestore.data.reconciliation.isHealthy, true);
+
+    // 7. Custom Actual Down Payment: All 11 Required Scenarios
+    // Scenario 1 & 2: Default OFF -> works identically to standard behavior
+    const calcDefaultOff = calculateContractAndSchedule({
+      purchaseCostKopecks: 8000000, // 80 000 ₽
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 25, // Sale price = 100 000 ₽ (10 000 000 kop)
+      downPaymentPercent: 30, // Planned DP = 30 000 ₽ (3 000 000 kop)
+      termMonths: 5,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-10-31',
+    });
+    assert.equal(calcDefaultOff.useCustomActualDownPayment, false);
+    assert.equal(calcDefaultOff.salePriceKopecks, 10000000);
+    assert.equal(calcDefaultOff.plannedDownPaymentKopecks, 3000000);
+    assert.equal(calcDefaultOff.actualDownPaymentKopecks, 3000000);
+    assert.equal(calcDefaultOff.downPaymentDiffKopecks, 0);
+    assert.equal(calcDefaultOff.financedPrincipalKopecks, 7000000);
+    assert.equal(calcDefaultOff.scheduleChanged, false);
+
+    // Scenario 3: Toggle ON, Actual == Planned (30 000 ₽ == 30 000 ₽)
+    const calcEqualActual = calculateContractAndSchedule({
+      purchaseCostKopecks: 8000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 25,
+      downPaymentPercent: 30,
+      useCustomActualDownPayment: true,
+      actualDownPaymentKopecks: 3000000,
+      termMonths: 5,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-10-31',
+    });
+    assert.equal(calcEqualActual.useCustomActualDownPayment, true);
+    assert.equal(calcEqualActual.downPaymentDiffKopecks, 0);
+    assert.equal(calcEqualActual.extraDownPaymentKopecks, 0);
+    assert.equal(calcEqualActual.downPaymentShortfallKopecks, 0);
+    assert.equal(calcEqualActual.scheduleChanged, false);
+    assert.equal(calcEqualActual.financedPrincipalKopecks, 7000000);
+
+    // Scenario 4: Actual < Planned (Shortfall: Planned 30 000 ₽, Actual 20 000 ₽ -> Shortfall 10 000 ₽ added to schedule)
+    const calcShortfall = calculateContractAndSchedule({
+      purchaseCostKopecks: 8000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 25, // Sale price = 100 000 ₽
+      downPaymentPercent: 30, // Planned = 30 000 ₽
+      useCustomActualDownPayment: true,
+      actualDownPaymentKopecks: 2000000, // Actual = 20 000 ₽
+      termMonths: 5,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-10-31',
+    });
+    assert.equal(calcShortfall.plannedDownPaymentKopecks, 3000000);
+    assert.equal(calcShortfall.actualDownPaymentKopecks, 2000000);
+    assert.equal(calcShortfall.downPaymentShortfallKopecks, 1000000);
+    assert.equal(calcShortfall.extraDownPaymentKopecks, 0);
+    assert.equal(calcShortfall.downPaymentDiffKopecks, -1000000);
+    assert.equal(calcShortfall.financedPrincipalKopecks, 8000000); // 80 000 ₽ instead of 70 000 ₽
+    assert.equal(calcShortfall.scheduleChanged, true);
+    assert.equal(
+      calcShortfall.schedule.reduce((s, i) => s + i.plannedKopecks, 0),
+      8000000
+    );
+    // Each month increased from 14 000 ₽ to 16 000 ₽ (+2 000 ₽)
+    assert.equal(calcShortfall.schedule[0].originalPlannedKopecks, 1400000);
+    assert.equal(calcShortfall.schedule[0].plannedKopecks, 1600000);
+    assert.equal(calcShortfall.schedule[0].diffKopecks, 200000);
+
+    // Scenario 5: Actual == 0 ₽ (Full 100 000 ₽ goes into schedule)
+    const calcZeroActual = calculateContractAndSchedule({
+      purchaseCostKopecks: 8000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 25,
+      downPaymentPercent: 30,
+      useCustomActualDownPayment: true,
+      actualDownPaymentKopecks: 0,
+      termMonths: 5,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-10-31',
+    });
+    assert.equal(calcZeroActual.actualDownPaymentKopecks, 0);
+    assert.equal(calcZeroActual.downPaymentShortfallKopecks, 3000000);
+    assert.equal(calcZeroActual.financedPrincipalKopecks, 10000000);
+    assert.equal(
+      calcZeroActual.schedule.reduce((s, i) => s + i.plannedKopecks, 0),
+      10000000
+    );
+
+    // Scenario 6, 7, 8: Actual > Planned (Spec example: Sale 100 000 ₽, Planned 30 000 ₽, Actual 35 000 ₽ -> Remaining 65 000 ₽)
+    const calcOverpay = calculateContractAndSchedule({
+      purchaseCostKopecks: 8000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 25, // Sale price = 100 000 ₽
+      downPaymentPercent: 30, // Planned = 30 000 ₽
+      useCustomActualDownPayment: true,
+      actualDownPaymentKopecks: 3500000, // Actual = 35 000 ₽
+      termMonths: 5,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-10-31',
+    });
+    assert.equal(calcOverpay.salePriceKopecks, 10000000);
+    assert.equal(calcOverpay.plannedDownPaymentKopecks, 3000000);
+    assert.equal(calcOverpay.actualDownPaymentKopecks, 3500000);
+    assert.equal(calcOverpay.extraDownPaymentKopecks, 500000); // 5 000 ₽ extra repayment
+    assert.equal(calcOverpay.downPaymentShortfallKopecks, 0);
+    assert.equal(calcOverpay.financedPrincipalKopecks, 6500000); // 65 000 ₽ remaining
+    assert.equal(
+      calcOverpay.schedule.reduce((s, i) => s + i.plannedKopecks, 0),
+      6500000
+    );
+    // Each month decreased from 14 000 ₽ to 13 000 ₽ (-1 000 ₽)
+    assert.equal(calcOverpay.schedule[0].originalPlannedKopecks, 1400000);
+    assert.equal(calcOverpay.schedule[0].plannedKopecks, 1300000);
+    assert.equal(calcOverpay.schedule[0].diffKopecks, -100000);
+
+    // Scenario 8b: Actual covers multiple installments worth of excess (e.g. Actual 60 000 ₽ vs Planned 30 000 ₽ -> Remaining 40 000 ₽)
+    const calcLargeOverpay = calculateContractAndSchedule({
+      purchaseCostKopecks: 8000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 25,
+      downPaymentPercent: 30,
+      useCustomActualDownPayment: true,
+      actualDownPaymentKopecks: 6000000,
+      termMonths: 5,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-10-31',
+    });
+    assert.equal(calcLargeOverpay.extraDownPaymentKopecks, 3000000);
+    assert.equal(calcLargeOverpay.financedPrincipalKopecks, 4000000);
+    assert.equal(
+      calcLargeOverpay.schedule.reduce((s, i) => s + i.plannedKopecks, 0),
+      4000000
+    );
+
+    // Scenario 9: Actual > Total Contract Debt -> Preview returns warning, Contract creation rejects
+    const previewExceeds = await apiCall('/api/v1/contracts/preview', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: 10500000, // 105 000 ₽ > 100 000 ₽ sale price
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      },
+    });
+    assert.equal(previewExceeds.status, 200);
+    assert.equal(previewExceeds.data.exceedsTotalContractDebt, true);
+    assert.equal(previewExceeds.data.excessOverContractKopecks, 500000);
+    assert.ok(previewExceeds.data.warningMessage.includes('превышает общий долг по договору'));
+
+    const createExceeds = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        clientId: 'cli_01',
+        itemTitle: 'Тест превышения долга',
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: 10500000,
+        confirmedCustomSchedule: true,
+        confirmedCalculation: true,
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      },
+    });
+    assert.equal(createExceeds.status, 400);
+
+    // Scenario 10: Negative or non-integer values are rejected
+    assert.throws(() =>
+      calculateContractAndSchedule({
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: -500,
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      })
+    );
+    assert.throws(() =>
+      calculateContractAndSchedule({
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: 1234.56,
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      })
+    );
+
+    // Scenario 11 & Full DB Transaction + Schedule History + Idempotency:
+    // Require confirmedCustomSchedule when scheduleChanged is true
+    const unconfirmedCustomRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        clientId: 'cli_01',
+        itemTitle: 'Тест без подтверждения пересчёта',
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: 3500000,
+        confirmedCustomSchedule: false,
+        confirmedCalculation: true,
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      },
+    });
+    assert.equal(unconfirmedCustomRes.status, 400);
+
+    // Confirmed creation with Actual = 35 000 ₽ (Planned = 30 000 ₽, Sale = 100 000 ₽)
+    const customContractIdemKey = 'idem_custom_dp_35000_test';
+    const createCustomOverpayRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        idempotencyKey: customContractIdemKey,
+        clientId: 'cli_01',
+        itemTitle: 'Холодильник Bosch (тест фактического ПВ 35 000 ₽)',
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: 3500000,
+        confirmedCustomSchedule: true,
+        confirmedCalculation: true,
+        collectDownPaymentNow: true,
+        downPaymentAccountId: 'acc_cash_main',
+        downPaymentMethod: 'cash',
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      },
+    });
+    assert.equal(createCustomOverpayRes.status, 201);
+    assert.equal(createCustomOverpayRes.data.plannedDownPaymentKopecks, 3000000);
+    assert.equal(createCustomOverpayRes.data.actualDownPaymentKopecks, 3500000);
+    assert.equal(createCustomOverpayRes.data.extraDownPaymentKopecks, 500000);
+    assert.equal(createCustomOverpayRes.data.financedPrincipalKopecks, 6500000);
+    assert.equal(createCustomOverpayRes.data.scheduleVersion, 2);
+
+    // Duplicate request with same idempotencyKey must not create duplicate contract or payment
+    const replayCustomOverpayRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        idempotencyKey: customContractIdemKey,
+        clientId: 'cli_01',
+        itemTitle: 'Холодильник Bosch (тест фактического ПВ 35 000 ₽)',
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: 3500000,
+        confirmedCustomSchedule: true,
+        confirmedCalculation: true,
+        collectDownPaymentNow: true,
+        downPaymentAccountId: 'acc_cash_main',
+        downPaymentMethod: 'cash',
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      },
+    });
+    assert.equal(replayCustomOverpayRes.status, 200);
+    assert.equal(replayCustomOverpayRes.data.idempotentReplay, true);
+    assert.equal(replayCustomOverpayRes.data.id, createCustomOverpayRes.data.id);
+
+    // Also test Shortfall contract with collectDownPaymentNow: true (Actual 20 000 ₽ vs Planned 30 000 ₽)
+    const createCustomShortfallRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        idempotencyKey: 'idem_custom_dp_20000_shortfall',
+        clientId: 'cli_01',
+        itemTitle: 'Телевизор Sony (тест недоплаты ПВ 20 000 ₽ вместо 30 000 ₽)',
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        useCustomActualDownPayment: true,
+        actualDownPaymentKopecks: 2000000,
+        confirmedCustomSchedule: true,
+        confirmedCalculation: true,
+        collectDownPaymentNow: true,
+        downPaymentAccountId: 'acc_cash_main',
+        downPaymentMethod: 'cash',
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-31',
+      },
+    });
+    assert.equal(createCustomShortfallRes.status, 201);
+    assert.equal(createCustomShortfallRes.data.plannedDownPaymentKopecks, 3000000);
+    assert.equal(createCustomShortfallRes.data.actualDownPaymentKopecks, 2000000);
+    assert.equal(createCustomShortfallRes.data.downPaymentShortfallKopecks, 1000000);
+    assert.equal(createCustomShortfallRes.data.financedPrincipalKopecks, 8000000);
+
+    // Verify GET /api/v1/state has healthy reconciliation, schedule history (v1 superseded, v2 active), and accurate collected amounts
+    const stateAfterCustomContracts = await apiCall('/api/v1/state', {
+      sessionToken: ownerToken,
+    });
+    assert.equal(stateAfterCustomContracts.data.reconciliation.isHealthy, true);
+
+    const overpayContract = stateAfterCustomContracts.data.contracts.find(
+      (c: { id: string }) => c.id === createCustomOverpayRes.data.id
+    );
+    assert.ok(overpayContract);
+    assert.equal(overpayContract.isCustomDownPayment, true);
+    assert.equal(overpayContract.plannedDownPaymentKopecks, 3000000);
+    assert.equal(overpayContract.actualDownPaymentKopecks, 3500000);
+    assert.equal(overpayContract.extraDownPaymentKopecks, 500000);
+    assert.equal(overpayContract.totalCollectedKopecks, 3500000);
+    assert.equal(overpayContract.remainingDebtKopecks, 6500000);
+    assert.equal(overpayContract.scheduleHistory.length, 2); // v1 planned + v2 adjusted
+
+    const shortfallContract = stateAfterCustomContracts.data.contracts.find(
+      (c: { id: string }) => c.id === createCustomShortfallRes.data.id
+    );
+    assert.ok(shortfallContract);
+    assert.equal(shortfallContract.isCustomDownPayment, true);
+    assert.equal(shortfallContract.plannedDownPaymentKopecks, 3000000);
+    assert.equal(shortfallContract.actualDownPaymentKopecks, 2000000);
+    assert.equal(shortfallContract.downPaymentShortfallKopecks, 1000000);
+    // Shortfall (10 000 ₽) is NOT counted as collected income! Only 20 000 ₽ is collected.
+    assert.equal(shortfallContract.totalCollectedKopecks, 2000000);
+    assert.equal(shortfallContract.remainingDebtKopecks, 8000000);
+
+    // =========================================================================
+    // 13. Contract Form Upgrades: Client Switching, Manual Terms, Payment Day (1-31)
+    // =========================================================================
+
+    // Scenario 1: Switching from existing client to new client clears FIO, phone, passport, address, and guarantors
+    const dirtyExistingState = {
+      ...createInitialContractClientState(true),
+      clientMode: 'existing' as const,
+      clientId: createdClientId,
+      clientNameQuery: 'Иванов Иван Иванович',
+      payerLastName: 'Иванов',
+      payerFirstName: 'Иван',
+      payerPatronymic: 'Иванович',
+      newClientPhone: '+7 (999) 111-22-33',
+      newClientSecondaryPhone: '+7 (999) 222-33-44',
+      newClientDocumentRef: '4510 123456',
+      newClientAddress: 'г. Москва, ул. Тверская, д. 1',
+      newClientNotes: 'Старый клиент',
+      allowSimilarName: true,
+      showSuggestions: true,
+      guarantors: [
+        {
+          id: 'g-1',
+          mode: 'existing' as const,
+          clientId: 'some-guarantor-id',
+          query: 'Петров Пётр',
+          fullName: 'Петров Пётр',
+          phone: '+79990001122',
+          documentRef: '4511 654321',
+          address: 'г. Москва',
+          relationNote: 'Брат',
+        },
+      ],
+    };
+
+    const switchedToNew = switchContractFormToNewClient(dirtyExistingState);
+    assert.equal(switchedToNew.clientMode, 'new');
+    assert.equal(switchedToNew.clientId, '');
+    assert.equal(switchedToNew.clientNameQuery, '');
+    assert.equal(switchedToNew.payerLastName, '');
+    assert.equal(switchedToNew.payerFirstName, '');
+    assert.equal(switchedToNew.payerPatronymic, '');
+    assert.equal(switchedToNew.newClientPhone, '');
+    assert.equal(switchedToNew.newClientSecondaryPhone, '');
+    assert.equal(switchedToNew.newClientDocumentRef, '');
+    assert.equal(switchedToNew.newClientAddress, '');
+    assert.equal(switchedToNew.newClientNotes, '');
+    assert.equal(switchedToNew.allowSimilarName, false);
+    assert.equal(switchedToNew.showSuggestions, false);
+    assert.equal(switchedToNew.guarantors.length, 0);
+
+    // Switching back to existing mode also clears draft new client inputs
+    const switchedBackToExisting = switchContractFormToExistingClient(null);
+    assert.equal(switchedBackToExisting.clientMode, 'existing');
+    assert.equal(switchedBackToExisting.clientId, '');
+    assert.equal(switchedBackToExisting.clientNameQuery, '');
+    assert.equal(switchedBackToExisting.payerLastName, '');
+    assert.equal(switchedBackToExisting.payerFirstName, '');
+    assert.equal(switchedBackToExisting.newClientPhone, '');
+
+    // API check: POST /api/v1/contracts with clientMode='new' ignores any stale clientId and creates a brand-new client
+    const newClientSwitchApiRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        clientMode: 'new',
+        clientId: createdClientId, // stale existing clientId should be ignored when clientMode === 'new'
+        newClient: {
+          fullName: 'Новиков Артём Сергеевич',
+          phone: '+79995554433',
+          documentRef: '4615 998877',
+          address: 'г. Казань, ул. Баумана, д. 10',
+        },
+        itemTitle: 'Ноутбук ThinkPad X1',
+        purchaseCostKopecks: 6000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        planId: null,
+        markupPercent: 20,
+        downPaymentPercent: 25,
+        termMonths: 4,
+        paymentDayOfMonth: 5,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-01-10',
+        downPaymentAccountId: 'acc_bank_main',
+        downPaymentMethod: 'bank_transfer',
+        collectDownPaymentNow: true,
+        confirmedCalculation: true,
+      },
+    });
+    assert.equal(newClientSwitchApiRes.status, 201);
+    assert.equal(newClientSwitchApiRes.data.paymentDayOfMonth, 5);
+
+    const stateAfterNewClientContract = await apiCall('/api/v1/state', {
+      sessionToken: ownerToken,
+    });
+    const createdManualContract = stateAfterNewClientContract.data.contracts.find(
+      (c: { id: string }) => c.id === newClientSwitchApiRes.data.id
+    );
+    assert.ok(createdManualContract);
+    assert.notEqual(createdManualContract.clientId, createdClientId);
+    const createdNewClientRecord = stateAfterNewClientContract.data.clients.find(
+      (cl: { id: string }) => cl.id === createdManualContract.clientId
+    );
+    assert.ok(createdNewClientRecord);
+    assert.equal(createdNewClientRecord.fullName, 'Новиков Артём Сергеевич');
+
+    // Scenario 2: Default tariff profile and cost fields (store price, delivery, extra costs) are empty when opening the form
+    const initialTerms = createInitialContractTermsState();
+    assert.equal(initialTerms.purchaseRubles, '');
+    assert.equal(initialTerms.deliveryRubles, '');
+    assert.equal(initialTerms.otherRubles, '');
+    assert.equal(initialTerms.planId, '');
+    assert.equal(initialTerms.termMonths, '');
+    assert.equal(initialTerms.markupPercent, '');
+    assert.equal(initialTerms.downPaymentPercent, '');
+    assert.equal(initialTerms.paymentDayOfMonth, '');
+    assert.equal(validateContractTermsState(initialTerms).valid, false);
+
+    // Scenario 3: Creating contract without tariff profile using manually entered conditions
+    assert.equal(createdManualContract.planId, null);
+    assert.equal(createdManualContract.termMonths, 4);
+    assert.equal(createdManualContract.markupPercent, 20);
+    assert.equal(createdManualContract.downPaymentPercent, 25);
+    assert.equal(createdManualContract.paymentDayOfMonth, 5);
+
+    // Scenario 4: Selecting a tariff profile populates fields and allows manual override afterwards
+    const filledFromTariff = applyTariffProfileToContractTerms(initialTerms, 'plan-6m', [
+      {
+        id: 'plan-6m',
+        name: '6 месяцев · 25% · взнос 30%',
+        termMonths: 6,
+        markupPercent: 25,
+        downPaymentPercent: 30,
+        downPaymentRequired: true,
+        earlyPayoffDiscountPercent: 5,
+        roundingRule: 'kopeck',
+        isActive: true,
+        version: 1,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    assert.equal(filledFromTariff.planId, 'plan-6m');
+    assert.equal(filledFromTariff.termMonths, '6');
+    assert.equal(filledFromTariff.markupPercent, '25');
+    assert.equal(filledFromTariff.downPaymentPercent, '30');
+
+    const manuallyAdjustedAfterTariff = {
+      ...filledFromTariff,
+      markupPercent: '22.5',
+      paymentDayOfMonth: '15',
+    };
+    const validatedAfterOverride = validateContractTermsState(manuallyAdjustedAfterTariff);
+    assert.equal(validatedAfterOverride.valid, true);
+    assert.equal(validatedAfterOverride.parsedMarkupPercent, 22.5);
+    assert.equal(validatedAfterOverride.parsedPaymentDayOfMonth, 15);
+
+    // Scenario 5: Schedule generation for chosen payment day (e.g. 5th of each month)
+    assert.deepEqual(
+      createdManualContract.schedule.map((item: { dueDate: string }) => item.dueDate),
+      ['2026-02-05', '2026-03-05', '2026-04-05', '2026-05-05']
+    );
+
+    // Scenario 6: Correct schedule generation for 29, 30, 31 in short months and leap years
+    const calcShortMonthsNonLeap = calculateContractAndSchedule({
+      purchaseCostKopecks: 4000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 20,
+      downPaymentPercent: 25,
+      termMonths: 4,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-01-31',
+      paymentDayOfMonth: 31,
+    });
+    assert.deepEqual(
+      calcShortMonthsNonLeap.schedule.map((s) => s.dueDate),
+      ['2026-02-28', '2026-03-31', '2026-04-30', '2026-05-31']
+    );
+
+    const calcLeapYearFeb = calculateContractAndSchedule({
+      purchaseCostKopecks: 3000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 20,
+      downPaymentPercent: 20,
+      termMonths: 3,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2028-01-15',
+      paymentDayOfMonth: 31,
+    });
+    assert.deepEqual(
+      calcLeapYearFeb.schedule.map((s) => s.dueDate),
+      ['2028-02-29', '2028-03-31', '2028-04-30']
+    );
+
+    // Scenario 7: First payment is never placed in the past relative to startDate
+    const calcNeverInPast = calculateContractAndSchedule({
+      purchaseCostKopecks: 3000000,
+      deliveryCostKopecks: 0,
+      otherCostKopecks: 0,
+      markupPercent: 20,
+      downPaymentPercent: 20,
+      termMonths: 3,
+      roundingRule: 'kopeck',
+      scheduleType: 'equal',
+      startDate: '2026-01-20',
+      paymentDayOfMonth: 5, // 5th of January 2026 is already in the past relative to 2026-01-20
+    });
+    assert.equal(calcNeverInPast.schedule[0].dueDate, '2026-02-05');
+    assert.equal(calcNeverInPast.schedule[0].dueDate > '2026-01-20', true);
+
+    // Scenario 8: Changing paymentDayOfMonth on an active contract preserves paid installments and updates unpaid ones
+    const manualFirstInstallment = createdManualContract.schedule[0];
+    const payFirstInstallmentRes = await apiCall('/api/v1/payments', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        idempotencyKey: 'idem_payment_day_change_test_001',
+        clientId: createdManualContract.clientId,
+        contractId: createdManualContract.id,
+        accountId: 'acc_bank_main',
+        amountKopecks: manualFirstInstallment.plannedKopecks,
+        paymentMethod: 'bank_transfer',
+        eventDate: '2026-02-05',
+        allocations: [
+          {
+            scheduleItemId: manualFirstInstallment.id,
+            amountKopecks: manualFirstInstallment.plannedKopecks,
+          },
+        ],
+      },
+    });
+    assert.equal(payFirstInstallmentRes.status, 201);
+
+    const changePaymentDayRes = await apiCall(
+      `/api/v1/contracts/${createdManualContract.id}/payment-day`,
+      {
+        method: 'PATCH',
+        sessionToken: ownerToken,
+        csrfToken: ownerCsrf,
+        body: {
+          paymentDayOfMonth: 20,
+          reason: 'Перенос даты ежемесячного платежа на 20 число по просьбе клиента',
+        },
+      }
+    );
+    assert.equal(changePaymentDayRes.status, 200);
+    assert.equal(changePaymentDayRes.data.paymentDayOfMonth, 20);
+    assert.equal(changePaymentDayRes.data.updatedCount, 3);
+
+    const stateAfterPaymentDayChange = await apiCall('/api/v1/state', {
+      sessionToken: ownerToken,
+    });
+    const updatedManualContract = stateAfterPaymentDayChange.data.contracts.find(
+      (c: { id: string }) => c.id === createdManualContract.id
+    );
+    assert.ok(updatedManualContract);
+    assert.equal(updatedManualContract.paymentDayOfMonth, 20);
+    // Paid 1st installment remains untouched on 2026-02-05, while unpaid installments 2, 3, 4 move to the 20th
+    assert.equal(updatedManualContract.schedule[0].status, 'paid');
+    assert.equal(updatedManualContract.schedule[0].dueDate, '2026-02-05');
+    assert.deepEqual(
+      updatedManualContract.schedule.slice(1).map((item: { dueDate: string }) => item.dueDate),
+      ['2026-03-20', '2026-04-20', '2026-05-20']
+    );
+
+    // Direct unit check on recalculateUnpaidScheduleDates helper
+    const unitRecalc = recalculateUnpaidScheduleDates(
+      [
+        {
+          id: '1',
+          installmentNumber: 1,
+          dueDate: '2026-02-05',
+          plannedKopecks: 1500000,
+          paidKopecks: 1500000,
+          status: 'paid',
+        },
+        {
+          id: '2',
+          installmentNumber: 2,
+          dueDate: '2026-03-05',
+          plannedKopecks: 1500000,
+          paidKopecks: 0,
+          status: 'pending',
+        },
+      ],
+      '2026-01-10',
+      25
+    );
+    assert.equal(unitRecalc[0].dueDate, '2026-02-05');
+    assert.equal(unitRecalc[1].dueDate, '2026-03-25');
+
+    // Scenario 9: Validation rejects empty or invalid payment day of month and invalid contract terms
+    const invalidDayZeroRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        clientMode: 'existing',
+        clientId: createdClientId,
+        itemTitle: 'Тест неверного дня 0',
+        purchaseCostKopecks: 2000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 20,
+        downPaymentPercent: 20,
+        termMonths: 3,
+        paymentDayOfMonth: 0,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-01-10',
+        confirmedCalculation: true,
+      },
+    });
+    assert.equal(invalidDayZeroRes.status, 400);
+
+    const invalidDay32Res = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        clientMode: 'existing',
+        clientId: createdClientId,
+        itemTitle: 'Тест неверного дня 32',
+        purchaseCostKopecks: 2000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 20,
+        downPaymentPercent: 20,
+        termMonths: 3,
+        paymentDayOfMonth: 32,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-01-10',
+        confirmedCalculation: true,
+      },
+    });
+    assert.equal(invalidDay32Res.status, 400);
+
+    const invalidEmptyDayRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+      body: {
+        clientMode: 'existing',
+        clientId: createdClientId,
+        itemTitle: 'Тест пустого дня платежа',
+        purchaseCostKopecks: 2000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 20,
+        downPaymentPercent: 20,
+        termMonths: 3,
+        paymentDayOfMonth: '',
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-01-10',
+        confirmedCalculation: true,
+      },
+    });
+    assert.equal(invalidEmptyDayRes.status, 400);
+
+    const invalidPatchDayRes = await apiCall(
+      `/api/v1/contracts/${createdManualContract.id}/payment-day`,
+      {
+        method: 'PATCH',
+        sessionToken: ownerToken,
+        csrfToken: ownerCsrf,
+        body: {
+          paymentDayOfMonth: 35,
+        },
+      }
+    );
+    assert.equal(invalidPatchDayRes.status, 400);
+
+    // =========================================================================
+    // 10. Безопасный главный экран (Welcome Screen) — проверка всех 7 сценариев
+    // =========================================================================
+
+    // Сценарий 1 и 7: Запуск приложения авторизованным пользователем (в т.ч. на медленном соединении)
+    // открывает безопасный главный экран ('dashboard'), сессия проверяется через /api/v1/auth/session
+    // без выдачи таблиц клиентов/договоров, а shouldLoadConfidentialState возвращает false.
+    assert.equal(getSafeInitialLaunchSection(), 'dashboard');
+    assert.equal(
+      shouldLoadConfidentialState({
+        isAuthenticated: true,
+        activeSection: 'dashboard',
+        hasOpenOperationalModal: false,
+      }),
+      false
+    );
+    const sessionCheckRes = await apiCall('/api/v1/auth/session', {
+      method: 'GET',
+      sessionToken: ownerToken,
+    });
+    assert.equal(sessionCheckRes.status, 200);
+    assert.equal(sessionCheckRes.data.authenticated, true);
+    assert.equal('clients' in sessionCheckRes.data, false);
+    assert.equal('contracts' in sessionCheckRes.data, false);
+    assert.equal('payments' in sessionCheckRes.data, false);
+
+    // Сценарий 2: Перезагрузка страницы, когда ранее был открыт раздел клиентов или договоров —
+    // не восстанавливает конфиденциальный раздел из URL-хэша или хранилища, снова открывает 'dashboard'.
+    assert.equal(getSafeInitialLaunchSection('#clients', 'clients'), 'dashboard');
+    assert.equal(getSafeInitialLaunchSection('#contracts', 'contracts'), 'dashboard');
+    assert.equal(getSafeInitialLaunchSection('#payments', 'payments'), 'dashboard');
+
+    // Сценарий 3: Вход в приложение по логину и паролю — открывается главный экран приветствия с именем пользователя.
+    assert.equal(
+      formatWelcomeGreeting(sessionCheckRes.data.user.fullName),
+      `Добро пожаловать, ${sessionCheckRes.data.user.fullName}`
+    );
+    assert.equal(formatWelcomeGreeting(''), 'Добро пожаловать');
+
+    // Сценарий 4: Переход через меню в разделы «Клиенты», «Договоры», «Платежи» —
+    // активирует загрузку данных и возвращает все таблицы и функции в рабочем состоянии.
+    assert.equal(
+      shouldLoadConfidentialState({
+        isAuthenticated: true,
+        activeSection: 'clients',
+      }),
+      true
+    );
+    assert.equal(
+      shouldLoadConfidentialState({
+        isAuthenticated: true,
+        activeSection: 'contracts',
+      }),
+      true
+    );
+    assert.equal(
+      shouldLoadConfidentialState({
+        isAuthenticated: true,
+        activeSection: 'payments',
+      }),
+      true
+    );
+    const protectedSectionState = await apiCall('/api/v1/state', {
+      method: 'GET',
+      sessionToken: ownerToken,
+    });
+    assert.equal(protectedSectionState.status, 200);
+    assert.ok(Array.isArray(protectedSectionState.data.clients));
+    assert.ok(Array.isArray(protectedSectionState.data.contracts));
+    assert.ok(Array.isArray(protectedSectionState.data.payments));
+
+    // Сценарий 5: Попытка открыть внутренний раздел без авторизации — отклоняется (401) и перенаправляет на вход.
+    assert.equal(
+      shouldLoadConfidentialState({
+        isAuthenticated: false,
+        activeSection: 'clients',
+      }),
+      false
+    );
+    const unauthStateRes = await apiCall('/api/v1/state', {
+      method: 'GET',
+    });
+    assert.equal(unauthStateRes.status, 401);
+
+    // Сценарий 6: Выход из аккаунта — сессия очищается, повторный доступ к внутренним разделам закрыт (401).
+    const ownerLogoutRes = await apiCall('/api/v1/auth/logout', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
+    });
+    assert.equal(ownerLogoutRes.status, 200);
+    const afterOwnerLogoutSession = await apiCall('/api/v1/auth/session', {
+      method: 'GET',
+      sessionToken: ownerToken,
+    });
+    assert.equal(afterOwnerLogoutSession.data.authenticated, false);
+    const afterOwnerLogoutState = await apiCall('/api/v1/state', {
+      method: 'GET',
+      sessionToken: ownerToken,
+    });
+    assert.equal(afterOwnerLogoutState.status, 401);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
 

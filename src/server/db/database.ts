@@ -193,11 +193,18 @@ function initializeSchema(db: DatabaseSync): void {
       sale_price_kopecks INTEGER NOT NULL CHECK (sale_price_kopecks >= total_cost_kopecks),
       down_payment_percent REAL NOT NULL CHECK (down_payment_percent >= 0 AND down_payment_percent <= 100),
       down_payment_kopecks INTEGER NOT NULL CHECK (down_payment_kopecks >= 0 AND down_payment_kopecks <= sale_price_kopecks),
+      planned_down_payment_kopecks INTEGER NOT NULL DEFAULT 0 CHECK (planned_down_payment_kopecks >= 0),
+      actual_down_payment_kopecks INTEGER NOT NULL DEFAULT 0 CHECK (actual_down_payment_kopecks >= 0),
+      down_payment_diff_kopecks INTEGER NOT NULL DEFAULT 0,
+      extra_down_payment_kopecks INTEGER NOT NULL DEFAULT 0 CHECK (extra_down_payment_kopecks >= 0),
+      down_payment_shortfall_kopecks INTEGER NOT NULL DEFAULT 0 CHECK (down_payment_shortfall_kopecks >= 0),
+      is_custom_down_payment INTEGER NOT NULL DEFAULT 0,
       financed_principal_kopecks INTEGER NOT NULL CHECK (financed_principal_kopecks = sale_price_kopecks - down_payment_kopecks),
       term_months INTEGER NOT NULL CHECK (term_months > 0),
       rounding_rule TEXT NOT NULL CHECK (rounding_rule IN ('kopeck', 'ruble', 'ten_rubles')),
       schedule_type TEXT NOT NULL DEFAULT 'equal' CHECK (schedule_type IN ('equal', 'custom')),
       start_date TEXT NOT NULL,
+      payment_day_of_month INTEGER CHECK (payment_day_of_month IS NULL OR (payment_day_of_month >= 1 AND payment_day_of_month <= 31)),
       current_schedule_version INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('draft', 'active', 'completed', 'restructured', 'returned', 'cancelled')),
       closing_discount_kopecks INTEGER NOT NULL DEFAULT 0 CHECK (closing_discount_kopecks >= 0),
@@ -540,6 +547,47 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
   if (!contractColNames.has('idempotency_key')) {
     db.exec('ALTER TABLE contracts ADD COLUMN idempotency_key TEXT;');
   }
+  if (!contractColNames.has('planned_down_payment_kopecks')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN planned_down_payment_kopecks INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('actual_down_payment_kopecks')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN actual_down_payment_kopecks INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('down_payment_diff_kopecks')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN down_payment_diff_kopecks INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('extra_down_payment_kopecks')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN extra_down_payment_kopecks INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('down_payment_shortfall_kopecks')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN down_payment_shortfall_kopecks INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('is_custom_down_payment')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN is_custom_down_payment INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('payment_day_of_month')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN payment_day_of_month INTEGER;');
+  }
+
+  // Backfill payment_day_of_month on existing contracts from start_date if not set
+  db.exec(`
+    UPDATE contracts
+    SET payment_day_of_month = CAST(substr(start_date, 9, 2) AS INTEGER)
+    WHERE payment_day_of_month IS NULL
+      AND length(start_date) >= 10
+      AND CAST(substr(start_date, 9, 2) AS INTEGER) BETWEEN 1 AND 31;
+  `);
+
+  // Backfill planned/actual down payment on existing contracts where not yet set
+  db.exec(`
+    UPDATE contracts
+    SET planned_down_payment_kopecks = down_payment_kopecks,
+        actual_down_payment_kopecks = down_payment_kopecks
+    WHERE is_custom_down_payment = 0
+      AND planned_down_payment_kopecks = 0
+      AND actual_down_payment_kopecks = 0
+      AND down_payment_kopecks > 0;
+  `);
 
   // Ensure default status_rules_config row exists with 3-day payment window without overwriting admin customizations
   const rulesRow = db
@@ -629,6 +677,16 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     db,
     '007_three_day_grace_period_status',
     'Автоматическая смена статуса при неоплате в течение 3 дней после наступления даты платежа'
+  );
+  recordMigration(
+    db,
+    '008_custom_actual_down_payment',
+    'Необязательная настройка фактической суммы первоначального взноса с пересчётом и историей графика'
+  );
+  recordMigration(
+    db,
+    '009_contract_payment_day_and_form_upgrades',
+    'Выбор даты ежемесячного платежа (1..31), пересчёт будущих неоплаченных платежей и разделение режимов клиента'
   );
 
   // Sync documents/photos between SQLite and disk so nothing is ever lost after updates

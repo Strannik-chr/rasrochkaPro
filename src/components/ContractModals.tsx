@@ -9,6 +9,14 @@ import {
   ScheduleType,
 } from '../shared/types';
 import {
+  applyTariffProfileToContractTerms,
+  createInitialContractClientState,
+  createInitialContractTermsState,
+  switchContractFormToExistingClient,
+  switchContractFormToNewClient,
+  validateContractTermsState,
+} from '../shared/contractFormHelpers';
+import {
   formatDateRu,
   formatFileSize,
   formatMoney,
@@ -37,6 +45,7 @@ import {
   Edit3,
   ChevronDown,
   ChevronUp,
+  Calendar,
 } from 'lucide-react';
 
 interface NewContractModalProps {
@@ -114,35 +123,36 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   apiFetch,
 }) => {
   const activePlans = plans.filter((p) => p.isActive);
-  const defaultPlan = activePlans[0] || plans[0];
+  const initialClientState = useMemo(
+    () => createInitialContractClientState(clients.length > 0),
+    []
+  );
+  const initialTermsState = useMemo(() => createInitialContractTermsState(), []);
 
   const [idempotencyKey] = useState(
     () => `idem_contract_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
   );
 
-  // Client selection / inline creation state
-  const [clientMode, setClientMode] = useState<'existing' | 'new'>(
-    clients.length > 0 ? 'existing' : 'new'
-  );
-  const [clientId, setClientId] = useState(clients[0]?.id || '');
-  const [clientNameQuery, setClientNameQuery] = useState(clients[0]?.fullName || '');
-  const initialNameParts = splitFullNameParts(clients[0]?.fullName || '');
-  const [payerLastName, setPayerLastName] = useState(initialNameParts.lastName);
-  const [payerFirstName, setPayerFirstName] = useState(initialNameParts.firstName);
-  const [payerPatronymic, setPayerPatronymic] = useState(initialNameParts.patronymic);
+  // Client selection / inline creation state (clean by default; no residual data when switching modes)
+  const [clientMode, setClientMode] = useState<'existing' | 'new'>(initialClientState.clientMode);
+  const [clientId, setClientId] = useState(initialClientState.clientId);
+  const [clientNameQuery, setClientNameQuery] = useState(initialClientState.clientNameQuery);
+  const [payerLastName, setPayerLastName] = useState(initialClientState.payerLastName);
+  const [payerFirstName, setPayerFirstName] = useState(initialClientState.payerFirstName);
+  const [payerPatronymic, setPayerPatronymic] = useState(initialClientState.payerPatronymic);
   const [showSuggestions, setShowSuggestions] = useState(false);
 
   // Inline new client fields & existing client optional supplement fields
-  const [newClientPhone, setNewClientPhone] = useState('+7 ');
+  const [newClientPhone, setNewClientPhone] = useState(initialClientState.newClientPhone);
   const [newClientSecondaryPhone, setNewClientSecondaryPhone] = useState(
-    clients[0]?.secondaryPhone || ''
+    initialClientState.newClientSecondaryPhone
   );
   const [newClientDocumentRef, setNewClientDocumentRef] = useState(
-    clients[0]?.documentRef || ''
+    initialClientState.newClientDocumentRef
   );
-  const [newClientAddress, setNewClientAddress] = useState(clients[0]?.address || '');
-  const [newClientNotes, setNewClientNotes] = useState('');
-  const [allowSimilarName, setAllowSimilarName] = useState(false);
+  const [newClientAddress, setNewClientAddress] = useState(initialClientState.newClientAddress);
+  const [newClientNotes, setNewClientNotes] = useState(initialClientState.newClientNotes);
+  const [allowSimilarName, setAllowSimilarName] = useState(initialClientState.allowSimilarName);
 
   // Guarantors state (0, 1, 2, 3, or more)
   const [guarantors, setGuarantors] = useState<GuarantorDraftItem[]>([]);
@@ -151,21 +161,30 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   const [attachments, setAttachments] = useState<PendingContractAttachment[]>([]);
 
   const [purchaseId, setPurchaseId] = useState<string>('');
-  const [planId, setPlanId] = useState<string>(defaultPlan?.id || '');
+  // Default tariff profile is NOT selected ("") — user chooses a profile or enters terms manually
+  const [planId, setPlanId] = useState<string>(initialTermsState.planId);
   const [itemTitle, setItemTitle] = useState('');
-  const [purchaseRubles, setPurchaseRubles] = useState('50000');
-  const [deliveryRubles, setDeliveryRubles] = useState('1000');
-  const [otherRubles, setOtherRubles] = useState('0');
-  const [markupPercent, setMarkupPercent] = useState(String(defaultPlan?.markupPercent ?? 25));
+  // Store price, delivery cost, and extra costs start completely empty ("")
+  const [purchaseRubles, setPurchaseRubles] = useState(initialTermsState.purchaseRubles);
+  const [deliveryRubles, setDeliveryRubles] = useState(initialTermsState.deliveryRubles);
+  const [otherRubles, setOtherRubles] = useState(initialTermsState.otherRubles);
+  const [markupPercent, setMarkupPercent] = useState(initialTermsState.markupPercent);
   const [downPaymentPercent, setDownPaymentPercent] = useState(
-    String(defaultPlan?.downPaymentPercent ?? 30)
+    initialTermsState.downPaymentPercent
   );
-  const [termMonths, setTermMonths] = useState(String(defaultPlan?.termMonths ?? 6));
-  const [roundingRule, setRoundingRule] = useState<RoundingRule>(
-    defaultPlan?.roundingRule || 'kopeck'
-  );
+  // Optional custom actual down payment toggle — strictly OFF by default
+  const [useCustomActualDownPayment, setUseCustomActualDownPayment] = useState(false);
+  const [actualDownPaymentRubles, setActualDownPaymentRubles] = useState('');
+  const [confirmedCustomSchedule, setConfirmedCustomSchedule] = useState(false);
+
+  const [termMonths, setTermMonths] = useState(initialTermsState.termMonths);
+  const [roundingRule, setRoundingRule] = useState<RoundingRule>(initialTermsState.roundingRule);
   const [scheduleType, setScheduleType] = useState<ScheduleType>('equal');
   const [startDate, setStartDate] = useState(new Date().toISOString().slice(0, 10));
+  // Monthly payment day of month (1..31) — NOT selected by default ("")
+  const [paymentDayOfMonth, setPaymentDayOfMonth] = useState<string>(
+    initialTermsState.paymentDayOfMonth
+  );
   const [collectDownPaymentNow, setCollectDownPaymentNow] = useState(true);
   const [downPaymentAccountId, setDownPaymentAccountId] = useState(accounts[0]?.id || 'acc_cash_main');
   const [downPaymentMethod, setDownPaymentMethod] = useState<'cash' | 'bank_transfer'>('cash');
@@ -211,7 +230,11 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
         ) || null
       : null;
 
-    const rawName = clientNameQuery.trim().toLowerCase();
+    const rawName = (
+      joinFullNameParts(payerLastName, payerFirstName, payerPatronymic) || clientNameQuery
+    )
+      .trim()
+      .toLowerCase();
     const tokens = rawName.split(/\s+/).filter((t) => t.length >= 2);
     const similarNameClients =
       tokens.length > 0
@@ -225,7 +248,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
         : [];
 
     return { exactPhoneDuplicate, similarNameClients };
-  }, [clientMode, newClientPhone, clientNameQuery, clients]);
+  }, [clientMode, newClientPhone, payerLastName, payerFirstName, payerPatronymic, clientNameQuery, clients]);
 
   const handleSelectExistingClient = (cl: ClientDTO) => {
     setClientMode('existing');
@@ -235,25 +258,50 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
     setPayerLastName(parts.lastName);
     setPayerFirstName(parts.firstName);
     setPayerPatronymic(parts.patronymic);
+    setNewClientPhone(cl.phone || '+7 ');
     setNewClientSecondaryPhone(cl.secondaryPhone || '');
     setNewClientDocumentRef(cl.documentRef || '');
     setNewClientAddress(cl.address || '');
+    setNewClientNotes('');
+    setAllowSimilarName(false);
     setShowSuggestions(false);
     setError(null);
   };
 
+  const handleSwitchToExistingClientMode = () => {
+    const clean = switchContractFormToExistingClient<GuarantorDraftItem>(null);
+    setClientMode(clean.clientMode);
+    setClientId(clean.clientId);
+    setClientNameQuery(clean.clientNameQuery);
+    setPayerLastName(clean.payerLastName);
+    setPayerFirstName(clean.payerFirstName);
+    setPayerPatronymic(clean.payerPatronymic);
+    setNewClientPhone(clean.newClientPhone);
+    setNewClientSecondaryPhone(clean.newClientSecondaryPhone);
+    setNewClientDocumentRef(clean.newClientDocumentRef);
+    setNewClientAddress(clean.newClientAddress);
+    setNewClientNotes(clean.newClientNotes);
+    setAllowSimilarName(clean.allowSimilarName);
+    setShowSuggestions(true);
+    setError(null);
+  };
+
   const handleSwitchToNewClient = () => {
-    setClientMode('new');
-    setClientId('');
-    const parts = splitFullNameParts(clientNameQuery);
-    setPayerLastName(parts.lastName);
-    setPayerFirstName(parts.firstName);
-    setPayerPatronymic(parts.patronymic);
-    setNewClientSecondaryPhone('');
-    setNewClientDocumentRef('');
-    setNewClientAddress('');
+    const clean = switchContractFormToNewClient();
+    setClientMode(clean.clientMode);
+    setClientId(clean.clientId);
+    setClientNameQuery(clean.clientNameQuery);
+    setPayerLastName(clean.payerLastName);
+    setPayerFirstName(clean.payerFirstName);
+    setPayerPatronymic(clean.payerPatronymic);
+    setNewClientPhone(clean.newClientPhone);
+    setNewClientSecondaryPhone(clean.newClientSecondaryPhone);
+    setNewClientDocumentRef(clean.newClientDocumentRef);
+    setNewClientAddress(clean.newClientAddress);
+    setNewClientNotes(clean.newClientNotes);
+    setAllowSimilarName(clean.allowSimilarName);
+    setGuarantors([]);
     setShowSuggestions(false);
-    setAllowSimilarName(false);
     setError(null);
   };
 
@@ -282,7 +330,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
         lastName: '',
         firstName: '',
         patronymic: '',
-        phone: '+7 ',
+        phone: '',
         secondaryPhone: '',
         documentRef: '',
         address: '',
@@ -322,6 +370,25 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
       secondaryPhone: cl.secondaryPhone || '',
       documentRef: cl.documentRef || '',
       address: cl.address || '',
+    }));
+    setError(null);
+  };
+
+  const handleSwitchGuarantorToNew = (localId: string) => {
+    updateGuarantorItem(localId, (item) => ({
+      ...item,
+      mode: 'new',
+      clientId: '',
+      searchQuery: '',
+      showSuggestions: false,
+      lastName: '',
+      firstName: '',
+      patronymic: '',
+      phone: '',
+      secondaryPhone: '',
+      documentRef: '',
+      address: '',
+      notes: '',
     }));
     setError(null);
   };
@@ -436,26 +503,44 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   };
 
   const handleSelectPlan = (selectedId: string) => {
-    setPlanId(selectedId);
     setPreviewConfirmed(false);
-    const found = plans.find((p) => p.id === selectedId);
-    if (found) {
-      setMarkupPercent(String(found.markupPercent));
-      setDownPaymentPercent(String(found.downPaymentPercent));
-      setTermMonths(String(found.termMonths));
-      setRoundingRule(found.roundingRule);
-    }
+    const nextTerms = applyTariffProfileToContractTerms(
+      {
+        planId,
+        termMonths,
+        markupPercent,
+        downPaymentPercent,
+        paymentDayOfMonth,
+        roundingRule,
+        useCustomActualDownPayment,
+        actualDownPaymentRubles,
+      },
+      selectedId,
+      plans
+    );
+    setPlanId(nextTerms.planId);
+    setTermMonths(nextTerms.termMonths);
+    setMarkupPercent(nextTerms.markupPercent);
+    setDownPaymentPercent(nextTerms.downPaymentPercent);
+    setRoundingRule(nextTerms.roundingRule);
   };
 
   const handleSelectPurchase = (purId: string) => {
     setPurchaseId(purId);
     setPreviewConfirmed(false);
+    if (!purId) {
+      setItemTitle('');
+      setPurchaseRubles('');
+      setDeliveryRubles('');
+      setOtherRubles('');
+      return;
+    }
     const found = purchases.find((p) => p.id === purId);
     if (found) {
       setItemTitle(found.itemName);
       setPurchaseRubles(String(found.purchasePriceKopecks / 100));
-      setDeliveryRubles(String(found.deliveryCostKopecks / 100));
-      setOtherRubles(String(found.otherCostKopecks / 100));
+      setDeliveryRubles(found.deliveryCostKopecks > 0 ? String(found.deliveryCostKopecks / 100) : '');
+      setOtherRubles(found.otherCostKopecks > 0 ? String(found.otherCostKopecks / 100) : '');
       if (found.clientId) {
         const cl = clients.find((c) => c.id === found.clientId);
         if (cl) {
@@ -465,10 +550,66 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
     }
   };
 
+  const termsValidation = useMemo(
+    () =>
+      validateContractTermsState({
+        purchaseRubles,
+        deliveryRubles,
+        otherRubles,
+        planId,
+        termMonths,
+        markupPercent,
+        downPaymentPercent,
+        paymentDayOfMonth,
+        roundingRule,
+        useCustomActualDownPayment,
+        actualDownPaymentRubles,
+      }),
+    [
+      purchaseRubles,
+      deliveryRubles,
+      otherRubles,
+      planId,
+      termMonths,
+      markupPercent,
+      downPaymentPercent,
+      paymentDayOfMonth,
+      roundingRule,
+      useCustomActualDownPayment,
+      actualDownPaymentRubles,
+    ]
+  );
+
+  const areAllConditionsEntered =
+    purchaseRubles.trim() !== '' &&
+    parseRublesInputToKopecks(purchaseRubles) > 0 &&
+    termMonths.trim() !== '' &&
+    markupPercent.trim() !== '' &&
+    (downPaymentPercent.trim() !== '' || useCustomActualDownPayment) &&
+    paymentDayOfMonth.trim() !== '';
+
   const runPreviewCalculation = async () => {
     setError(null);
     setPreviewConfirmed(false);
+    setConfirmedCustomSchedule(false);
+
+    if (!areAllConditionsEntered) {
+      setPreviewResult(null);
+      return;
+    }
+
+    if (!termsValidation.valid) {
+      setPreviewResult(null);
+      setError(termsValidation.error);
+      return;
+    }
+
     try {
+      const parsedActualKopecks = useCustomActualDownPayment
+        ? actualDownPaymentRubles.trim() === ''
+          ? 0
+          : parseRublesInputToKopecks(actualDownPaymentRubles)
+        : undefined;
       const data = await apiFetch('/api/v1/contracts/preview', {
         method: 'POST',
         body: JSON.stringify({
@@ -477,14 +618,18 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
           otherCostKopecks: parseRublesInputToKopecks(otherRubles),
           markupPercent: Number(markupPercent),
           downPaymentPercent: Number(downPaymentPercent),
+          useCustomActualDownPayment,
+          actualDownPaymentKopecks: parsedActualKopecks,
           termMonths: Number(termMonths),
           roundingRule,
           scheduleType,
           startDate,
+          paymentDayOfMonth: Number(paymentDayOfMonth),
         }),
       });
       setPreviewResult(data);
     } catch (err) {
+      setPreviewResult(null);
       setError(err instanceof Error ? err.message : 'Ошибка расчёта');
     }
   };
@@ -497,9 +642,12 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
     otherRubles,
     markupPercent,
     downPaymentPercent,
+    useCustomActualDownPayment,
+    actualDownPaymentRubles,
     termMonths,
     roundingRule,
     startDate,
+    paymentDayOfMonth,
   ]);
 
   const primaryEffectivePhone = useMemo(() => {
@@ -511,6 +659,30 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (purchaseRubles.trim() === '' || parseRublesInputToKopecks(purchaseRubles) <= 0) {
+      setError('Укажите цену покупки товара в магазине (больше 0 ₽).');
+      return;
+    }
+    if (!termsValidation.valid) {
+      setError(
+        termsValidation.error ||
+          'Заполните все обязательные условия рассрочки и дату ежемесячного платежа.'
+      );
+      return;
+    }
+    if (previewResult?.exceedsTotalContractDebt) {
+      setError(
+        previewResult.warningMessage ||
+          'Внесённая сумма превышает общий долг по договору. Исправьте сумму перед сохранением.'
+      );
+      return;
+    }
+    if (useCustomActualDownPayment && previewResult?.scheduleChanged && !confirmedCustomSchedule) {
+      setError(
+        'Фактическая сумма первоначального взноса отличается от плановой. Подтвердите обновлённый график платежей перед сохранением договора.'
+      );
+      return;
+    }
     if (!previewConfirmed) {
       setError('Необходимо проверить и подтвердить расчёт и график платежей перед активацией договора.');
       return;
@@ -609,6 +781,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
     try {
       await onSubmit({
         idempotencyKey,
+        clientMode,
         clientId: clientMode === 'existing' ? clientId : undefined,
         clientUpdates:
           clientMode === 'existing'
@@ -679,10 +852,18 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
         otherCostKopecks: parseRublesInputToKopecks(otherRubles),
         markupPercent: Number(markupPercent),
         downPaymentPercent: Number(downPaymentPercent),
+        useCustomActualDownPayment,
+        actualDownPaymentKopecks: useCustomActualDownPayment
+          ? actualDownPaymentRubles.trim() === ''
+            ? 0
+            : parseRublesInputToKopecks(actualDownPaymentRubles)
+          : undefined,
+        confirmedCustomSchedule: useCustomActualDownPayment ? confirmedCustomSchedule : undefined,
         termMonths: Number(termMonths),
         roundingRule,
         scheduleType,
         startDate,
+        paymentDayOfMonth: Number(paymentDayOfMonth),
         collectDownPaymentNow,
         downPaymentAccountId,
         downPaymentMethod,
@@ -696,6 +877,10 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
           docCategory: 'contract_scan',
         })),
       });
+      // Reset custom down payment toggle on close
+      setUseCustomActualDownPayment(false);
+      setActualDownPaymentRubles('');
+      setConfirmedCustomSchedule(false);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка создания договора');
@@ -744,18 +929,13 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-0.5">
-                  Найдите существующего клиента по ФИО или телефону либо создайте новую карточку прямо в форме
+                  Найдите существующего клиента по ФИО или телефону либо переключитесь на чистую форму создания нового клиента
                 </p>
               </div>
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => {
-                    setClientMode('existing');
-                    if (!clientId && clients[0]) {
-                      handleSelectExistingClient(clients[0]);
-                    }
-                  }}
+                  onClick={handleSwitchToExistingClientMode}
                   className={`px-2.5 py-1 text-xs font-medium rounded-lg border flex items-center gap-1 ${
                     clientMode === 'existing'
                       ? 'bg-slate-900 text-white border-slate-900'
@@ -775,28 +955,24 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   }`}
                 >
                   <UserPlus className="w-3.5 h-3.5" />
-                  <span>+ Новый клиент в договоре</span>
+                  <span>Новый клиент</span>
                 </button>
               </div>
             </div>
 
-            <div className="relative">
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Поиск клиента по ФИО или номеру телефона *
-              </label>
-              <input
-                type="text"
-                value={clientNameQuery}
-                onFocus={() => setShowSuggestions(true)}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setClientNameQuery(val);
-                  const parts = splitFullNameParts(val);
-                  setPayerLastName(parts.lastName);
-                  setPayerFirstName(parts.firstName);
-                  setPayerPatronymic(parts.patronymic);
-                  setShowSuggestions(true);
-                  if (clientMode === 'existing') {
+            {clientMode === 'existing' && (
+              <div className="relative">
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Поиск существующего клиента по ФИО или номеру телефона *
+                </label>
+                <input
+                  type="text"
+                  value={clientNameQuery}
+                  onFocus={() => setShowSuggestions(true)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setClientNameQuery(val);
+                    setShowSuggestions(true);
                     const exact = clients.find(
                       (c) => c.fullName.toLowerCase() === val.trim().toLowerCase()
                     );
@@ -805,68 +981,66 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     } else {
                       setClientId('');
                     }
-                  }
-                }}
-                placeholder="Начните вводить фамилию, имя, отчество или телефон клиента..."
-                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                required
-              />
+                  }}
+                  placeholder="Начните вводить фамилию, имя, отчество или телефон клиента..."
+                  className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
+                  required={clientMode === 'existing'}
+                />
 
-              {/* Autocomplete dropdown */}
-              {showSuggestions && clientNameQuery.trim().length > 0 && (
-                <div className="mt-1 border border-slate-200 rounded-lg bg-white shadow-sm max-h-52 overflow-y-auto divide-y divide-slate-100">
-                  {matchingClients.length > 0 ? (
-                    matchingClients.map((cl) => {
-                      const stMeta = getClientPaymentStatusMeta(cl.paymentStatus);
-                      const isSelected = clientMode === 'existing' && clientId === cl.id;
-                      return (
-                        <div
-                          key={cl.id}
-                          onClick={() => handleSelectExistingClient(cl)}
-                          className={`px-3 py-2 text-xs flex items-center justify-between cursor-pointer hover:bg-slate-50 ${
-                            isSelected ? 'bg-emerald-50/70' : ''
-                          }`}
-                        >
-                          <div>
-                            <div className="font-medium text-slate-900 flex items-center gap-2">
-                              <span>{cl.fullName}</span>
-                              <span
-                                className={`px-2 py-0.5 text-[10px] font-medium border rounded-md ${stMeta.badgeClass}`}
-                              >
-                                {stMeta.label}
-                              </span>
+                {/* Autocomplete dropdown */}
+                {showSuggestions && (
+                  <div className="mt-1 border border-slate-200 rounded-lg bg-white shadow-sm max-h-52 overflow-y-auto divide-y divide-slate-100">
+                    {matchingClients.length > 0 ? (
+                      matchingClients.map((cl) => {
+                        const stMeta = getClientPaymentStatusMeta(cl.paymentStatus);
+                        const isSelected = clientMode === 'existing' && clientId === cl.id;
+                        return (
+                          <div
+                            key={cl.id}
+                            onClick={() => handleSelectExistingClient(cl)}
+                            className={`px-3 py-2 text-xs flex items-center justify-between cursor-pointer hover:bg-slate-50 ${
+                              isSelected ? 'bg-emerald-50/70' : ''
+                            }`}
+                          >
+                            <div>
+                              <div className="font-medium text-slate-900 flex items-center gap-2">
+                                <span>{cl.fullName}</span>
+                                <span
+                                  className={`px-2 py-0.5 text-[10px] font-medium border rounded-md ${stMeta.badgeClass}`}
+                                >
+                                  {stMeta.label}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                                Тел: {cl.phone}
+                                {cl.documentRef ? ` · Паспорт: ${cl.documentRef}` : ''}
+                                {typeof cl.activeContractsCount === 'number'
+                                  ? ` · Активных договоров: ${cl.activeContractsCount}`
+                                  : ''}
+                              </div>
                             </div>
-                            <div className="text-[11px] text-slate-500 font-mono mt-0.5">
-                              Тел: {cl.phone}
-                              {cl.documentRef ? ` · Паспорт: ${cl.documentRef}` : ''}
-                              {typeof cl.activeContractsCount === 'number'
-                                ? ` · Активных договоров: ${cl.activeContractsCount}`
-                                : ''}
-                            </div>
+                            <span className="text-[11px] font-medium text-emerald-700">
+                              {isSelected ? 'Выбран ✓' : 'Выбрать'}
+                            </span>
                           </div>
-                          <span className="text-[11px] font-medium text-emerald-700">
-                            {isSelected ? 'Выбран ✓' : 'Выбрать'}
-                          </span>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className="p-3 text-xs text-slate-600 flex items-center justify-between">
-                      <span>Совпадений по «{clientNameQuery}» в базе не найдено.</span>
-                      {clientMode !== 'new' && (
+                        );
+                      })
+                    ) : (
+                      <div className="p-3 text-xs text-slate-600 flex items-center justify-between">
+                        <span>Совпадений по «{clientNameQuery}» в базе не найдено.</span>
                         <button
                           type="button"
                           onClick={handleSwitchToNewClient}
                           className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-700 rounded-lg hover:bg-emerald-800"
                         >
-                          Создать клиента «{clientNameQuery.trim()}»
+                          Перейти к созданию нового клиента
                         </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Selected existing client summary + editable supplementary fields */}
             {clientMode === 'existing' && selectedExistingClient && (
@@ -1313,14 +1487,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() =>
-                                  updateGuarantorItem(g.localId, (item) => ({
-                                    ...item,
-                                    mode: 'new',
-                                    clientId: '',
-                                    showSuggestions: false,
-                                  }))
-                                }
+                                onClick={() => handleSwitchGuarantorToNew(g.localId)}
                                 className={`px-2.5 py-1 text-xs font-medium rounded-md border flex items-center gap-1 ${
                                   g.mode === 'new'
                                     ? 'bg-emerald-700 text-white border-emerald-700'
@@ -1414,14 +1581,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                                     <span>В базе не найдено «{g.searchQuery}».</span>
                                     <button
                                       type="button"
-                                      onClick={() =>
-                                        updateGuarantorItem(g.localId, (item) => ({
-                                          ...item,
-                                          mode: 'new',
-                                          clientId: '',
-                                          showSuggestions: false,
-                                        }))
-                                      }
+                                      onClick={() => handleSwitchGuarantorToNew(g.localId)}
                                       className="px-2 py-1 text-[11px] font-medium text-white bg-emerald-700 rounded"
                                     >
                                       Заполнить как нового
@@ -1793,6 +1953,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                 step="0.01"
                 min="1"
                 value={purchaseRubles}
+                placeholder="Введите сумму"
                 onChange={(e) => {
                   setPurchaseRubles(e.target.value);
                   setPreviewConfirmed(false);
@@ -1810,6 +1971,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   step="0.01"
                   min="0"
                   value={deliveryRubles}
+                  placeholder="Необязательно"
                   onChange={(e) => {
                     setDeliveryRubles(e.target.value);
                     setPreviewConfirmed(false);
@@ -1826,6 +1988,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   step="0.01"
                   min="0"
                   value={otherRubles}
+                  placeholder="Необязательно"
                   onChange={(e) => {
                     setOtherRubles(e.target.value);
                     setPreviewConfirmed(false);
@@ -1837,64 +2000,70 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
 
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">
-                Тарифный профиль рассрочки
+                Тарифный профиль рассрочки (необязательно)
               </label>
               <select
                 value={planId}
                 onChange={(e) => handleSelectPlan(e.target.value)}
                 className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
               >
+                <option value="">Выберите тарифный профиль (или настройте условия вручную)</option>
                 {activePlans.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name} — {p.termMonths} мес. · наценка {p.markupPercent}% · взнос {p.downPaymentPercent}% (v{p.version})
                   </option>
                 ))}
-                <option value="">Индивидуальные условия договора</option>
               </select>
             </div>
 
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Срок (мес.)</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Срок (мес.) *</label>
                 <input
                   type="number"
                   min="1"
                   max="120"
                   value={termMonths}
+                  placeholder="Напр.: 6"
                   onChange={(e) => {
                     setTermMonths(e.target.value);
                     setPreviewConfirmed(false);
                   }}
                   className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  required
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Наценка (%)</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Наценка (%) *</label>
                 <input
                   type="number"
                   step="0.1"
                   min="0"
                   value={markupPercent}
+                  placeholder="Напр.: 25"
                   onChange={(e) => {
                     setMarkupPercent(e.target.value);
                     setPreviewConfirmed(false);
                   }}
                   className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  required
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">1-й взнос (%)</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">1-й взнос (%) *</label>
                 <input
                   type="number"
                   step="0.1"
                   min="0"
                   max="99"
                   value={downPaymentPercent}
+                  placeholder="Напр.: 30"
                   onChange={(e) => {
                     setDownPaymentPercent(e.target.value);
                     setPreviewConfirmed(false);
                   }}
                   className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                  required
                 />
               </div>
             </div>
@@ -1917,19 +2086,193 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
               </select>
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Дата оформления договора
-              </label>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => {
-                  setStartDate(e.target.value);
-                  setPreviewConfirmed(false);
-                }}
-                className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Дата оформления договора *
+                </label>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => {
+                    setStartDate(e.target.value);
+                    setPreviewConfirmed(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  Дата ежемесячного платежа (число 1–31) *
+                </label>
+                <select
+                  value={paymentDayOfMonth}
+                  onChange={(e) => {
+                    setPaymentDayOfMonth(e.target.value);
+                    setPreviewConfirmed(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg bg-white"
+                  required
+                >
+                  <option value="">Выберите число месяца (1–31)</option>
+                  {Array.from({ length: 31 }, (_, idx) => idx + 1).map((day) => (
+                    <option key={day} value={String(day)}>
+                      Каждое {day}-е число месяца
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  В коротких месяцах (февраль, 30 дней) автоматически ставится последний день месяца
+                </p>
+              </div>
+            </div>
+
+            {/* Блок «Первоначальный взнос» с выключенным по умолчанию переключателем фактической суммы */}
+            <div className="md:col-span-2 p-4 border border-slate-200 rounded-xl bg-slate-50/70 space-y-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                    Первоначальный взнос
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    По умолчанию рассчитывается автоматически по указанному проценту (
+                    {downPaymentPercent.trim() !== '' ? `${downPaymentPercent}%` : 'процент не задан'}
+                    {previewResult
+                      ? ` = ${formatMoney(previewResult.plannedDownPaymentKopecks ?? previewResult.downPaymentKopecks)}`
+                      : ''}
+                    )
+                  </p>
+                </div>
+
+                <label className="inline-flex items-center gap-2.5 text-xs font-medium text-slate-900 cursor-pointer select-none bg-white px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">
+                  <input
+                    type="checkbox"
+                    checked={useCustomActualDownPayment}
+                    onChange={(e) => {
+                      const nextChecked = e.target.checked;
+                      setUseCustomActualDownPayment(nextChecked);
+                      setPreviewConfirmed(false);
+                      setConfirmedCustomSchedule(false);
+                      if (nextChecked && actualDownPaymentRubles.trim() === '' && previewResult) {
+                        const plannedKop =
+                          previewResult.plannedDownPaymentKopecks ?? previewResult.downPaymentKopecks ?? 0;
+                        setActualDownPaymentRubles(String(plannedKop / 100));
+                      }
+                    }}
+                    className="rounded border-slate-300 text-slate-900 focus:ring-slate-900"
+                  />
+                  <span>Изменить фактическую сумму первоначального взноса</span>
+                </label>
+              </div>
+
+              {useCustomActualDownPayment && (
+                <div className="p-3.5 bg-white border border-slate-200 rounded-lg space-y-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-800 mb-1">
+                        Фактически внесено (₽) *
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={actualDownPaymentRubles}
+                        onChange={(e) => {
+                          setActualDownPaymentRubles(e.target.value);
+                          setPreviewConfirmed(false);
+                          setConfirmedCustomSchedule(false);
+                        }}
+                        placeholder="Введите сумму, которую клиент действительно заплатил"
+                        className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                    <div className="text-[11px] text-slate-500 leading-relaxed">
+                      Укажите реальную сумму, полученную от клиента в счёт первого взноса. Платёж не создаётся просто при вводе числа — запись о платеже фиксируется только при подтверждении и создании договора.
+                    </div>
+                  </div>
+
+                  {previewResult && (
+                    <>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                        <div>
+                          <div className="text-slate-500">Плановый первоначальный взнос</div>
+                          <div className="font-mono font-semibold text-slate-900 mt-0.5 whitespace-nowrap">
+                            {formatMoney(previewResult.plannedDownPaymentKopecks)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">Фактически внесено</div>
+                          <div className="font-mono font-semibold text-slate-900 mt-0.5 whitespace-nowrap">
+                            {formatMoney(previewResult.actualDownPaymentKopecks)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">Разница (факт − план)</div>
+                          <div
+                            className={`font-mono font-semibold mt-0.5 whitespace-nowrap ${
+                              previewResult.downPaymentDiffKopecks > 0
+                                ? 'text-emerald-700'
+                                : previewResult.downPaymentDiffKopecks < 0
+                                  ? 'text-amber-700'
+                                  : 'text-slate-700'
+                            }`}
+                          >
+                            {previewResult.downPaymentDiffKopecks > 0 ? '+' : ''}
+                            {formatMoney(previewResult.downPaymentDiffKopecks)}
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">
+                            {previewResult.downPaymentShortfallKopecks > 0
+                              ? `Недоплата ПВ: ${formatMoney(previewResult.downPaymentShortfallKopecks)}`
+                              : previewResult.extraDownPaymentKopecks > 0
+                                ? `Доп. погашение: ${formatMoney(previewResult.extraDownPaymentKopecks)}`
+                                : 'Совпадает с планом'}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">Остаток долга по договору</div>
+                          <div className="font-mono font-bold text-slate-900 mt-0.5 whitespace-nowrap">
+                            {formatMoney(previewResult.financedPrincipalKopecks)}
+                          </div>
+                          {previewResult.scheduleChanged && !previewResult.exceedsTotalContractDebt && (
+                            <div className="text-[11px] text-slate-500 mt-0.5">
+                              Вместо плановых {formatMoney(previewResult.plannedFinancedPrincipalKopecks)}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {previewResult.exceedsTotalContractDebt && (
+                        <div className="p-3 bg-red-50 border border-red-300 rounded-lg text-xs text-red-900 flex items-start gap-2.5">
+                          <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                          <div className="space-y-1">
+                            <div className="font-semibold">
+                              Предупреждение: внесённая сумма превышает или полностью закрывает общий долг по договору
+                            </div>
+                            <div>{previewResult.warningMessage}</div>
+                          </div>
+                        </div>
+                      )}
+
+                      {!previewResult.exceedsTotalContractDebt &&
+                        previewResult.downPaymentShortfallKopecks > 0 && (
+                          <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900">
+                            <strong>Недоплата по первоначальному взносу ({formatMoney(previewResult.downPaymentShortfallKopecks)}):</strong>{' '}
+                            оплаченным первоначальным взносом засчитывается только фактически внесённая сумма ({formatMoney(previewResult.actualDownPaymentKopecks)}). Недостающая часть не считается доходом и автоматически добавлена к остатку долга ({formatMoney(previewResult.financedPrincipalKopecks)}) с распределением по графику платежей.
+                          </div>
+                        )}
+
+                      {!previewResult.exceedsTotalContractDebt &&
+                        previewResult.extraDownPaymentKopecks > 0 && (
+                          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900">
+                            <strong>Дополнительное погашение по договору ({formatMoney(previewResult.extraDownPaymentKopecks)}):</strong>{' '}
+                            из внесённых {formatMoney(previewResult.actualDownPaymentKopecks)} сумма {formatMoney(previewResult.plannedDownPaymentKopecks)} закрывает плановый первоначальный взнос, а разница {formatMoney(previewResult.extraDownPaymentKopecks)} зачтена в уменьшение будущих платежей. Остаток долга по графику снижен до {formatMoney(previewResult.financedPrincipalKopecks)}.
+                          </div>
+                        )}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -2018,13 +2361,33 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
           </div>
 
           {/* Detailed Server Calculation Preview */}
+          {!previewResult && (
+            <div className="border border-dashed border-slate-300 rounded-xl p-4 bg-slate-50/60 text-xs text-slate-600 flex items-start gap-2.5">
+              <Calculator className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-semibold text-slate-900">
+                  Ожидание параметров рассрочки и даты ежемесячного платежа
+                </div>
+                <div className="mt-0.5">
+                  Выберите тарифный профиль или укажите вручную <strong>Срок (мес.)</strong>,{' '}
+                  <strong>Наценку (%)</strong>, <strong>1-й взнос (%)</strong> и{' '}
+                  <strong>Дату ежемесячного платежа (1–31)</strong> — программа автоматически
+                  рассчитает полную стоимость, первоначальный взнос, остаток долга и точные даты
+                  графика платежей.
+                </div>
+              </div>
+            </div>
+          )}
+
           {previewResult && (
             <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/70 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-200 pb-3">
                 <div className="flex items-center gap-2">
                   <Calculator className="w-4 h-4 text-slate-700" />
                   <h3 className="text-sm font-semibold text-slate-900">
-                    Предварительный расчёт и график платежей (расчёт выполнен сервером в копейках)
+                    {useCustomActualDownPayment && previewResult.scheduleChanged
+                      ? 'Предварительный обновлённый график и сравнение со стандартным планом'
+                      : 'Предварительный расчёт и график платежей (расчёт выполнен сервером в копейках)'}
                   </h3>
                 </div>
                 <span className="text-xs text-slate-500 font-mono">
@@ -2053,7 +2416,9 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                 </div>
                 <div>
                   <div className="text-slate-500">
-                    Первый взнос ({previewResult.downPaymentPercent}%)
+                    {useCustomActualDownPayment
+                      ? `Фактический ПВ (план ${previewResult.downPaymentPercent}%)`
+                      : `Первый взнос (${previewResult.downPaymentPercent}%)`}
                   </div>
                   <div className="text-sm font-semibold font-mono tabular-nums whitespace-nowrap text-slate-900 mt-0.5">
                     {formatMoney(previewResult.downPaymentKopecks)}
@@ -2067,32 +2432,90 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                 </div>
               </div>
 
-              <div className="max-h-52 overflow-x-auto overflow-y-auto border border-slate-200 rounded-lg bg-white">
-                <table className="w-full min-w-max text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                      <th className="py-2 px-3 font-medium whitespace-nowrap">№ платежа</th>
-                      <th className="py-2 px-3 font-medium whitespace-nowrap">Дата оплаты</th>
-                      <th className="py-2 px-3 font-medium text-right whitespace-nowrap">Сумма по графику</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {previewResult.schedule.map((row: any) => (
-                      <tr key={row.installmentNumber}>
-                        <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-slate-700">
-                          Платёж №{row.installmentNumber}
-                        </td>
-                        <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-slate-700">
-                          {formatDateRu(row.dueDate)}
-                        </td>
-                        <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-right font-medium text-slate-900">
-                          {formatMoney(row.plannedKopecks)}
-                        </td>
+              {!previewResult.exceedsTotalContractDebt && (
+                <div className="max-h-60 overflow-x-auto overflow-y-auto border border-slate-200 rounded-lg bg-white">
+                  <table className="w-full min-w-max text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                        <th className="py-2 px-3 font-medium whitespace-nowrap">№ платежа</th>
+                        <th className="py-2 px-3 font-medium whitespace-nowrap">Дата оплаты</th>
+                        {useCustomActualDownPayment && previewResult.scheduleChanged && (
+                          <th className="py-2 px-3 font-medium text-right whitespace-nowrap">
+                            Старый график (план)
+                          </th>
+                        )}
+                        <th className="py-2 px-3 font-medium text-right whitespace-nowrap">
+                          {useCustomActualDownPayment && previewResult.scheduleChanged
+                            ? 'Новый график (пересчёт)'
+                            : 'Сумма по графику'}
+                        </th>
+                        {useCustomActualDownPayment && previewResult.scheduleChanged && (
+                          <th className="py-2 px-3 font-medium text-right whitespace-nowrap">
+                            Разница по месяцу
+                          </th>
+                        )}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {previewResult.schedule.map((row: any) => {
+                        const diff = Number(row.diffKopecks || 0);
+                        return (
+                          <tr key={row.installmentNumber}>
+                            <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-slate-700">
+                              Платёж №{row.installmentNumber}
+                            </td>
+                            <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-slate-700">
+                              {formatDateRu(row.dueDate)}
+                            </td>
+                            {useCustomActualDownPayment && previewResult.scheduleChanged && (
+                              <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-right text-slate-500">
+                                {formatMoney(row.originalPlannedKopecks ?? row.plannedKopecks)}
+                              </td>
+                            )}
+                            <td className="py-2 px-3 font-mono tabular-nums whitespace-nowrap text-right font-semibold text-slate-900">
+                              {formatMoney(row.plannedKopecks)}
+                            </td>
+                            {useCustomActualDownPayment && previewResult.scheduleChanged && (
+                              <td
+                                className={`py-2 px-3 font-mono tabular-nums whitespace-nowrap text-right font-medium ${
+                                  diff > 0
+                                    ? 'text-amber-700'
+                                    : diff < 0
+                                      ? 'text-emerald-700'
+                                      : 'text-slate-500'
+                                }`}
+                              >
+                                {diff > 0 ? `+${formatMoney(diff)}` : formatMoney(diff)}
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {useCustomActualDownPayment &&
+                previewResult.scheduleChanged &&
+                !previewResult.exceedsTotalContractDebt && (
+                  <div className="p-3 bg-white border border-slate-300 rounded-lg">
+                    <label className="flex items-start gap-2.5 text-xs font-medium text-slate-900 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={confirmedCustomSchedule}
+                        onChange={(e) => setConfirmedCustomSchedule(e.target.checked)}
+                        className="mt-0.5 rounded border-slate-300"
+                      />
+                      <span>
+                        Подтверждаю пересчёт графика платежей с учётом фактического первоначального взноса (
+                        {formatMoney(previewResult.actualDownPaymentKopecks)} вместо плановых{' '}
+                        {formatMoney(previewResult.plannedDownPaymentKopecks)}; новый остаток по графику:{' '}
+                        {formatMoney(previewResult.financedPrincipalKopecks)})
+                      </span>
+                    </label>
+                  </div>
+                )}
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
                 <label className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer">
@@ -2102,7 +2525,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                     onChange={(e) => setCollectDownPaymentNow(e.target.checked)}
                     className="rounded border-slate-300"
                   />
-                  <span>Принять первоначальный взнос в кассу/банк сразу</span>
+                  <span>Принять первоначальный взнос в кассу/банк сразу (подтвердить получение денег)</span>
                 </label>
 
                 {collectDownPaymentNow && (
@@ -2137,6 +2560,7 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
                   <input
                     type="checkbox"
                     checked={previewConfirmed}
+                    disabled={Boolean(previewResult.exceedsTotalContractDebt)}
                     onChange={(e) => setPreviewConfirmed(e.target.checked)}
                     className="mt-0.5 rounded border-slate-300"
                   />
@@ -2159,7 +2583,16 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={!previewConfirmed || submitting}
+              disabled={
+                !previewConfirmed ||
+                submitting ||
+                Boolean(previewResult?.exceedsTotalContractDebt) ||
+                Boolean(
+                  useCustomActualDownPayment &&
+                    previewResult?.scheduleChanged &&
+                    !confirmedCustomSchedule
+                )
+              }
               className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50 flex items-center gap-1.5"
             >
               <Check className="w-4 h-4" />
@@ -2399,6 +2832,10 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
   onSuccess,
 }) => {
   const [reason, setReason] = useState('Обновление графика с учётом внесённых платежей');
+  const [selectedPaymentDay, setSelectedPaymentDay] = useState<string>(
+    contract.paymentDayOfMonth ? String(contract.paymentDayOfMonth) : ''
+  );
+  const [updatingPaymentDay, setUpdatingPaymentDay] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -2415,6 +2852,34 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
   const activeVersionMeta = contract.scheduleHistory.find(
     (v) => v.version === contract.currentScheduleVersion
   );
+
+  const handleUpdatePaymentDay = async () => {
+    const dayNum = Number(selectedPaymentDay);
+    if (!Number.isInteger(dayNum) || dayNum < 1 || dayNum > 31) {
+      setError('Выберите корректное число месяца от 1 до 31.');
+      return;
+    }
+    setUpdatingPaymentDay(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiFetch(`/api/v1/contracts/${contract.id}/payment-day`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          paymentDayOfMonth: dayNum,
+          reason: `Перенос даты ежемесячного платежа на ${dayNum}-е число месяца`,
+        }),
+      });
+      await onSuccess();
+      setNotice(
+        `Дата ежемесячного платежа изменена на ${dayNum}-е число каждого месяца. Пересчитано будущих неоплаченных платежей: ${res.updatedCount ?? unpaidItems.length}, уже оплаченные платежи (${res.preservedPaidCount ?? completedMonthsCount}) сохранены без изменений.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка изменения даты ежемесячного платежа');
+    } finally {
+      setUpdatingPaymentDay(false);
+    }
+  };
 
   const handleRestructure = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2451,6 +2916,7 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
               </h2>
               <p className="text-xs text-slate-500 break-words">
                 Клиент: {contract.clientName} · Товар: {contract.itemTitle} · Текущая версия: v{contract.currentScheduleVersion}
+                {contract.paymentDayOfMonth ? ` · День оплаты: ${contract.paymentDayOfMonth}-е число` : ''}
               </p>
             </div>
           </div>
@@ -2487,6 +2953,45 @@ export const RestructureScheduleModal: React.FC<RestructureModalProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Change monthly payment day for future unpaid installments */}
+        {contract.remainingDebtKopecks > 0 && (
+          <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/70 space-y-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                  <Calendar className="w-4 h-4 text-slate-700" />
+                  <span>Дата ежемесячного платежа (число месяца 1–31)</span>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  При изменении числа месяца автоматически пересчитываются только будущие неоплаченные платежи. Уже оплаченные платежи не меняются.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={selectedPaymentDay}
+                  onChange={(e) => setSelectedPaymentDay(e.target.value)}
+                  className="px-3 py-1.5 text-xs font-mono border border-slate-300 rounded-lg bg-white"
+                >
+                  <option value="">Выберите число (1–31)</option>
+                  {Array.from({ length: 31 }, (_, idx) => idx + 1).map((day) => (
+                    <option key={day} value={String(day)}>
+                      Каждое {day}-е число месяца
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={updatingPaymentDay || !selectedPaymentDay}
+                  onClick={handleUpdatePaymentDay}
+                  className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {updatingPaymentDay ? 'Пересчёт...' : 'Пересчитать даты будущих платежей'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {notice && (
           <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 font-medium">

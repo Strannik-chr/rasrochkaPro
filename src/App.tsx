@@ -46,6 +46,11 @@ import {
   StatusRulesConfigCard,
 } from './components/ClientAndWhatsAppViews';
 import { buildDirectWhatsAppUrl } from './shared/clientStatus';
+import {
+  formatWelcomeGreeting,
+  getSafeInitialLaunchSection,
+  shouldLoadConfidentialState,
+} from './shared/contractFormHelpers';
 import { ManualAllocationModal, NewPaymentModal } from './components/PaymentAllocateModal';
 import { AuthGateModal } from './components/AuthGateModal';
 import { BrandLogo } from './components/BrandLogo';
@@ -70,6 +75,8 @@ import {
   MessageCircle,
   Paperclip,
   Trash2,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
 type SectionId =
@@ -90,7 +97,7 @@ type SectionId =
   | 'security_settings';
 
 const NAV_SECTIONS: Array<{ id: SectionId; label: string; group: string; ownerOnly?: boolean }> = [
-  { id: 'dashboard', label: '1. Главная панель', group: 'Операционный контур' },
+  { id: 'dashboard', label: '1. Главный экран', group: 'Операционный контур' },
   { id: 'clients', label: '2. Клиенты и статусы', group: 'Операционный контур' },
   { id: 'contracts', label: '3. Договоры и графики', group: 'Операционный контур' },
   { id: 'whatsapp_contracts', label: 'Найти и отправить договор', group: 'Операционный контур' },
@@ -121,7 +128,9 @@ export default function App() {
   } | null>(null);
   const [csrfToken, setCsrfToken] = useState<string>('');
   const [sessionToken, setSessionToken] = useState<string>('');
-  const [activeSection, setActiveSection] = useState<SectionId>('dashboard');
+  const [activeSection, setActiveSection] = useState<SectionId>(() => getSafeInitialLaunchSection());
+  const [hasLoadedConfidentialState, setHasLoadedConfidentialState] = useState(false);
+  const [confidentialDataLoading, setConfidentialDataLoading] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -173,6 +182,7 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
 
   // Inline form states for sections
+  const [isAddClientOpen, setIsAddClientOpen] = useState(false);
   const [clientForm, setClientForm] = useState({
     fullName: '',
     phone: '',
@@ -193,8 +203,8 @@ export default function App() {
     itemName: '',
     itemCategory: 'Смартфоны и электроника',
     purchaseRubles: '',
-    deliveryRubles: '0',
-    otherRubles: '0',
+    deliveryRubles: '',
+    otherRubles: '',
     paidSupplierRubles: '',
     paymentAccountId: 'acc_bank_main',
     purchaseDate: new Date().toISOString().slice(0, 10),
@@ -225,9 +235,9 @@ export default function App() {
 
   const [newPlanForm, setNewPlanForm] = useState({
     name: '',
-    termMonths: '9',
-    markupPercent: '29',
-    downPaymentPercent: '30',
+    termMonths: '',
+    markupPercent: '',
+    downPaymentPercent: '',
     roundingRule: 'kopeck' as RoundingRule,
     earlyPayoffDiscountPercent: '30',
     reason: 'Добавление нового гибкого срока рассрочки через админ-панель',
@@ -400,6 +410,36 @@ export default function App() {
     [csrfToken, sessionToken]
   );
 
+  const clearConfidentialClientState = useCallback(() => {
+    setHasLoadedConfidentialState(false);
+    setConfidentialDataLoading(false);
+    setPlans([]);
+    setSettingsHistory([]);
+    setClients([]);
+    setSuppliers([]);
+    setPurchases([]);
+    setContracts([]);
+    setPayments([]);
+    setOverdues([]);
+    setAccounts([]);
+    setLedger([]);
+    setDocuments([]);
+    setUsers([]);
+    setBackups([]);
+    setAuditLogs([]);
+    setReconciliation(null);
+    setSearchQuery('');
+    setViewingClientCardId(null);
+    setWhatsappTargetContractId(null);
+    setShowNewContractModal(false);
+    setShowNewPaymentModal(false);
+    setEarlyPayoffContract(null);
+    setRestructureContract(null);
+    setPrintTemplateModal(null);
+    setAllocatingPayment(null);
+    setIsAddClientOpen(false);
+  }, []);
+
   const loadFullState = useCallback(
     async (activeCsrf?: string, activeSessToken?: string) => {
       const tokenToUse = activeCsrf ?? csrfToken;
@@ -412,6 +452,14 @@ export default function App() {
         credentials: 'include',
         headers,
       });
+      if (res.status === 401) {
+        clearConfidentialClientState();
+        setCurrentUser(null);
+        setCsrfToken('');
+        setSessionToken('');
+        setActiveSection(getSafeInitialLaunchSection());
+        throw new Error('Сессия истекла или требуется вход в систему.');
+      }
       if (!res.ok) {
         throw new Error('Не удалось загрузить данные системы.');
       }
@@ -434,12 +482,18 @@ export default function App() {
       if (data.statusRules) {
         setStatusRules(data.statusRules);
       }
+      setHasLoadedConfidentialState(true);
     },
-    [csrfToken, sessionToken]
+    [clearConfidentialClientState, csrfToken, sessionToken]
   );
 
   const initializeSessionAndData = useCallback(async () => {
     setLoading(true);
+    // Always open the safe Welcome Screen ('dashboard') on launch/reload and clear any URL hash
+    setActiveSection(getSafeInitialLaunchSection(typeof window !== 'undefined' ? window.location.hash : ''));
+    if (typeof window !== 'undefined' && window.location.hash) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
     try {
       const sessRes = await fetch('/api/v1/auth/session', {
         credentials: 'include',
@@ -453,23 +507,67 @@ export default function App() {
           if (sessData.sessionToken) {
             setSessionToken(sessData.sessionToken);
           }
-          await loadFullState(sessData.csrfToken || '', sessData.sessionToken || sessionToken);
+          // Do NOT call loadFullState() on the welcome screen ('dashboard') so confidential
+          // client tables and financial figures are never loaded or flashed on startup.
         } else {
+          clearConfidentialClientState();
           setCurrentUser(null);
         }
       } else {
+        clearConfidentialClientState();
         setCurrentUser(null);
       }
     } catch {
+      clearConfidentialClientState();
       setCurrentUser(null);
     } finally {
       setLoading(false);
     }
-  }, [loadFullState, sessionToken]);
+  }, [clearConfidentialClientState, sessionToken]);
 
   useEffect(() => {
     initializeSessionAndData();
   }, []);
+
+  // Lazy-load confidential business state only when the authenticated user navigates
+  // from the safe Welcome Screen ('dashboard') to an internal section or opens an operational modal.
+  useEffect(() => {
+    const needsConfidentialData = shouldLoadConfidentialState({
+      isAuthenticated: Boolean(currentUser),
+      activeSection,
+      hasOpenOperationalModal: Boolean(showNewContractModal || showNewPaymentModal),
+    });
+    if (!needsConfidentialData || hasLoadedConfidentialState || confidentialDataLoading) {
+      return;
+    }
+    let cancelled = false;
+    setConfidentialDataLoading(true);
+    loadFullState()
+      .catch((err) => {
+        if (!cancelled) {
+          setBannerNotice({
+            type: 'error',
+            text: err instanceof Error ? err.message : 'Ошибка загрузки данных раздела',
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setConfidentialDataLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    currentUser,
+    activeSection,
+    showNewContractModal,
+    showNewPaymentModal,
+    hasLoadedConfidentialState,
+    confidentialDataLoading,
+    loadFullState,
+  ]);
 
   const notify = (type: 'success' | 'error', text: string) => {
     setBannerNotice({ type, text });
@@ -484,10 +582,13 @@ export default function App() {
     } catch {
       // clear local auth state regardless
     }
+    clearConfidentialClientState();
+    setActiveSection(getSafeInitialLaunchSection());
     setCurrentUser(null);
     setCsrfToken('');
     setSessionToken('');
     setShowAuthModal(false);
+    setMobileMenuOpen(false);
   };
 
   // Computed financial metrics (strictly separating Cash Flow, Owner Capital, COGS, and Management Profit)
@@ -861,6 +962,7 @@ export default function App() {
         address: '',
         notes: '',
       });
+      setIsAddClientOpen(false);
       await loadFullState();
       notify('success', 'Карточка клиента успешно сохранена.');
     } catch (err) {
@@ -915,8 +1017,8 @@ export default function App() {
         ...prev,
         itemName: '',
         purchaseRubles: '',
-        deliveryRubles: '0',
-        otherRubles: '0',
+        deliveryRubles: '',
+        otherRubles: '',
         paidSupplierRubles: '',
         notes: '',
       }));
@@ -1003,9 +1105,9 @@ export default function App() {
       });
       setNewPlanForm({
         name: '',
-        termMonths: '9',
-        markupPercent: '29',
-        downPaymentPercent: '30',
+        termMonths: '',
+        markupPercent: '',
+        downPaymentPercent: '',
         roundingRule: 'kopeck',
         earlyPayoffDiscountPercent: '30',
         reason: 'Добавление нового гибкого срока рассрочки через админ-панель',
@@ -1118,10 +1220,14 @@ export default function App() {
         apiFetch={apiFetch}
         onSuccessLogin={async (loginData) => {
           if (loginData?.user) {
+            clearConfidentialClientState();
+            setActiveSection(getSafeInitialLaunchSection());
+            if (typeof window !== 'undefined' && window.location.hash) {
+              window.history.replaceState(null, '', window.location.pathname + window.location.search);
+            }
             setCurrentUser(loginData.user);
             setCsrfToken(loginData.csrfToken || '');
             setSessionToken(loginData.sessionToken || '');
-            await loadFullState(loginData.csrfToken || '', loginData.sessionToken || '');
           }
         }}
       />
@@ -1141,19 +1247,16 @@ export default function App() {
           >
             {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
-          <a
-            href="#dashboard"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveSection('dashboard');
-            }}
+          <button
+            type="button"
+            onClick={() => setActiveSection('dashboard')}
             className="flex items-center gap-2 text-base sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 font-display group"
           >
             <BrandLogo size="sm" className="transition-transform group-hover:scale-105" />
             <span>
               Рассрочка<span className="text-emerald-700">Про</span>
             </span>
-          </a>
+          </button>
         </div>
 
         <nav className="hidden xl:flex items-center gap-5 text-xs xl:text-sm font-medium text-slate-600 overflow-x-auto">
@@ -1164,7 +1267,7 @@ export default function App() {
               activeSection === 'dashboard' ? 'text-slate-900 underline underline-offset-8' : ''
             }`}
           >
-            Сводка
+            Главный экран
           </button>
           <button
             type="button"
@@ -1228,14 +1331,24 @@ export default function App() {
         </nav>
 
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => setShowNewContractModal(true)}
-            disabled={!canWrite}
-            className="px-3 sm:px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
-          >
-            Оформить договор
-          </button>
+          {activeSection !== 'dashboard' ? (
+            <button
+              type="button"
+              onClick={() => setShowNewContractModal(true)}
+              disabled={!canWrite}
+              className="px-3 sm:px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+            >
+              Оформить договор
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+            >
+              Выйти
+            </button>
+          )}
         </div>
       </header>
 
@@ -1256,7 +1369,7 @@ export default function App() {
               : 'hidden lg:flex lg:w-64'
           } flex-col border-r border-slate-200 bg-white shrink-0 no-print overflow-y-auto`}
         >
-          <div className="p-4 border-b border-slate-200 space-y-2.5">
+          <div className="p-4 border-b border-slate-200 space-y-2">
             <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
               <div className="flex items-center gap-2 min-w-0">
                 <BrandLogo size="sm" />
@@ -1264,7 +1377,7 @@ export default function App() {
                   <div className="text-sm font-bold text-slate-900 font-display truncate leading-tight">
                     Рассрочка<span className="text-emerald-700">Про</span>
                   </div>
-                  <div className="text-[10px] text-slate-500 truncate">Учёт продаж в рассрочку</div>
+                  <div className="text-[10px] text-slate-500 truncate">Система управления договорами</div>
                 </div>
               </div>
               {mobileMenuOpen && (
@@ -1277,13 +1390,12 @@ export default function App() {
                 </button>
               )}
             </div>
-            <div className="text-xs text-slate-500 min-w-0 truncate">
-              Телефон: <strong className="font-mono text-slate-900">{currentUser.phone || currentUser.fullName}</strong>
-            </div>
-            <div className="text-[11px] text-slate-500 truncate">{currentUser.fullName}</div>
-            <div className="text-xs text-slate-500 flex items-center justify-between pt-1">
+            {currentUser.fullName && (
+              <div className="text-xs font-medium text-slate-800 truncate">{currentUser.fullName}</div>
+            )}
+            <div className="text-xs text-slate-500 flex items-center justify-between pt-0.5">
               <span>
-                Роль: <span className="font-mono text-slate-800">{currentUser.role}</span>
+                Профиль: <span className="font-mono text-slate-700">{currentUser.role}</span>
               </span>
               <div className="flex items-center gap-3">
                 <button
@@ -1350,54 +1462,58 @@ export default function App() {
           <div className="p-4 border-t border-slate-200 text-[11px] text-slate-500 space-y-1">
             <div className="flex items-center gap-1.5 text-slate-800 font-medium">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-              <span>Точность: целые копейки</span>
+              <span>Защищённый контур учёта</span>
             </div>
-            <div>
-              Сверка регистров:{' '}
-              {reconciliation?.isHealthy ? (
-                <span className="text-emerald-700 font-medium">Все балансы сходятся</span>
-              ) : (
-                <span className="text-red-600 font-medium">Есть расхождения</span>
-              )}
-            </div>
+            {activeSection !== 'dashboard' && reconciliation && (
+              <div>
+                Сверка регистров:{' '}
+                {reconciliation.isHealthy ? (
+                  <span className="text-emerald-700 font-medium">Все балансы сходятся</span>
+                ) : (
+                  <span className="text-red-600 font-medium">Есть расхождения</span>
+                )}
+              </div>
+            )}
           </div>
         </aside>
 
         {/* Main Content Viewport */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-6 max-w-[1440px] mx-auto w-full min-w-0 space-y-5 sm:space-y-6">
-          {/* Workspace Toolbar: Search & Quick Actions */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 no-print">
-            <div className="relative w-full sm:w-80">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Быстрый поиск по клиенту, договору, товару..."
-                className="w-full pl-9 pr-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
-              />
-            </div>
+          {/* Workspace Toolbar: Only rendered inside operational sections, never on the neutral Welcome Screen */}
+          {activeSection !== 'dashboard' && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 no-print">
+              <div className="relative w-full sm:w-80">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Быстрый поиск по клиенту, договору, товару..."
+                  className="w-full pl-9 pr-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                />
+              </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowNewPaymentModal(true)}
-                disabled={!canWrite}
-                className="flex-1 sm:flex-initial justify-center px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Принять платёж</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => loadFullState()}
-                className="flex-1 sm:flex-initial justify-center px-3 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:text-slate-900 whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Сверить регистры</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowNewPaymentModal(true)}
+                  disabled={!canWrite}
+                  className="flex-1 sm:flex-initial justify-center px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Принять платёж</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => loadFullState()}
+                  className="flex-1 sm:flex-initial justify-center px-3 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:text-slate-900 whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Сверить регистры</span>
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {bannerNotice && (
             <div
@@ -1423,282 +1539,169 @@ export default function App() {
 
           {loading ? (
             <div className="p-12 text-center text-sm text-slate-500">
-              Загрузка и проверка целостности финансовых регистров...
+              Проверка защищённой сессии...
+            </div>
+          ) : activeSection !== 'dashboard' && confidentialDataLoading && !hasLoadedConfidentialState ? (
+            <div className="p-12 text-center text-sm text-slate-500">
+              Загрузка защищённого раздела...
             </div>
           ) : (
             <>
-              {/* ==================== 1. ГЛАВНАЯ ПАНЕЛЬ ==================== */}
+              {/* ==================== 1. БЕЗОПАСНЫЙ ГЛАВНЫЙ ЭКРАН ПРИВЕТСТВИЯ ==================== */}
               {activeSection === 'dashboard' && (
-                <div className="space-y-6">
-                  <div>
-                    <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
-                      Финансовая сводка и контроль задолженностей
-                    </h1>
-                    <p className="text-xs text-slate-500 mt-1">
-                      Все показатели рассчитываются с точностью до копейки. Пополнения собственными средствами и внутренние переводы отделены от выручки и прибыли.
-                    </p>
-                  </div>
-
-                  {/* Primary Financial Strip */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
-                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
-                      <div className="text-xs text-slate-500">
-                        Фактические денежные остатки (Касса + Банк)
-                      </div>
-                      <div className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-1.5 break-words">
-                        {formatMoney(financialMetrics.totalLiquidityKopecks)}
-                      </div>
-                      <div className="text-xs text-slate-500 mt-2 font-mono break-words">
-                        Наличные: {formatMoney(financialMetrics.totalCashKopecks)} · Банк:{' '}
-                        {formatMoney(financialMetrics.totalBankKopecks)}
+                <section
+                  aria-label="Главный экран приветствия"
+                  className="min-h-[calc(100vh-8.5rem)] flex items-center justify-center py-8 px-4"
+                >
+                  <div className="w-full max-w-xl bg-white border border-slate-200/90 rounded-2xl p-8 sm:p-12 text-center shadow-xs space-y-7">
+                    {/* Brand Logo & Application Name */}
+                    <div className="flex flex-col items-center gap-3">
+                      <BrandLogo size="xl" />
+                      <div className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 font-display">
+                        Рассрочка<span className="text-emerald-700">Про</span>
                       </div>
                     </div>
 
-                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
-                      <div className="text-xs text-slate-500">
-                        Общая задолженность клиентов (ожидаемые поступления)
-                      </div>
-                      <div className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-1.5 break-words">
-                        {formatMoney(financialMetrics.totalClientDebtKopecks)}
-                      </div>
-                      <div className="text-xs text-slate-500 mt-2">
-                        Активных договоров: {contracts.filter((c) => c.status === 'active' || c.status === 'restructured').length} · Заёмщиков: {borrowerClients.length}
+                    {/* Calm Thematic Illustration: Financial Documents & Accounting Ledger */}
+                    <div className="flex justify-center" aria-hidden="true">
+                      <div className="w-40 h-32 sm:w-44 sm:h-36 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-center p-4">
+                        <svg
+                          viewBox="0 0 180 130"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                          className="w-full h-full"
+                        >
+                          {/* Back ledger sheet */}
+                          <rect
+                            x="30"
+                            y="22"
+                            width="76"
+                            height="92"
+                            rx="10"
+                            className="fill-white stroke-slate-300"
+                            strokeWidth="2"
+                          />
+                          <line
+                            x1="44"
+                            y1="42"
+                            x2="86"
+                            y2="42"
+                            className="stroke-slate-200"
+                            strokeWidth="3"
+                            strokeLinecap="round"
+                          />
+                          <line
+                            x1="44"
+                            y1="56"
+                            x2="78"
+                            y2="56"
+                            className="stroke-slate-200"
+                            strokeWidth="3"
+                            strokeLinecap="round"
+                          />
+
+                          {/* Primary contract & accounting document */}
+                          <rect
+                            x="54"
+                            y="14"
+                            width="84"
+                            height="98"
+                            rx="12"
+                            className="fill-white stroke-slate-800"
+                            strokeWidth="2.2"
+                          />
+                          {/* Document header bar */}
+                          <rect
+                            x="68"
+                            y="28"
+                            width="34"
+                            height="8"
+                            rx="4"
+                            className="fill-emerald-600/20"
+                          />
+                          {/* Clean abstract document lines */}
+                          <line
+                            x1="68"
+                            y1="48"
+                            x2="122"
+                            y2="48"
+                            className="stroke-slate-700"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                          />
+                          <line
+                            x1="68"
+                            y1="62"
+                            x2="114"
+                            y2="62"
+                            className="stroke-slate-300"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                          />
+                          <line
+                            x1="68"
+                            y1="76"
+                            x2="104"
+                            y2="76"
+                            className="stroke-slate-300"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                          />
+                          <line
+                            x1="68"
+                            y1="90"
+                            x2="92"
+                            y2="90"
+                            className="stroke-slate-200"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                          />
+
+                          {/* Verification / Security shield badge */}
+                          <path
+                            d="M132 68C132 68 150 72 150 88C150 102 138 111 132 114C126 111 114 102 114 88C114 72 132 68 132 68Z"
+                            className="fill-emerald-600 stroke-white"
+                            strokeWidth="2.5"
+                          />
+                          <path
+                            d="M125.5 90.5L130 95L139 85.5"
+                            className="stroke-white"
+                            strokeWidth="2.4"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
                       </div>
                     </div>
 
-                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
-                      <div className="text-xs text-slate-500">
-                        Просроченная задолженность (без авто-штрафов)
-                      </div>
-                      <div
-                        className={`text-xl sm:text-2xl font-bold font-mono mt-1.5 break-words ${
-                          financialMetrics.totalOverdueKopecks > 0 ? 'text-red-600' : 'text-emerald-700'
-                        }`}
-                      >
-                        {formatMoney(financialMetrics.totalOverdueKopecks)}
-                      </div>
-                      <div className="text-xs text-slate-500 mt-2 break-words">
-                        Просроченных платежей: {overdues.length} · Нераспределённых поступлений:{' '}
-                        <span className="font-mono font-medium text-amber-700">
-                          {formatMoney(financialMetrics.totalUnallocatedPaymentsKopecks)}
-                        </span>
-                      </div>
+                    {/* Greeting & Short System Description */}
+                    <div className="space-y-2.5">
+                      <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight break-words">
+                        {formatWelcomeGreeting(currentUser.fullName)}
+                      </h1>
+                      <p className="text-sm sm:text-base font-medium text-slate-700">
+                        Система управления договорами и платежами
+                      </p>
                     </div>
 
-                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
-                      <div className="text-xs text-slate-500">
-                        Управленческая прибыль (реализованная наценка − опер. расходы)
+                    {/* Neutral Caption */}
+                    <div className="pt-4 border-t border-slate-100 space-y-4">
+                      <p className="text-xs sm:text-sm text-slate-500">
+                        Все инструменты учёта доступны в меню приложения
+                      </p>
+                      <div className="lg:hidden pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setMobileMenuOpen(true)}
+                          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
+                        >
+                          <Menu className="w-4 h-4" />
+                          <span>Открыть меню приложения</span>
+                        </button>
                       </div>
-                      <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-700 mt-1.5 break-words">
-                        {formatMoney(financialMetrics.managementNetProfitKopecks)}
-                      </div>
-                      <div className="text-xs text-slate-500 mt-2 font-mono break-words">
-                        Обязательства поставщикам: {formatMoney(financialMetrics.supplierObligationsKopecks)}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Active Contracts Overview Table & Mobile Cards */}
-                  <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <div className="px-4 sm:px-5 py-3.5 sm:py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <h2 className="text-sm sm:text-base font-semibold text-slate-900">
-                          Действующие договоры рассрочки
-                        </h2>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Нажмите на ФИО заёмщика для просмотра его карточки и поручителей
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setActiveSection('contracts')}
-                        className="text-xs font-medium text-slate-700 hover:text-slate-900 underline shrink-0"
-                      >
-                        Все договоры ({contracts.length})
-                      </button>
-                    </div>
-
-                    {/* Mobile Card View */}
-                    <div className="md:hidden divide-y divide-slate-100">
-                      {filteredContracts.map((c) => {
-                        const waDirectUrl = buildDirectWhatsAppUrl(c.clientPhone);
-                        return (
-                          <div key={c.id} className="p-4 space-y-3 text-xs">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <button
-                                  type="button"
-                                  onClick={() => setViewingClientCardId(c.clientId)}
-                                  className="text-sm font-bold text-slate-900 hover:underline text-left break-words"
-                                >
-                                  {c.clientName}
-                                </button>
-                                <div className="text-slate-600 mt-0.5 break-words">
-                                  {c.itemTitle}
-                                </div>
-                                <div className="font-mono text-[11px] text-slate-500 mt-0.5">
-                                  {c.contractNumber} · от {formatDateRu(c.startDate)} · {c.termMonths} мес. ({c.markupPercent}%)
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2 p-2.5 bg-slate-50 rounded-lg font-mono text-[11px]">
-                              <div>
-                                <div className="font-sans text-slate-500">Себестоимость</div>
-                                <div className="text-slate-800">{formatMoney(c.totalCostKopecks)}</div>
-                              </div>
-                              <div>
-                                <div className="font-sans text-slate-500">Цена продажи</div>
-                                <div className="font-semibold text-slate-900">{formatMoney(c.salePriceKopecks)}</div>
-                              </div>
-                              <div>
-                                <div className="font-sans text-slate-500">Внесено всего</div>
-                                <div className="text-emerald-700 font-medium">{formatMoney(c.totalCollectedKopecks)}</div>
-                              </div>
-                              <div>
-                                <div className="font-sans text-slate-500">Остаток долга</div>
-                                <div className="font-bold text-slate-900">{formatMoney(c.remainingDebtKopecks)}</div>
-                                {c.overdueKopecks > 0 && (
-                                  <div className="text-red-600 text-[10px]">
-                                    Просрочка: {formatMoney(c.overdueKopecks)}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => setViewingClientCardId(c.clientId)}
-                                className="px-2.5 py-1.5 text-xs font-medium text-slate-900 bg-slate-100 border border-slate-300 rounded-lg"
-                              >
-                                Карточка / Поручители ({c.guarantors?.length || 0})
-                              </button>
-                              {waDirectUrl && (
-                                <a
-                                  href={waDirectUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="px-2.5 py-1.5 text-xs font-medium text-white bg-emerald-600 border border-emerald-700 rounded-lg inline-flex items-center gap-1"
-                                >
-                                  <MessageCircle className="w-3.5 h-3.5" />
-                                  <span>WA</span>
-                                </a>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => setEarlyPayoffContract(c)}
-                                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg"
-                              >
-                                Досрочное
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setRestructureContract(c)}
-                                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg"
-                              >
-                                График (v{c.currentScheduleVersion})
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {/* Desktop Table View */}
-                    <div className="hidden md:block overflow-x-auto">
-                      <table className="w-full min-w-max text-left border-collapse text-xs">
-                        <thead>
-                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                            <th className="py-3 px-4 font-medium whitespace-nowrap">Договор и дата</th>
-                            <th className="py-3 px-4 font-medium">Заёмщик и товар</th>
-                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Себестоимость</th>
-                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Цена продажи</th>
-                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Внесено всего</th>
-                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Остаток долга</th>
-                            <th className="py-3 px-4 font-medium text-right whitespace-nowrap">Действия</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {filteredContracts.map((c) => {
-                            const waDirectUrl = buildDirectWhatsAppUrl(c.clientPhone);
-                            return (
-                              <tr key={c.id} className="hover:bg-slate-50/80">
-                                <td className="py-3 px-4">
-                                  <div className="font-mono font-semibold text-slate-900">
-                                    {c.contractNumber}
-                                  </div>
-                                  <div className="text-slate-500 mt-0.5">
-                                    {formatDateRu(c.startDate)} · {c.termMonths} мес. · Наценка{' '}
-                                    {c.markupPercent}%
-                                  </div>
-                                </td>
-                                <td className="py-3 px-4">
-                                  <button
-                                    type="button"
-                                    onClick={() => setViewingClientCardId(c.clientId)}
-                                    className="font-semibold text-slate-900 hover:underline text-left"
-                                    title="Открыть карточку заёмщика и список поручителей"
-                                  >
-                                    {c.clientName}
-                                  </button>
-                                  <div className="text-slate-500 mt-0.5">{c.itemTitle}</div>
-                                </td>
-                                <td className="py-3 px-4 font-mono text-right text-slate-700 whitespace-nowrap">
-                                  {formatMoney(c.totalCostKopecks)}
-                                </td>
-                                <td className="py-3 px-4 font-mono text-right font-medium text-slate-900 whitespace-nowrap">
-                                  {formatMoney(c.salePriceKopecks)}
-                                </td>
-                                <td className="py-3 px-4 font-mono text-right text-emerald-700 whitespace-nowrap">
-                                  {formatMoney(c.totalCollectedKopecks)}
-                                </td>
-                                <td className="py-3 px-4 font-mono text-right font-semibold text-slate-900 whitespace-nowrap">
-                                  {formatMoney(c.remainingDebtKopecks)}
-                                  {c.overdueKopecks > 0 && (
-                                    <div className="text-[11px] text-red-600 font-normal">
-                                      Просрочено: {formatMoney(c.overdueKopecks)}
-                                    </div>
-                                  )}
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                                    {waDirectUrl && (
-                                      <a
-                                        href={waDirectUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-600 border border-emerald-700 rounded-lg hover:bg-emerald-700 inline-flex items-center gap-1 whitespace-nowrap"
-                                        title={`Написать клиенту ${c.clientName} в WhatsApp`}
-                                      >
-                                        <MessageCircle className="w-3.5 h-3.5" />
-                                        <span>Написать</span>
-                                      </a>
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={() => setEarlyPayoffContract(c)}
-                                      className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
-                                    >
-                                      Досрочное
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => setRestructureContract(c)}
-                                      className="px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-100 whitespace-nowrap"
-                                    >
-                                      График (v{c.currentScheduleVersion})
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
                     </div>
                   </div>
-                </div>
+                </section>
               )}
 
               {/* ==================== 2. КЛИЕНТЫ ==================== */}
@@ -1720,76 +1723,119 @@ export default function App() {
                   </div>
 
                   {canWrite && (
-                    <form
-                      onSubmit={handleCreateClient}
-                      className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
-                    >
-                      <h2 className="text-sm font-semibold text-slate-900">
-                        Добавить нового клиента
-                      </h2>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                        <input
-                          type="text"
-                          value={clientForm.fullName}
-                          onChange={(e) =>
-                            setClientForm((p) => ({ ...p, fullName: e.target.value }))
-                          }
-                          placeholder="ФИО клиента полностью *"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                          required
-                        />
-                        <input
-                          type="text"
-                          value={clientForm.phone}
-                          onChange={(e) => setClientForm((p) => ({ ...p, phone: e.target.value }))}
-                          placeholder="Основной телефон *"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                          required
-                        />
-                        <input
-                          type="text"
-                          value={clientForm.secondaryPhone}
-                          onChange={(e) =>
-                            setClientForm((p) => ({ ...p, secondaryPhone: e.target.value }))
-                          }
-                          placeholder="Дополнительный телефон"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                        />
-                        <input
-                          type="text"
-                          value={clientForm.documentRef}
-                          onChange={(e) =>
-                            setClientForm((p) => ({ ...p, documentRef: e.target.value }))
-                          }
-                          placeholder="Отметка о документе (без лишних ПДн)"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                        />
-                        <input
-                          type="text"
-                          value={clientForm.address}
-                          onChange={(e) =>
-                            setClientForm((p) => ({ ...p, address: e.target.value }))
-                          }
-                          placeholder="Адрес доставки / проживания"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                        />
-                        <input
-                          type="text"
-                          value={clientForm.notes}
-                          onChange={(e) => setClientForm((p) => ({ ...p, notes: e.target.value }))}
-                          placeholder="Примечание"
-                          className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                        />
-                      </div>
-                      <div className="flex justify-end">
-                        <button
-                          type="submit"
-                          className="w-full sm:w-auto px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setIsAddClientOpen((prev) => !prev)}
+                        aria-expanded={isAddClientOpen}
+                        className="w-full px-4 sm:px-5 py-3.5 sm:py-4 flex items-center justify-between gap-3 text-left hover:bg-slate-50/80 transition-colors"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="w-7 h-7 rounded-lg bg-slate-100 text-slate-800 flex items-center justify-center shrink-0">
+                            <Plus className="w-4 h-4" />
+                          </span>
+                          <div className="min-w-0">
+                            <h2 className="text-sm font-semibold text-slate-900 break-words">
+                              Добавить нового клиента
+                            </h2>
+                            <p className="text-[11px] text-slate-500">
+                              {isAddClientOpen
+                                ? 'Нажмите, чтобы свернуть форму добавления'
+                                : 'Нажмите, чтобы раскрыть форму и создать карточку клиента'}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg shrink-0">
+                          <span>{isAddClientOpen ? 'Свернуть' : 'Раскрыть'}</span>
+                          {isAddClientOpen ? (
+                            <ChevronUp className="w-4 h-4 text-slate-600" />
+                          ) : (
+                            <ChevronDown className="w-4 h-4 text-slate-600" />
+                          )}
+                        </span>
+                      </button>
+
+                      {isAddClientOpen && (
+                        <form
+                          onSubmit={handleCreateClient}
+                          className="px-4 sm:px-5 pb-4 sm:pb-5 pt-3 border-t border-slate-100 space-y-4"
                         >
-                          Сохранить карточку клиента
-                        </button>
-                      </div>
-                    </form>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            <input
+                              type="text"
+                              value={clientForm.fullName}
+                              onChange={(e) =>
+                                setClientForm((p) => ({ ...p, fullName: e.target.value }))
+                              }
+                              placeholder="ФИО клиента полностью *"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              required
+                            />
+                            <input
+                              type="text"
+                              value={clientForm.phone}
+                              onChange={(e) =>
+                                setClientForm((p) => ({ ...p, phone: e.target.value }))
+                              }
+                              placeholder="Основной телефон *"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                              required
+                            />
+                            <input
+                              type="text"
+                              value={clientForm.secondaryPhone}
+                              onChange={(e) =>
+                                setClientForm((p) => ({ ...p, secondaryPhone: e.target.value }))
+                              }
+                              placeholder="Дополнительный телефон"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            />
+                            <input
+                              type="text"
+                              value={clientForm.documentRef}
+                              onChange={(e) =>
+                                setClientForm((p) => ({ ...p, documentRef: e.target.value }))
+                              }
+                              placeholder="Отметка о документе (без лишних ПДн)"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            />
+                            <input
+                              type="text"
+                              value={clientForm.address}
+                              onChange={(e) =>
+                                setClientForm((p) => ({ ...p, address: e.target.value }))
+                              }
+                              placeholder="Адрес доставки / проживания"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            />
+                            <input
+                              type="text"
+                              value={clientForm.notes}
+                              onChange={(e) =>
+                                setClientForm((p) => ({ ...p, notes: e.target.value }))
+                              }
+                              placeholder="Примечание"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                            />
+                          </div>
+                          <div className="flex flex-col sm:flex-row sm:justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setIsAddClientOpen(false)}
+                              className="w-full sm:w-auto px-4 py-2 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200"
+                            >
+                              Свернуть
+                            </button>
+                            <button
+                              type="submit"
+                              className="w-full sm:w-auto px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                            >
+                              Сохранить карточку клиента
+                            </button>
+                          </div>
+                        </form>
+                      )}
+                    </div>
                   )}
 
                   {editingClient && canWrite && (
@@ -2542,6 +2588,23 @@ export default function App() {
                             <div className="font-semibold text-slate-900 mt-0.5 whitespace-nowrap">
                               {formatMoney(c.downPaymentKopecks)}
                             </div>
+                            {c.isCustomDownPayment &&
+                              c.plannedDownPaymentKopecks !== undefined &&
+                              c.actualDownPaymentKopecks !== undefined &&
+                              c.plannedDownPaymentKopecks !== c.actualDownPaymentKopecks && (
+                                <div className="font-sans text-[11px] text-slate-500 mt-0.5">
+                                  План: {formatMoney(c.plannedDownPaymentKopecks)} ·{' '}
+                                  {(c.extraDownPaymentKopecks || 0) > 0 ? (
+                                    <span className="text-emerald-700">
+                                      Доп. погашение +{formatMoney(c.extraDownPaymentKopecks || 0)}
+                                    </span>
+                                  ) : (
+                                    <span className="text-amber-700">
+                                      Недоплата −{formatMoney(c.downPaymentShortfallKopecks || 0)}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                           </div>
                           <div>
                             <div className="font-sans text-slate-500">Фактически оплачено</div>
@@ -3947,6 +4010,65 @@ export default function App() {
                         <Printer className="w-3.5 h-3.5 shrink-0" />
                         <span>Печать отчёта (PDF)</span>
                       </button>
+                    </div>
+                  </div>
+
+                  {/* Primary Financial Summary Strip (protected inside Reports section) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+                      <div className="text-xs text-slate-500">
+                        Фактические денежные остатки (Касса + Банк)
+                      </div>
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-1.5 break-words">
+                        {formatMoney(financialMetrics.totalLiquidityKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2 font-mono break-words">
+                        Наличные: {formatMoney(financialMetrics.totalCashKopecks)} · Банк:{' '}
+                        {formatMoney(financialMetrics.totalBankKopecks)}
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+                      <div className="text-xs text-slate-500">
+                        Общая задолженность клиентов (ожидаемые поступления)
+                      </div>
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-slate-900 mt-1.5 break-words">
+                        {formatMoney(financialMetrics.totalClientDebtKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2">
+                        Активных договоров: {contracts.filter((c) => c.status === 'active' || c.status === 'restructured').length} · Заёмщиков: {borrowerClients.length}
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+                      <div className="text-xs text-slate-500">
+                        Просроченная задолженность (без авто-штрафов)
+                      </div>
+                      <div
+                        className={`text-xl sm:text-2xl font-bold font-mono mt-1.5 break-words ${
+                          financialMetrics.totalOverdueKopecks > 0 ? 'text-red-600' : 'text-emerald-700'
+                        }`}
+                      >
+                        {formatMoney(financialMetrics.totalOverdueKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2 break-words">
+                        Просроченных платежей: {overdues.length} · Нераспределённых поступлений:{' '}
+                        <span className="font-mono font-medium text-amber-700">
+                          {formatMoney(financialMetrics.totalUnallocatedPaymentsKopecks)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
+                      <div className="text-xs text-slate-500">
+                        Управленческая прибыль (реализованная наценка − опер. расходы)
+                      </div>
+                      <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-700 mt-1.5 break-words">
+                        {formatMoney(financialMetrics.managementNetProfitKopecks)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-2 font-mono break-words">
+                        Обязательства поставщикам: {formatMoney(financialMetrics.supplierObligationsKopecks)}
+                      </div>
                     </div>
                   </div>
 

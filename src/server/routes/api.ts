@@ -5,12 +5,14 @@ import { cleanResetOperationalData, withTransaction } from '../db/database';
 import {
   AutoAllocationStrategy,
   assertKopecks,
+  assertPaymentDayOfMonth,
   calculateContractAndSchedule,
   calculateDaysOverdue,
   calculateEarlyPayoffComparison,
   calculateTotalCostKopecks,
   computeAutomaticScheduleAllocations,
   formatRubles,
+  recalculateUnpaidScheduleDates,
   toSafeCsvRow,
 } from '../finance/calculator';
 import {
@@ -1029,6 +1031,21 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
     const overdueThresholdDays = Math.max(1, Math.trunc(Number(statusRules.gracePeriodDays ?? 3)));
 
+    const downPaymentPaidRows = db
+      .prepare(
+        `
+        SELECT contract_id, COALESCE(SUM(amount_kopecks), 0) as paid_kopecks
+        FROM payments
+        WHERE is_down_payment = 1 AND status = 'confirmed' AND contract_id IS NOT NULL
+        GROUP BY contract_id
+      `
+      )
+      .all() as Array<{ contract_id: string; paid_kopecks: number }>;
+    const downPaymentPaidByContract = new Map<string, number>();
+    for (const row of downPaymentPaidRows) {
+      downPaymentPaidByContract.set(String(row.contract_id), Number(row.paid_kopecks));
+    }
+
     const contracts = contractsRaw.map((c) => {
       const cId = String(c.id);
       const currentVer = Number(c.current_schedule_version);
@@ -1126,6 +1143,31 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const totalCost = Number(c.total_cost_kopecks);
       const salePrice = Number(c.sale_price_kopecks);
       const downPayment = Number(c.down_payment_kopecks);
+      const isCustomDownPayment = Boolean(c.is_custom_down_payment);
+      const plannedDownPaymentKopecks =
+        isCustomDownPayment || Number(c.planned_down_payment_kopecks || 0) > 0
+          ? Number(c.planned_down_payment_kopecks || 0)
+          : downPayment;
+      const actualDownPaymentKopecks =
+        isCustomDownPayment || Number(c.actual_down_payment_kopecks || 0) > 0
+          ? Number(c.actual_down_payment_kopecks || 0)
+          : downPayment;
+      const downPaymentDiffKopecks = isCustomDownPayment
+        ? Number(c.down_payment_diff_kopecks ?? actualDownPaymentKopecks - plannedDownPaymentKopecks)
+        : 0;
+      const extraDownPaymentKopecks = isCustomDownPayment
+        ? Number(
+            c.extra_down_payment_kopecks ??
+              Math.max(0, actualDownPaymentKopecks - plannedDownPaymentKopecks)
+          )
+        : 0;
+      const downPaymentShortfallKopecks = isCustomDownPayment
+        ? Number(
+            c.down_payment_shortfall_kopecks ??
+              Math.max(0, plannedDownPaymentKopecks - actualDownPaymentKopecks)
+          )
+        : 0;
+      const downPaymentPaidKopecks = downPaymentPaidByContract.get(cId) ?? 0;
 
       const contractGuarantors = allGuarantorsRaw
         .filter((g) => String(g.contract_id) === cId)
@@ -1175,11 +1217,22 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         salePriceKopecks: salePrice,
         downPaymentPercent: Number(c.down_payment_percent),
         downPaymentKopecks: downPayment,
+        plannedDownPaymentKopecks,
+        actualDownPaymentKopecks,
+        downPaymentDiffKopecks,
+        extraDownPaymentKopecks,
+        downPaymentShortfallKopecks,
+        isCustomDownPayment,
+        downPaymentPaidKopecks,
         financedPrincipalKopecks: Number(c.financed_principal_kopecks),
         termMonths: Number(c.term_months),
         roundingRule: String(c.rounding_rule) as RoundingRule,
         scheduleType: String(c.schedule_type) as ScheduleType,
         startDate: String(c.start_date),
+        paymentDayOfMonth:
+          c.payment_day_of_month !== null && c.payment_day_of_month !== undefined
+            ? Number(c.payment_day_of_month)
+            : Number(String(c.start_date).slice(8, 10)) || null,
         currentScheduleVersion: currentVer,
         status: String(c.status) as any,
         closingDiscountKopecks: Number(c.closing_discount_kopecks || 0),
@@ -1187,7 +1240,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         notes: String(c.notes || ''),
         createdAt: String(c.created_at),
         totalPaidOnScheduleKopecks,
-        totalCollectedKopecks: downPayment + totalPaidOnScheduleKopecks,
+        totalCollectedKopecks: downPaymentPaidKopecks + totalPaidOnScheduleKopecks,
         remainingDebtKopecks,
         overdueKopecks,
         computedStatus: contractEval.status,
@@ -2461,7 +2514,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
   router.post('/contracts/preview', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     try {
-      const calc = calculateContractAndSchedule(req.body);
+      const calc = calculateContractAndSchedule({
+        ...req.body,
+        allowExceedWarning: true,
+      });
       res.json(calc);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка расчёта договора.' });
@@ -2476,6 +2532,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       try {
         const {
           idempotencyKey,
+          clientMode,
           clientId,
           newClient,
           clientUpdates,
@@ -2489,10 +2546,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           markupPercent,
           downPaymentPercent,
           explicitDownPaymentKopecks,
+          useCustomActualDownPayment,
+          actualDownPaymentKopecks,
+          confirmedCustomSchedule,
           termMonths,
           roundingRule,
           scheduleType,
           startDate,
+          paymentDayOfMonth,
           customInstallmentsKopecks,
           downPaymentAccountId,
           downPaymentMethod,
@@ -2502,6 +2563,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           attachments,
         } = req.body as {
           idempotencyKey?: string;
+          clientMode?: 'existing' | 'new';
           clientId?: string;
           newClient?: {
             fullName?: string;
@@ -2562,10 +2624,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           markupPercent?: number;
           downPaymentPercent?: number;
           explicitDownPaymentKopecks?: number;
+          useCustomActualDownPayment?: boolean;
+          actualDownPaymentKopecks?: number;
+          confirmedCustomSchedule?: boolean;
           termMonths?: number;
           roundingRule?: RoundingRule;
           scheduleType?: ScheduleType;
           startDate?: string;
+          paymentDayOfMonth?: number | string | null;
           customInstallmentsKopecks?: number[];
           downPaymentAccountId?: string;
           downPaymentMethod?: 'cash' | 'bank_transfer';
@@ -2610,8 +2676,18 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
-        // Validate client selection or inline newClient creation
-        let resolvedClientId = clientId ? String(clientId).trim() : '';
+        // Validate client selection or inline newClient creation (strictly separated by clientMode when specified)
+        const effectiveClientMode: 'existing' | 'new' =
+          clientMode === 'new'
+            ? 'new'
+            : clientMode === 'existing'
+              ? 'existing'
+              : clientId && String(clientId).trim()
+                ? 'existing'
+                : 'new';
+
+        let resolvedClientId =
+          effectiveClientMode === 'existing' && clientId ? String(clientId).trim() : '';
         let resolvedPrimaryPhone = '';
         let createdNewClientData: {
           id: string;
@@ -2623,7 +2699,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           notes: string;
         } | null = null;
 
-        if (resolvedClientId) {
+        if (effectiveClientMode === 'existing') {
+          if (!resolvedClientId) {
+            res.status(400).json({ error: 'Выберите существующего клиента из списка.' });
+            return;
+          }
           const existingClient = db
             .prepare('SELECT id, full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ?')
             .get(resolvedClientId) as
@@ -2993,6 +3073,56 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           }
         }
 
+        if (useCustomActualDownPayment) {
+          if (typeof actualDownPaymentKopecks !== 'number' || !Number.isSafeInteger(actualDownPaymentKopecks)) {
+            res.status(400).json({
+              error: 'При включённой настройке «Изменить фактическую сумму первоначального взноса» укажите корректную сумму в копейках.',
+            });
+            return;
+          }
+          if (actualDownPaymentKopecks < 0) {
+            res.status(400).json({
+              error: 'Фактическая сумма первоначального взноса не может быть отрицательной.',
+            });
+            return;
+          }
+        }
+
+        const hasPaymentDayInBody = Object.prototype.hasOwnProperty.call(req.body || {}, 'paymentDayOfMonth');
+        let validatedPaymentDay: number | undefined;
+        if (hasPaymentDayInBody) {
+          if (paymentDayOfMonth === '' || paymentDayOfMonth === null || paymentDayOfMonth === undefined) {
+            res.status(400).json({ error: 'Укажите дату ежемесячного платежа (число месяца от 1 до 31).' });
+            return;
+          }
+          validatedPaymentDay = assertPaymentDayOfMonth(paymentDayOfMonth);
+        }
+
+        if (
+          Object.prototype.hasOwnProperty.call(req.body || {}, 'termMonths') &&
+          (termMonths === ('' as any) || termMonths === null || termMonths === undefined || !Number.isInteger(Number(termMonths)) || Number(termMonths) < 1)
+        ) {
+          res.status(400).json({ error: 'Укажите корректный срок рассрочки в месяцах (целое число больше 0).' });
+          return;
+        }
+
+        if (
+          Object.prototype.hasOwnProperty.call(req.body || {}, 'markupPercent') &&
+          (markupPercent === ('' as any) || markupPercent === null || markupPercent === undefined || !Number.isFinite(Number(markupPercent)) || Number(markupPercent) < 0)
+        ) {
+          res.status(400).json({ error: 'Укажите корректный процент наценки (неотрицательное число).' });
+          return;
+        }
+
+        if (
+          Object.prototype.hasOwnProperty.call(req.body || {}, 'downPaymentPercent') &&
+          typeof explicitDownPaymentKopecks !== 'number' &&
+          (downPaymentPercent === ('' as any) || downPaymentPercent === null || downPaymentPercent === undefined || !Number.isFinite(Number(downPaymentPercent)) || Number(downPaymentPercent) < 0 || Number(downPaymentPercent) >= 100)
+        ) {
+          res.status(400).json({ error: 'Укажите корректный процент первоначального взноса (от 0% до 99,99%).' });
+          return;
+        }
+
         const calc = calculateContractAndSchedule({
           purchaseCostKopecks: Number(purchaseCostKopecks || 0),
           deliveryCostKopecks: Number(deliveryCostKopecks || 0),
@@ -3001,12 +3131,24 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           downPaymentPercent: typeof downPaymentPercent === 'number' ? downPaymentPercent : undefined,
           explicitDownPaymentKopecks:
             typeof explicitDownPaymentKopecks === 'number' ? explicitDownPaymentKopecks : undefined,
+          useCustomActualDownPayment: Boolean(useCustomActualDownPayment),
+          actualDownPaymentKopecks:
+            typeof actualDownPaymentKopecks === 'number' ? actualDownPaymentKopecks : undefined,
           termMonths: Number(termMonths || 6),
           roundingRule: roundingRule || 'kopeck',
           scheduleType: scheduleType || 'equal',
           startDate: startDate || new Date().toISOString().slice(0, 10),
+          paymentDayOfMonth: validatedPaymentDay,
           customInstallmentsKopecks,
         });
+
+        if (calc.scheduleChanged && !confirmedCustomSchedule) {
+          res.status(400).json({
+            error:
+              'Фактическая сумма первоначального взноса отличается от плановой. Проверьте и подтвердите пересчитанный график платежей перед сохранением договора.',
+          });
+          return;
+        }
 
         let planVersion = 1;
         if (planId) {
@@ -3025,6 +3167,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const now = new Date().toISOString();
         const uploadedDocumentIds: string[] = [];
         const createdGuarantorIds: string[] = [];
+        const activeScheduleVersion = calc.scheduleChanged ? 2 : 1;
 
         withTransaction(db, () => {
           if (createdNewClientData) {
@@ -3080,9 +3223,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               id, idempotency_key, contract_number, client_id, purchase_id, plan_id, plan_version,
               item_title, purchase_cost_kopecks, extra_cost_kopecks, total_cost_kopecks,
               markup_percent, sale_price_kopecks, down_payment_percent, down_payment_kopecks,
+              planned_down_payment_kopecks, actual_down_payment_kopecks, down_payment_diff_kopecks,
+              extra_down_payment_kopecks, down_payment_shortfall_kopecks, is_custom_down_payment,
               financed_principal_kopecks, term_months, rounding_rule, schedule_type,
-              start_date, current_schedule_version, status, notes, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, ?)
+              start_date, payment_day_of_month, current_schedule_version, status, notes, created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
           `).run(
             contractId,
             trimmedIdemKey || null,
@@ -3099,11 +3244,19 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             calc.salePriceKopecks,
             calc.downPaymentPercent,
             calc.downPaymentKopecks,
+            calc.plannedDownPaymentKopecks,
+            calc.actualDownPaymentKopecks,
+            calc.downPaymentDiffKopecks,
+            calc.extraDownPaymentKopecks,
+            calc.downPaymentShortfallKopecks,
+            calc.useCustomActualDownPayment ? 1 : 0,
             calc.financedPrincipalKopecks,
             calc.termMonths,
             calc.roundingRule,
             calc.scheduleType,
             startDate || now.slice(0, 10),
+            calc.paymentDayOfMonth,
+            activeScheduleVersion,
             (notes || '').trim(),
             req.user!.id,
             now
@@ -3201,27 +3354,82 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             }
           }
 
-          db.prepare(`
-            INSERT INTO schedule_versions (id, contract_id, version, change_reason, created_by, created_at)
-            VALUES (?, ?, 1, 'Первоначальный график при оформлении договора', ?, ?)
-          `).run(`sv_${contractId}_v1`, contractId, req.user!.id, now);
+          if (calc.scheduleChanged) {
+            // v1: Original planned schedule (superseded)
+            db.prepare(`
+              INSERT INTO schedule_versions (id, contract_id, version, change_reason, created_by, created_at)
+              VALUES (?, ?, 1, 'Плановый график при оформлении договора (до учёта фактического ПВ)', ?, ?)
+            `).run(`sv_${contractId}_v1`, contractId, req.user!.id, now);
 
-          const insertItem = db.prepare(`
-            INSERT INTO schedule_items (
-              id, contract_id, schedule_version, installment_number, due_date,
-              original_due_date, planned_kopecks, paid_kopecks, status, promised_date, postpone_reason
-            ) VALUES (?, ?, 1, ?, ?, ?, ?, 0, 'pending', NULL, '')
-          `);
+            const insertSupersededItem = db.prepare(`
+              INSERT INTO schedule_items (
+                id, contract_id, schedule_version, installment_number, due_date,
+                original_due_date, planned_kopecks, paid_kopecks, status, promised_date, postpone_reason
+              ) VALUES (?, ?, 1, ?, ?, ?, ?, 0, 'superseded', NULL, '')
+            `);
 
-          for (const item of calc.schedule) {
-            insertItem.run(
-              `si_${contractId}_v1_${item.installmentNumber}`,
-              contractId,
-              item.installmentNumber,
-              item.dueDate,
-              item.dueDate,
-              item.plannedKopecks
-            );
+            for (const item of calc.plannedSchedule) {
+              insertSupersededItem.run(
+                `si_${contractId}_v1_${item.installmentNumber}`,
+                contractId,
+                item.installmentNumber,
+                item.dueDate,
+                item.dueDate,
+                item.plannedKopecks
+              );
+            }
+
+            // v2: Recalculated active schedule after custom down payment adjustment
+            const v2Reason =
+              calc.downPaymentShortfallKopecks > 0
+                ? `Пересчёт при оформлении: фактический ПВ ${formatRubles(calc.actualDownPaymentKopecks)} меньше планового ${formatRubles(calc.plannedDownPaymentKopecks)} (недоплата ${formatRubles(calc.downPaymentShortfallKopecks)} добавлена в остаток долга)`
+                : `Пересчёт при оформлении: фактический ПВ ${formatRubles(calc.actualDownPaymentKopecks)} больше планового ${formatRubles(calc.plannedDownPaymentKopecks)} (дополнительное погашение ${formatRubles(calc.extraDownPaymentKopecks)} уменьшило остаток долга)`;
+
+            db.prepare(`
+              INSERT INTO schedule_versions (id, contract_id, version, change_reason, created_by, created_at)
+              VALUES (?, ?, 2, ?, ?, ?)
+            `).run(`sv_${contractId}_v2`, contractId, v2Reason, req.user!.id, now);
+
+            const insertActiveV2Item = db.prepare(`
+              INSERT INTO schedule_items (
+                id, contract_id, schedule_version, installment_number, due_date,
+                original_due_date, planned_kopecks, paid_kopecks, status, promised_date, postpone_reason
+              ) VALUES (?, ?, 2, ?, ?, ?, ?, 0, 'pending', NULL, '')
+            `);
+
+            for (const item of calc.schedule) {
+              insertActiveV2Item.run(
+                `si_${contractId}_v2_${item.installmentNumber}`,
+                contractId,
+                item.installmentNumber,
+                item.dueDate,
+                item.dueDate,
+                item.plannedKopecks
+              );
+            }
+          } else {
+            db.prepare(`
+              INSERT INTO schedule_versions (id, contract_id, version, change_reason, created_by, created_at)
+              VALUES (?, ?, 1, 'Первоначальный график при оформлении договора', ?, ?)
+            `).run(`sv_${contractId}_v1`, contractId, req.user!.id, now);
+
+            const insertItem = db.prepare(`
+              INSERT INTO schedule_items (
+                id, contract_id, schedule_version, installment_number, due_date,
+                original_due_date, planned_kopecks, paid_kopecks, status, promised_date, postpone_reason
+              ) VALUES (?, ?, 1, ?, ?, ?, ?, 0, 'pending', NULL, '')
+            `);
+
+            for (const item of calc.schedule) {
+              insertItem.run(
+                `si_${contractId}_v1_${item.installmentNumber}`,
+                contractId,
+                item.installmentNumber,
+                item.dueDate,
+                item.dueDate,
+                item.plannedKopecks
+              );
+            }
           }
 
           if (purchaseId) {
@@ -3235,6 +3443,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             const dpAcc = downPaymentAccountId || 'acc_cash_main';
             const dpMethod = downPaymentMethod || 'cash';
             const payId = `pay_dp_${contractId}`;
+
+            let dpPaymentNotes = `Первоначальный взнос по договору ${contractNumber}`;
+            if (calc.useCustomActualDownPayment) {
+              if (calc.extraDownPaymentKopecks > 0) {
+                dpPaymentNotes = `Первоначальный взнос по договору ${contractNumber} (плановый ПВ: ${formatRubles(calc.plannedDownPaymentKopecks)} + дополнительное погашение: ${formatRubles(calc.extraDownPaymentKopecks)})`;
+              } else if (calc.downPaymentShortfallKopecks > 0) {
+                dpPaymentNotes = `Частичный первоначальный взнос по договору ${contractNumber} (внесено ${formatRubles(calc.actualDownPaymentKopecks)} из плановых ${formatRubles(calc.plannedDownPaymentKopecks)}, недоплата ${formatRubles(calc.downPaymentShortfallKopecks)} перенесена в график)`;
+              }
+            }
 
             db.prepare(`
               INSERT INTO payments (
@@ -3252,7 +3469,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               calc.downPaymentKopecks,
               calc.downPaymentKopecks,
               startDate || now.slice(0, 10),
-              `Первоначальный взнос по договору ${contractNumber}`,
+              dpPaymentNotes,
               req.user!.id,
               now
             );
@@ -3269,7 +3486,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               dpAcc,
               calc.downPaymentKopecks,
               payId,
-              `Первоначальный взнос по договору ${contractNumber} (${itemTitle.trim()})`,
+              `${dpPaymentNotes} (${itemTitle.trim()})`,
               startDate || now.slice(0, 10),
               req.user!.id,
               now
@@ -3314,7 +3531,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             action: 'CONTRACT_CREATED',
             entityType: 'contract',
             entityId: contractId,
-            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, взнос: ${formatRubles(calc.downPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес., поручителей: ${createdGuarantorIds.length}, файлов: ${uploadedDocumentIds.length}).`,
+            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, плановый ПВ: ${formatRubles(calc.plannedDownPaymentKopecks)}, фактический ПВ: ${formatRubles(calc.actualDownPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес., поручителей: ${createdGuarantorIds.length}, файлов: ${uploadedDocumentIds.length}).`,
           });
         });
 
@@ -3325,6 +3542,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           createdNewClient: Boolean(createdNewClientData),
           guarantorIds: createdGuarantorIds,
           documentIds: uploadedDocumentIds,
+          plannedDownPaymentKopecks: calc.plannedDownPaymentKopecks,
+          actualDownPaymentKopecks: calc.actualDownPaymentKopecks,
+          downPaymentDiffKopecks: calc.downPaymentDiffKopecks,
+          extraDownPaymentKopecks: calc.extraDownPaymentKopecks,
+          downPaymentShortfallKopecks: calc.downPaymentShortfallKopecks,
+          financedPrincipalKopecks: calc.financedPrincipalKopecks,
+          paymentDayOfMonth: calc.paymentDayOfMonth,
+          scheduleVersion: activeScheduleVersion,
         });
       } catch (err) {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка оформления договора.' });
@@ -3822,6 +4047,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                 roundingRule: 'kopeck',
                 scheduleType: 'equal',
                 startDate: baseDate,
+                paymentDayOfMonth: cRow.payment_day_of_month ? Number(cRow.payment_day_of_month) : undefined,
               }).schedule[m].dueDate;
             }
 
@@ -3866,6 +4092,101 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка обновления графика.' });
       }
     }
+  );
+
+  // Change monthly payment day (1..31) on an active contract: recalculates due dates ONLY for future unpaid installments
+  const handleUpdateContractPaymentDay = (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const contractId = req.params.id;
+      const { paymentDayOfMonth, reason } = (req.body || {}) as {
+        paymentDayOfMonth?: number | string | null;
+        reason?: string;
+      };
+
+      const validDay = assertPaymentDayOfMonth(paymentDayOfMonth);
+
+      const cRow = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!cRow) {
+        res.status(404).json({ error: 'Договор не найден.' });
+        return;
+      }
+
+      const currentVer = Number(cRow.current_schedule_version);
+      const startDateIso = String(cRow.start_date);
+      const currentItems = db
+        .prepare(
+          'SELECT * FROM schedule_items WHERE contract_id = ? AND schedule_version = ? ORDER BY installment_number ASC'
+        )
+        .all(contractId, currentVer) as Array<Record<string, unknown>>;
+
+      const mappedItems = currentItems.map((it) => ({
+        id: String(it.id),
+        installmentNumber: Number(it.installment_number),
+        dueDate: String(it.due_date),
+        originalDueDate: String(it.original_due_date),
+        plannedKopecks: Number(it.planned_kopecks),
+        paidKopecks: Number(it.paid_kopecks),
+        status: String(it.status),
+      }));
+
+      const recalculatedItems = recalculateUnpaidScheduleDates(mappedItems, startDateIso, validDay);
+      let updatedCount = 0;
+      let preservedPaidCount = 0;
+
+      withTransaction(db, () => {
+        db.prepare('UPDATE contracts SET payment_day_of_month = ? WHERE id = ?').run(validDay, contractId);
+
+        const updateStmt = db.prepare('UPDATE schedule_items SET due_date = ? WHERE id = ?');
+        for (let i = 0; i < recalculatedItems.length; i++) {
+          const orig = mappedItems[i];
+          const next = recalculatedItems[i];
+          const isPaid = orig.status === 'paid' || (orig.plannedKopecks > 0 && orig.paidKopecks >= orig.plannedKopecks);
+          if (isPaid) {
+            preservedPaidCount++;
+          } else {
+            updateStmt.run(next.dueDate, next.id);
+            updatedCount++;
+          }
+        }
+
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'CONTRACT_PAYMENT_DAY_UPDATED',
+          entityType: 'contract',
+          entityId: contractId,
+          summary: `Изменена дата ежемесячного платежа договора ${String(cRow.contract_number)} на ${validDay}-е число каждого месяца. Пересчитано неоплаченных платежей: ${updatedCount}, сохранено оплаченных без изменений: ${preservedPaidCount}.${reason ? ` Причина: ${reason}` : ''}`,
+        });
+      });
+
+      res.json({
+        ok: true,
+        contractId,
+        paymentDayOfMonth: validDay,
+        updatedCount,
+        preservedPaidCount,
+        schedule: recalculatedItems,
+      });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Ошибка изменения даты ежемесячного платежа.',
+      });
+    }
+  };
+
+  router.patch(
+    '/contracts/:id/payment-day',
+    requireAuth,
+    requireRoles(['owner', 'staff']),
+    handleUpdateContractPaymentDay
+  );
+  router.post(
+    '/contracts/:id/payment-day',
+    requireAuth,
+    requireRoles(['owner', 'staff']),
+    handleUpdateContractPaymentDay
   );
 
   // Early payoff comparison calculator (4 options)
