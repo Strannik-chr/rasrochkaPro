@@ -551,6 +551,19 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    if (!clientId && clients.length > 0) {
+      setClientId(clients[0].id);
+    }
+  }, [clients, clientId]);
+
+  useEffect(() => {
+    if (accounts.length > 0 && !accounts.some((a) => a.id === accountId)) {
+      const bankAcc = accounts.find((a) => a.accountType === 'bank') || accounts[0];
+      setAccountId(bankAcc.id);
+    }
+  }, [accounts, accountId]);
+
   const clientContracts = contracts.filter(
     (c) => c.clientId === clientId && (c.status === 'active' || c.status === 'restructured')
   );

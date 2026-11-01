@@ -1,7 +1,12 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
-import { cleanResetOperationalData, withTransaction } from '../db/database';
+import {
+  cleanResetOperationalData,
+  ensureUserWorkspaceInitialized,
+  resolveTenantAccountId,
+  withTransaction,
+} from '../db/database';
 import {
   AutoAllocationStrategy,
   assertKopecks,
@@ -590,7 +595,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
     if (preCheckBlocked) {
       res.status(429).json({
-        error: 'Слишком много попыток входа. Пожалуйста, повторите попытку позже.',
+        error:
+          'Слишком много попыток входа. Пожалуйста, повторите попытку позже. Не удаётся войти? Обратитесь к владельцу приложения для восстановления доступа или изменения пароля.',
+        recoveryHelpMessage:
+          'Не удаётся войти? Обратитесь к владельцу приложения для восстановления доступа или изменения пароля',
       });
       return;
     }
@@ -600,6 +608,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     const isAccountActive = Boolean(userRow && userRow.status === 'active');
 
     if (!userRow || !passwordMatches || !isAccountActive) {
+      let maxFailures = 1;
       withTransaction(db, () => {
         const ipRes = incrementRateLimitBucket(
           db,
@@ -617,6 +626,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           cfg.accountLockoutMs,
           nowMs
         );
+        maxFailures = Math.max(acctRes.failures, ipRes.failures);
 
         if (userRow) {
           db.prepare(
@@ -641,7 +651,16 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       });
 
       // Uniform error message: never reveal whether the phone exists or if the account is blocked
-      res.status(401).json({ error: 'Неверный номер телефона или пароль' });
+      res.status(401).json({
+        error: 'Неверный номер телефона или пароль',
+        failedAttempts: maxFailures,
+        ...(maxFailures >= 2
+          ? {
+              recoveryHelpMessage:
+                'Не удаётся войти? Обратитесь к владельцу приложения для восстановления доступа или изменения пароля',
+            }
+          : {}),
+      });
       return;
     }
 
@@ -685,6 +704,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       db.prepare('UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?').run(
         userRow!.id
       );
+      ensureUserWorkspaceInitialized(db, userRow!.id);
       sessionResult = createSessionForUser(req, res, userRow!.id, nowMs);
       recordAudit(db, {
         actorUserId: userRow!.id,
@@ -888,11 +908,19 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
   router.get('/state', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     const todayIso = new Date().toISOString().slice(0, 10);
+    const ownerId = req.user!.id;
+    ensureUserWorkspaceInitialized(db, ownerId);
 
-    // Installment plans
-    const plansRaw = db
-      .prepare('SELECT * FROM installment_plans ORDER BY term_months ASC')
-      .all() as Array<Record<string, unknown>>;
+    // Installment plans (user's own plans or default tariff templates)
+    const userPlansRaw = db
+      .prepare('SELECT * FROM installment_plans WHERE owner_user_id = ? ORDER BY term_months ASC')
+      .all(ownerId) as Array<Record<string, unknown>>;
+    const plansRaw =
+      userPlansRaw.length > 0
+        ? userPlansRaw
+        : (db
+            .prepare("SELECT * FROM installment_plans WHERE owner_user_id = 'usr_owner_01' ORDER BY term_months ASC")
+            .all() as Array<Record<string, unknown>>);
     const plans = plansRaw.map((p) => ({
       id: String(p.id),
       name: String(p.name),
@@ -907,17 +935,18 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       updatedAt: String(p.updated_at),
     }));
 
-    // Settings history
+    // Settings history scoped to current user
     const settingsHistoryRaw = db
       .prepare(
         `
         SELECT sh.*, COALESCE(u.email, 'system') as changed_by_email
         FROM settings_history sh
         LEFT JOIN users u ON u.id = sh.changed_by
+        WHERE sh.changed_by = ?
         ORDER BY sh.created_at DESC LIMIT 50
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
     const settingsHistory = settingsHistoryRaw.map((s) => ({
       id: String(s.id),
       settingType: String(s.setting_type),
@@ -931,18 +960,18 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
     const statusRules = getStatusRulesConfig(db);
 
-    // Map of latest payment event_date per schedule_item_id for accurate historical late-payment detection
+    // Map of latest payment event_date per schedule_item_id for accurate historical late-payment detection (scoped to ownerId)
     const paidDatesRaw = db
       .prepare(
         `
         SELECT pa.schedule_item_id, MAX(p.event_date) as last_paid_event_date
         FROM payment_allocations pa
         JOIN payments p ON p.id = pa.payment_id
-        WHERE pa.status = 'active' AND p.status = 'confirmed'
+        WHERE pa.status = 'active' AND p.status = 'confirmed' AND p.owner_user_id = ?
         GROUP BY pa.schedule_item_id
       `
       )
-      .all() as Array<{ schedule_item_id: string; last_paid_event_date: string }>;
+      .all(ownerId) as Array<{ schedule_item_id: string; last_paid_event_date: string }>;
     const lastPaidDateByItem = new Map<string, string>();
     for (const r of paidDatesRaw) {
       if (r.schedule_item_id && r.last_paid_event_date) {
@@ -950,23 +979,33 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       }
     }
 
-    // Schedule items & versions
+    // Schedule items & versions scoped strictly to contracts owned by ownerId
     const allScheduleItemsRaw = db
-      .prepare('SELECT * FROM schedule_items ORDER BY schedule_version DESC, installment_number ASC')
-      .all() as Array<Record<string, unknown>>;
+      .prepare(
+        `
+        SELECT si.*
+        FROM schedule_items si
+        JOIN contracts c ON c.id = si.contract_id
+        WHERE c.owner_user_id = ?
+        ORDER BY si.schedule_version DESC, si.installment_number ASC
+      `
+      )
+      .all(ownerId) as Array<Record<string, unknown>>;
 
     const allScheduleVersionsRaw = db
       .prepare(
         `
         SELECT sv.*, COALESCE(u.email, 'system') as created_by_email
         FROM schedule_versions sv
+        JOIN contracts c ON c.id = sv.contract_id
         LEFT JOIN users u ON u.id = sv.created_by
+        WHERE c.owner_user_id = ?
         ORDER BY sv.version DESC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
 
-    // Documents (loaded early so we can attach guarantor documents to contract guarantors)
+    // Documents (scoped strictly to ownerId)
     const docsRaw = db
       .prepare(
         `
@@ -977,10 +1016,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                COALESCE(u.email, 'system') as created_by_email
         FROM documents d
         LEFT JOIN users u ON u.id = d.created_by
+        WHERE d.owner_user_id = ?
         ORDER BY d.created_at DESC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
     const documents = docsRaw.map((d) => ({
       id: String(d.id),
       entityType: String(d.entity_type) as any,
@@ -1002,19 +1042,20 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       createdAt: String(d.created_at),
     }));
 
-    // Contract Guarantors (many-to-many between contracts and clients)
+    // Contract Guarantors (scoped strictly to ownerId)
     const allGuarantorsRaw = db
       .prepare(
         `
         SELECT cg.*, cl.full_name, cl.phone, cl.secondary_phone, cl.document_ref, cl.address
         FROM contract_guarantors cg
         JOIN clients cl ON cl.id = cg.client_id
+        WHERE cg.owner_user_id = ? AND cl.owner_user_id = ?
         ORDER BY cg.guarantor_order ASC, cg.created_at ASC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId, ownerId) as Array<Record<string, unknown>>;
 
-    // Contracts
+    // Contracts (scoped strictly to ownerId)
     const contractsRaw = db
       .prepare(
         `
@@ -1024,10 +1065,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                cl.address as client_address
         FROM contracts c
         JOIN clients cl ON cl.id = c.client_id
+        WHERE c.owner_user_id = ? AND cl.owner_user_id = ?
         ORDER BY c.created_at DESC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId, ownerId) as Array<Record<string, unknown>>;
 
     const overdueThresholdDays = Math.max(1, Math.trunc(Number(statusRules.gracePeriodDays ?? 3)));
 
@@ -1036,11 +1078,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         `
         SELECT contract_id, COALESCE(SUM(amount_kopecks), 0) as paid_kopecks
         FROM payments
-        WHERE is_down_payment = 1 AND status = 'confirmed' AND contract_id IS NOT NULL
+        WHERE owner_user_id = ? AND is_down_payment = 1 AND status = 'confirmed' AND contract_id IS NOT NULL
         GROUP BY contract_id
       `
       )
-      .all() as Array<{ contract_id: string; paid_kopecks: number }>;
+      .all(ownerId) as Array<{ contract_id: string; paid_kopecks: number }>;
     const downPaymentPaidByContract = new Map<string, number>();
     for (const row of downPaymentPaidRows) {
       downPaymentPaidByContract.set(String(row.contract_id), Number(row.paid_kopecks));
@@ -1255,10 +1297,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       };
     });
 
-    // Clients with aggregated debt & automatic status calculation (strictly separated from guarantor participation)
+    // Clients with aggregated debt & automatic status calculation (scoped strictly to ownerId)
     const clientsRaw = db
-      .prepare('SELECT * FROM clients ORDER BY created_at DESC')
-      .all() as Array<Record<string, unknown>>;
+      .prepare('SELECT * FROM clients WHERE owner_user_id = ? ORDER BY created_at DESC')
+      .all(ownerId) as Array<Record<string, unknown>>;
     const clients = clientsRaw.map((cl) => {
       const clientId = String(cl.id);
       const allClientContracts = contracts.filter((c) => c.clientId === clientId);
@@ -1335,7 +1377,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       };
     });
 
-    // Purchases
+    // Purchases (scoped strictly to ownerId)
     const purchasesRaw = db
       .prepare(
         `
@@ -1345,10 +1387,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         JOIN suppliers s ON s.id = p.supplier_id
         LEFT JOIN clients cl ON cl.id = p.client_id
         LEFT JOIN contracts c ON c.purchase_id = p.id
+        WHERE p.owner_user_id = ?
         ORDER BY p.purchase_date DESC, p.created_at DESC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
     const purchases = purchasesRaw.map((p) => ({
       id: String(p.id),
       supplierId: String(p.supplier_id),
@@ -1372,10 +1415,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       createdAt: String(p.created_at),
     }));
 
-    // Suppliers
+    // Suppliers (scoped strictly to ownerId)
     const suppliersRaw = db
-      .prepare('SELECT * FROM suppliers ORDER BY name ASC')
-      .all() as Array<Record<string, unknown>>;
+      .prepare('SELECT * FROM suppliers WHERE owner_user_id = ? ORDER BY name ASC')
+      .all(ownerId) as Array<Record<string, unknown>>;
     const suppliers = suppliersRaw.map((s) => {
       const supId = String(s.id);
       const supPurchases = purchases.filter((p) => p.supplierId === supId);
@@ -1394,7 +1437,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       };
     });
 
-    // Allocations & Payments
+    // Allocations & Payments (scoped strictly to ownerId)
     const allocationsRaw = db
       .prepare(
         `
@@ -1402,10 +1445,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         FROM payment_allocations pa
         JOIN contracts c ON c.id = pa.contract_id
         JOIN schedule_items si ON si.id = pa.schedule_item_id
+        WHERE c.owner_user_id = ?
         ORDER BY pa.created_at ASC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
 
     const paymentsRaw = db
       .prepare(
@@ -1417,10 +1461,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         LEFT JOIN contracts c ON c.id = p.contract_id
         JOIN financial_accounts fa ON fa.id = p.account_id
         LEFT JOIN users u ON u.id = p.created_by
+        WHERE p.owner_user_id = ?
         ORDER BY p.event_date DESC, p.created_at DESC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
 
     const payments = paymentsRaw.map((p) => {
       const payId = String(p.id);
@@ -1462,17 +1507,19 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       };
     });
 
-    // Overdues & Contacts
+    // Overdues & Contacts (scoped strictly to ownerId)
     const overdueContactsRaw = db
       .prepare(
         `
         SELECT oc.*, COALESCE(u.email, 'system') as created_by_email
         FROM overdue_contacts oc
+        JOIN contracts c ON c.id = oc.contract_id
         LEFT JOIN users u ON u.id = oc.created_by
+        WHERE c.owner_user_id = ?
         ORDER BY oc.created_at DESC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
 
     const overdues = [];
     for (const c of contracts) {
@@ -1511,10 +1558,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       }
     }
 
-    // Accounts & Ledger
+    // Accounts & Ledger (scoped strictly to ownerId)
     const accountsRaw = db
-      .prepare('SELECT * FROM financial_accounts ORDER BY account_type ASC')
-      .all() as Array<Record<string, unknown>>;
+      .prepare('SELECT * FROM financial_accounts WHERE owner_user_id = ? ORDER BY account_type ASC')
+      .all(ownerId) as Array<Record<string, unknown>>;
     const accounts = accountsRaw.map((a) => ({
       id: String(a.id),
       name: String(a.name),
@@ -1530,10 +1577,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         FROM ledger_entries l
         JOIN financial_accounts fa ON fa.id = l.account_id
         LEFT JOIN users u ON u.id = l.created_by
+        WHERE l.owner_user_id = ?
         ORDER BY l.event_date DESC, l.created_at DESC
       `
       )
-      .all() as Array<Record<string, unknown>>;
+      .all(ownerId) as Array<Record<string, unknown>>;
     const ledger = ledgerRaw.map((l) => ({
       id: String(l.id),
       idempotencyKey: String(l.idempotency_key),
@@ -1622,7 +1670,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       }));
     }
 
-    const reconciliation = reconcileFinance(db);
+    const reconciliation = reconcileFinance(db, ownerId);
 
     res.json({
       plans,
@@ -1800,8 +1848,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           INSERT INTO installment_plans (
             id, name, term_months, markup_percent, down_payment_percent,
             down_payment_required, rounding_rule, early_payoff_discount_percent,
-            is_active, version, updated_by, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)
+            is_active, version, updated_by, owner_user_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?)
         `).run(
           id,
           name.trim(),
@@ -1811,6 +1859,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           downPaymentRequired !== false ? 1 : 0,
           rule,
           earlyDiscount,
+          req.user!.id,
           req.user!.id,
           now,
           now
@@ -1854,9 +1903,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     requireRoles(['owner']),
     (req: AuthenticatedRequest, res: Response) => {
       const planId = req.params.id;
-      const existing = db.prepare('SELECT * FROM installment_plans WHERE id = ?').get(planId) as
-        | Record<string, unknown>
-        | undefined;
+      const existing = db
+        .prepare('SELECT * FROM installment_plans WHERE id = ? AND owner_user_id = ?')
+        .get(planId, req.user!.id) as Record<string, unknown> | undefined;
 
       if (!existing) {
         res.status(404).json({ error: 'Тариф рассрочки не найден.' });
@@ -1912,7 +1961,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           SET name = ?, term_months = ?, markup_percent = ?, down_payment_percent = ?,
               down_payment_required = ?, rounding_rule = ?, early_payoff_discount_percent = ?,
               is_active = ?, version = ?, updated_by = ?, updated_at = ?
-          WHERE id = ?
+          WHERE id = ? AND owner_user_id = ?
         `).run(
           nextName,
           nextTerm,
@@ -1925,7 +1974,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           nextVersion,
           req.user!.id,
           now,
-          planId
+          planId,
+          req.user!.id
         );
 
         db.prepare(`
@@ -1971,199 +2021,6 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
   // ==================== 4. CLIENTS, SUPPLIERS & PURCHASES ====================
 
-  router.post(
-    '/clients',
-    requireAuth,
-    requireRoles(['owner', 'staff']),
-    (req: AuthenticatedRequest, res: Response) => {
-      const { fullName, phone, secondaryPhone, documentRef, address, notes } = req.body as {
-        fullName?: string;
-        phone?: string;
-        secondaryPhone?: string;
-        documentRef?: string;
-        address?: string;
-        notes?: string;
-      };
-
-      if (!fullName || !fullName.trim() || !phone || !phone.trim()) {
-        res.status(400).json({ error: 'ФИО и основной телефон клиента обязательны.' });
-        return;
-      }
-
-      const normalizedPhone = normalizeRussianPhone(phone);
-      if (!normalizedPhone) {
-        res.status(400).json({
-          error: 'Укажите корректный российский номер телефона клиента (например, +7 928 000-00-00).',
-        });
-        return;
-      }
-
-      // Prevent duplicate clients with the same canonical phone number
-      const existingClients = db
-        .prepare('SELECT id, full_name, phone FROM clients')
-        .all() as Array<{ id: string; full_name: string; phone: string }>;
-      const duplicateClient = existingClients.find(
-        (c) => (normalizeRussianPhone(c.phone) || c.phone.trim()) === normalizedPhone
-      );
-      if (duplicateClient) {
-        res.status(409).json({
-          error: `Клиент с номером ${normalizedPhone} уже зарегистрирован в базе («${duplicateClient.full_name}»).`,
-        });
-        return;
-      }
-
-      const normalizedSecondary = secondaryPhone && secondaryPhone.trim()
-        ? normalizeRussianPhone(secondaryPhone) || secondaryPhone.trim()
-        : '';
-
-      const id = `cli_${crypto.randomUUID().slice(0, 8)}`;
-      const now = new Date().toISOString();
-
-      db.prepare(`
-        INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-      `).run(
-        id,
-        fullName.trim(),
-        normalizedPhone,
-        normalizedSecondary,
-        (documentRef || '').trim(),
-        (address || '').trim(),
-        (notes || '').trim(),
-        req.user!.id,
-        now
-      );
-
-      recordAudit(db, {
-        actorUserId: req.user!.id,
-        actorEmail: req.user!.phone || req.user!.email,
-        action: 'CLIENT_CREATED',
-        entityType: 'client',
-        entityId: id,
-        summary: `Добавлен клиент «${fullName.trim()}» (${normalizedPhone}).`,
-      });
-
-      res.status(201).json({ id, phone: normalizedPhone });
-    }
-  );
-
-  router.patch(
-    '/clients/:id',
-    requireAuth,
-    requireRoles(['owner', 'staff']),
-    (req: AuthenticatedRequest, res: Response) => {
-      const clientId = req.params.id;
-      const existing = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId) as
-        | {
-            id: string;
-            full_name: string;
-            phone: string;
-            secondary_phone: string;
-            document_ref: string;
-            address: string;
-            notes: string;
-            status: 'active' | 'archived';
-          }
-        | undefined;
-
-      if (!existing) {
-        res.status(404).json({ error: 'Карточка клиента не найдена.' });
-        return;
-      }
-
-      const { fullName, phone, secondaryPhone, documentRef, address, notes, status } = req.body as {
-        fullName?: string;
-        phone?: string;
-        secondaryPhone?: string;
-        documentRef?: string;
-        address?: string;
-        notes?: string;
-        status?: 'active' | 'archived';
-      };
-
-      const nextFullName =
-        typeof fullName === 'string' && fullName.trim() ? fullName.trim() : existing.full_name;
-      if (!nextFullName) {
-        res.status(400).json({ error: 'ФИО клиента не может быть пустым.' });
-        return;
-      }
-
-      let nextPhone = existing.phone;
-      if (phone !== undefined) {
-        const normalized = normalizeRussianPhone(phone);
-        if (!normalized) {
-          res.status(400).json({
-            error: 'Укажите корректный российский номер телефона клиента (например, +7 928 000-00-00).',
-          });
-          return;
-        }
-        const allClients = db
-          .prepare('SELECT id, full_name, phone FROM clients WHERE id != ?')
-          .all(clientId) as Array<{ id: string; full_name: string; phone: string }>;
-        const dup = allClients.find(
-          (c) => (normalizeRussianPhone(c.phone) || c.phone.trim()) === normalized
-        );
-        if (dup) {
-          res.status(409).json({
-            error: `Номер ${normalized} уже привязан к клиенту «${dup.full_name}».`,
-          });
-          return;
-        }
-        nextPhone = normalized;
-      }
-
-      const nextSecondary =
-        secondaryPhone !== undefined
-          ? secondaryPhone.trim()
-            ? normalizeRussianPhone(secondaryPhone) || secondaryPhone.trim()
-            : ''
-          : existing.secondary_phone;
-      const nextDocRef =
-        documentRef !== undefined ? documentRef.trim() : existing.document_ref;
-      const nextAddress =
-        address !== undefined ? address.trim() : existing.address;
-      const nextNotes =
-        notes !== undefined ? notes.trim() : existing.notes;
-      const nextStatus: 'active' | 'archived' =
-        status && ['active', 'archived'].includes(status) ? status : existing.status;
-
-      db.prepare(`
-        UPDATE clients
-        SET full_name = ?, phone = ?, secondary_phone = ?, document_ref = ?, address = ?, notes = ?, status = ?
-        WHERE id = ?
-      `).run(
-        nextFullName,
-        nextPhone,
-        nextSecondary,
-        nextDocRef,
-        nextAddress,
-        nextNotes,
-        nextStatus,
-        clientId
-      );
-
-      recordAudit(db, {
-        actorUserId: req.user!.id,
-        actorEmail: req.user!.phone || req.user!.email,
-        action: 'CLIENT_UPDATED',
-        entityType: 'client',
-        entityId: clientId,
-        summary: `Обновлены данные клиента «${nextFullName}» (${nextPhone}, статус: ${nextStatus}).`,
-      });
-
-      res.json({
-        id: clientId,
-        fullName: nextFullName,
-        phone: nextPhone,
-        secondaryPhone: nextSecondary,
-        documentRef: nextDocRef,
-        address: nextAddress,
-        notes: nextNotes,
-        status: nextStatus,
-      });
-    }
-  );
-
   router.get(
     '/clients/check-duplicates',
     requireAuth,
@@ -2173,8 +2030,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const normalizedPhone = rawPhone ? normalizeRussianPhone(rawPhone) : null;
 
       const allClients = db
-        .prepare('SELECT id, full_name, phone, secondary_phone, document_ref, address, status FROM clients ORDER BY full_name ASC')
-        .all() as Array<{
+        .prepare(
+          'SELECT id, full_name, phone, secondary_phone, document_ref, address, status FROM clients WHERE owner_user_id = ? ORDER BY full_name ASC'
+        )
+        .all(req.user!.id) as Array<{
           id: string;
           full_name: string;
           phone: string;
@@ -2232,6 +2091,248 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     }
   );
 
+  router.get(
+    '/clients/:id',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      const clientId = req.params.id;
+      const row = db
+        .prepare('SELECT * FROM clients WHERE id = ? AND owner_user_id = ?')
+        .get(clientId, req.user!.id) as Record<string, unknown> | undefined;
+
+      if (!row) {
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'IDOR_ATTEMPT_BLOCKED',
+          entityType: 'client',
+          entityId: clientId,
+          summary: `Предотвращена попытка доступа к карточке клиента ${clientId} другого аккаунта.`,
+        });
+        res.status(404).json({ error: 'Карточка клиента не найдена.' });
+        return;
+      }
+
+      res.json({
+        id: String(row.id),
+        fullName: String(row.full_name),
+        phone: String(row.phone),
+        secondaryPhone: String(row.secondary_phone || ''),
+        documentRef: String(row.document_ref || ''),
+        address: String(row.address || ''),
+        notes: String(row.notes || ''),
+        status: String(row.status),
+        createdAt: String(row.created_at),
+      });
+    }
+  );
+
+  router.post(
+    '/clients',
+    requireAuth,
+    requireRoles(['owner', 'staff']),
+    (req: AuthenticatedRequest, res: Response) => {
+      const { fullName, phone, secondaryPhone, documentRef, address, notes } = req.body as {
+        fullName?: string;
+        phone?: string;
+        secondaryPhone?: string;
+        documentRef?: string;
+        address?: string;
+        notes?: string;
+      };
+
+      if (!fullName || !fullName.trim() || !phone || !phone.trim()) {
+        res.status(400).json({ error: 'ФИО и основной телефон клиента обязательны.' });
+        return;
+      }
+
+      const normalizedPhone = normalizeRussianPhone(phone);
+      if (!normalizedPhone) {
+        res.status(400).json({
+          error: 'Укажите корректный российский номер телефона клиента (например, +7 928 000-00-00).',
+        });
+        return;
+      }
+
+      // Prevent duplicate clients with the same canonical phone number within THIS user's isolated account
+      const existingClients = db
+        .prepare('SELECT id, full_name, phone FROM clients WHERE owner_user_id = ?')
+        .all(req.user!.id) as Array<{ id: string; full_name: string; phone: string }>;
+      const duplicateClient = existingClients.find(
+        (c) => (normalizeRussianPhone(c.phone) || c.phone.trim()) === normalizedPhone
+      );
+      if (duplicateClient) {
+        res.status(409).json({
+          error: `Клиент с номером ${normalizedPhone} уже зарегистрирован в вашей базе («${duplicateClient.full_name}»).`,
+        });
+        return;
+      }
+
+      const normalizedSecondary = secondaryPhone && secondaryPhone.trim()
+        ? normalizeRussianPhone(secondaryPhone) || secondaryPhone.trim()
+        : '';
+
+      const id = `cli_${crypto.randomUUID().slice(0, 8)}`;
+      const now = new Date().toISOString();
+
+      db.prepare(`
+        INSERT INTO clients (
+          id, full_name, phone, secondary_phone, document_ref, address, notes,
+          status, created_by, owner_user_id, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      `).run(
+        id,
+        fullName.trim(),
+        normalizedPhone,
+        normalizedSecondary,
+        (documentRef || '').trim(),
+        (address || '').trim(),
+        (notes || '').trim(),
+        req.user!.id,
+        req.user!.id,
+        now
+      );
+
+      recordAudit(db, {
+        actorUserId: req.user!.id,
+        actorEmail: req.user!.phone || req.user!.email,
+        action: 'CLIENT_CREATED',
+        entityType: 'client',
+        entityId: id,
+        summary: `Добавлен клиент «${fullName.trim()}» (${normalizedPhone}).`,
+      });
+
+      res.status(201).json({ id, phone: normalizedPhone });
+    }
+  );
+
+  const handleUpdateClient = (req: AuthenticatedRequest, res: Response) => {
+    const clientId = req.params.id;
+    const existing = db
+      .prepare('SELECT * FROM clients WHERE id = ? AND owner_user_id = ?')
+      .get(clientId, req.user!.id) as
+      | {
+          id: string;
+          full_name: string;
+          phone: string;
+          secondary_phone: string;
+          document_ref: string;
+          address: string;
+          notes: string;
+          status: 'active' | 'archived';
+        }
+      | undefined;
+
+    if (!existing) {
+      recordAudit(db, {
+        actorUserId: req.user!.id,
+        actorEmail: req.user!.phone || req.user!.email,
+        action: 'IDOR_ATTEMPT_BLOCKED',
+        entityType: 'client',
+        entityId: clientId,
+        summary: `Предотвращена попытка изменения карточки клиента ${clientId} другого аккаунта.`,
+      });
+      res.status(404).json({ error: 'Карточка клиента не найдена.' });
+      return;
+    }
+
+    const { fullName, phone, secondaryPhone, documentRef, address, notes, status } = req.body as {
+      fullName?: string;
+      phone?: string;
+      secondaryPhone?: string;
+      documentRef?: string;
+      address?: string;
+      notes?: string;
+      status?: 'active' | 'archived';
+    };
+
+    const nextFullName =
+      typeof fullName === 'string' && fullName.trim() ? fullName.trim() : existing.full_name;
+    if (!nextFullName) {
+      res.status(400).json({ error: 'ФИО клиента не может быть пустым.' });
+      return;
+    }
+
+    let nextPhone = existing.phone;
+    if (phone !== undefined) {
+      const normalized = normalizeRussianPhone(phone);
+      if (!normalized) {
+        res.status(400).json({
+          error: 'Укажите корректный российский номер телефона клиента (например, +7 928 000-00-00).',
+        });
+        return;
+      }
+      const allClients = db
+        .prepare('SELECT id, full_name, phone FROM clients WHERE id != ? AND owner_user_id = ?')
+        .all(clientId, req.user!.id) as Array<{ id: string; full_name: string; phone: string }>;
+      const dup = allClients.find(
+        (c) => (normalizeRussianPhone(c.phone) || c.phone.trim()) === normalized
+      );
+      if (dup) {
+        res.status(409).json({
+          error: `Номер ${normalized} уже привязан к клиенту «${dup.full_name}».`,
+        });
+        return;
+      }
+      nextPhone = normalized;
+    }
+
+    const nextSecondary =
+      secondaryPhone !== undefined
+        ? secondaryPhone.trim()
+          ? normalizeRussianPhone(secondaryPhone) || secondaryPhone.trim()
+          : ''
+        : existing.secondary_phone;
+    const nextDocRef =
+      documentRef !== undefined ? documentRef.trim() : existing.document_ref;
+    const nextAddress =
+      address !== undefined ? address.trim() : existing.address;
+    const nextNotes =
+      notes !== undefined ? notes.trim() : existing.notes;
+    const nextStatus: 'active' | 'archived' =
+      status && ['active', 'archived'].includes(status) ? status : existing.status;
+
+    db.prepare(`
+      UPDATE clients
+      SET full_name = ?, phone = ?, secondary_phone = ?, document_ref = ?, address = ?, notes = ?, status = ?
+      WHERE id = ? AND owner_user_id = ?
+    `).run(
+      nextFullName,
+      nextPhone,
+      nextSecondary,
+      nextDocRef,
+      nextAddress,
+      nextNotes,
+      nextStatus,
+      clientId,
+      req.user!.id
+    );
+
+    recordAudit(db, {
+      actorUserId: req.user!.id,
+      actorEmail: req.user!.phone || req.user!.email,
+      action: 'CLIENT_UPDATED',
+      entityType: 'client',
+      entityId: clientId,
+      summary: `Обновлены данные клиента «${nextFullName}» (${nextPhone}, статус: ${nextStatus}).`,
+    });
+
+    res.json({
+      id: clientId,
+      fullName: nextFullName,
+      phone: nextPhone,
+      secondaryPhone: nextSecondary,
+      documentRef: nextDocRef,
+      address: nextAddress,
+      notes: nextNotes,
+      status: nextStatus,
+    });
+  };
+
+  router.patch('/clients/:id', requireAuth, requireRoles(['owner', 'staff']), handleUpdateClient);
+  router.put('/clients/:id', requireAuth, requireRoles(['owner', 'staff']), handleUpdateClient);
+
   router.post(
     '/suppliers',
     requireAuth,
@@ -2253,14 +2354,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       const now = new Date().toISOString();
 
       db.prepare(`
-        INSERT INTO suppliers (id, name, category, contact_info, notes, is_active, created_at)
-        VALUES (?, ?, ?, ?, ?, 1, ?)
+        INSERT INTO suppliers (id, name, category, contact_info, notes, is_active, owner_user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
       `).run(
         id,
         name.trim(),
         (category || 'Магазин электроники').trim(),
         (contactInfo || '').trim(),
         (notes || '').trim(),
+        req.user!.id,
         now
       );
 
@@ -2316,6 +2418,24 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
+        const supRow = db
+          .prepare('SELECT id FROM suppliers WHERE id = ? AND owner_user_id = ?')
+          .get(supplierId, req.user!.id) as { id: string } | undefined;
+        if (!supRow) {
+          res.status(404).json({ error: 'Магазин или поставщик не найден.' });
+          return;
+        }
+
+        if (clientId) {
+          const clRow = db
+            .prepare('SELECT id FROM clients WHERE id = ? AND owner_user_id = ?')
+            .get(clientId, req.user!.id) as { id: string } | undefined;
+          if (!clRow) {
+            res.status(404).json({ error: 'Выбранный клиент не найден.' });
+            return;
+          }
+        }
+
         const pPrice = Number(purchasePriceKopecks ?? 0);
         const dCost = Number(deliveryCostKopecks ?? 0);
         const oCost = Number(otherCostKopecks ?? 0);
@@ -2332,11 +2452,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
+        const accId = resolveTenantAccountId(db, req.user!.id, paymentAccountId, 'bank');
         const supplierDebt = pPrice - paidSupplier;
         const id = `pur_${crypto.randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
         const eventDate = purchaseDate || now.slice(0, 10);
-        const accId = paymentAccountId || 'acc_bank_main';
 
         withTransaction(db, () => {
           db.prepare(`
@@ -2344,8 +2464,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               id, supplier_id, client_id, item_name, item_category, quantity,
               purchase_price_kopecks, delivery_cost_kopecks, other_cost_kopecks,
               total_cost_kopecks, paid_to_supplier_kopecks, supplier_debt_kopecks,
-              handover_status, purchase_date, notes, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)
+              handover_status, purchase_date, notes, created_by, owner_user_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?)
           `).run(
             id,
             supplierId,
@@ -2362,6 +2482,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             eventDate,
             (notes || '').trim(),
             req.user!.id,
+            req.user!.id,
             now
           );
 
@@ -2370,8 +2491,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, NULL, 'purchase_payment', 'Закупка товара', 'out', ?, 'purchase', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, NULL, 'purchase_payment', 'Закупка товара', 'out', ?, 'purchase', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               `led_${crypto.randomUUID().slice(0, 8)}`,
               `idem_pur_${id}_supplier`,
@@ -2381,12 +2502,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               `Оплата поставщику за товар «${itemName.trim()}»`,
               eventDate,
               req.user!.id,
+              req.user!.id,
               now
             );
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ?').run(
-              paidSupplier,
-              accId
-            );
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ? AND owner_user_id = ?'
+            ).run(paidSupplier, accId, req.user!.id);
           }
 
           const extraOutflow = dCost + oCost;
@@ -2395,8 +2516,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, NULL, 'delivery_expense', 'Доставка и сопутствующие затраты', 'out', ?, 'purchase', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, NULL, 'delivery_expense', 'Доставка и сопутствующие затраты', 'out', ?, 'purchase', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               `led_${crypto.randomUUID().slice(0, 8)}`,
               `idem_pur_${id}_delivery`,
@@ -2406,12 +2527,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               `Доставка / прямые затраты при закупке «${itemName.trim()}»`,
               eventDate,
               req.user!.id,
+              req.user!.id,
               now
             );
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ?').run(
-              extraOutflow,
-              accId
-            );
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ? AND owner_user_id = ?'
+            ).run(extraOutflow, accId, req.user!.id);
           }
 
           recordAudit(db, {
@@ -2425,8 +2546,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
         res.status(201).json({ id, totalCostKopecks: totalCost });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка создания закупки.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка создания закупки.' });
       }
     }
   );
@@ -2443,9 +2565,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           accountId?: string;
         };
 
-        const pRow = db.prepare('SELECT * FROM purchases WHERE id = ?').get(purchaseId) as
-          | Record<string, unknown>
-          | undefined;
+        const pRow = db
+          .prepare('SELECT * FROM purchases WHERE id = ? AND owner_user_id = ?')
+          .get(purchaseId, req.user!.id) as Record<string, unknown> | undefined;
         if (!pRow) {
           res.status(404).json({ error: 'Закупка не найдена.' });
           return;
@@ -2459,7 +2581,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
-        const accId = accountId || 'acc_bank_main';
+        const accId = resolveTenantAccountId(db, req.user!.id, accountId, 'bank');
         const now = new Date().toISOString();
 
         withTransaction(db, () => {
@@ -2467,15 +2589,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             UPDATE purchases
             SET paid_to_supplier_kopecks = paid_to_supplier_kopecks + ?,
                 supplier_debt_kopecks = supplier_debt_kopecks - ?
-            WHERE id = ?
-          `).run(amount, amount, purchaseId);
+            WHERE id = ? AND owner_user_id = ?
+          `).run(amount, amount, purchaseId, req.user!.id);
 
           db.prepare(`
             INSERT INTO ledger_entries (
               id, idempotency_key, account_id, related_account_id, entry_type, category,
               direction, amount_kopecks, reference_type, reference_id, description,
-              event_date, status, created_by, created_at
-            ) VALUES (?, ?, ?, NULL, 'purchase_payment', 'Погашение обязательств перед поставщиком', 'out', ?, 'purchase', ?, ?, ?, 'confirmed', ?, ?)
+              event_date, status, created_by, owner_user_id, created_at
+            ) VALUES (?, ?, ?, NULL, 'purchase_payment', 'Погашение обязательств перед поставщиком', 'out', ?, 'purchase', ?, ?, ?, 'confirmed', ?, ?, ?)
           `).run(
             `led_${crypto.randomUUID().slice(0, 8)}`,
             `idem_sup_pay_${crypto.randomUUID()}`,
@@ -2485,13 +2607,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             `Доплата поставщику по закупке «${String(pRow.item_name)}»`,
             now.slice(0, 10),
             req.user!.id,
+            req.user!.id,
             now
           );
 
-          db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ?').run(
-            amount,
-            accId
-          );
+          db.prepare(
+            'UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ? AND owner_user_id = ?'
+          ).run(amount, accId, req.user!.id);
 
           recordAudit(db, {
             actorUserId: req.user!.id,
@@ -2504,13 +2626,52 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
         res.json({ ok: true });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка оплаты поставщику.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка оплаты поставщику.' });
       }
     }
   );
 
   // ==================== 5. CONTRACTS & PAYMENT SCHEDULES ====================
+
+  router.get(
+    '/contracts/:id',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      const contractId = req.params.id;
+      const cRow = db
+        .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+        .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
+
+      if (!cRow) {
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'IDOR_ATTEMPT_BLOCKED',
+          entityType: 'contract',
+          entityId: contractId,
+          summary: `Предотвращена попытка доступа к договору ${contractId} другого аккаунта.`,
+        });
+        res.status(404).json({ error: 'Договор не найден.' });
+        return;
+      }
+
+      res.json({
+        id: String(cRow.id),
+        contractNumber: String(cRow.contract_number),
+        clientId: String(cRow.client_id),
+        itemTitle: String(cRow.item_title),
+        salePriceKopecks: Number(cRow.sale_price_kopecks),
+        downPaymentKopecks: Number(cRow.down_payment_kopecks),
+        financedPrincipalKopecks: Number(cRow.financed_principal_kopecks),
+        termMonths: Number(cRow.term_months),
+        status: String(cRow.status),
+        startDate: String(cRow.start_date),
+        createdAt: String(cRow.created_at),
+      });
+    }
+  );
 
   router.post('/contracts/preview', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     try {
@@ -2651,8 +2812,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const trimmedIdemKey = idempotencyKey ? String(idempotencyKey).trim() : '';
         if (trimmedIdemKey) {
           const existingContract = db
-            .prepare('SELECT id, contract_number, client_id FROM contracts WHERE idempotency_key = ?')
-            .get(trimmedIdemKey) as { id: string; contract_number: string; client_id: string } | undefined;
+            .prepare(
+              'SELECT id, contract_number, client_id FROM contracts WHERE idempotency_key = ? AND owner_user_id = ?'
+            )
+            .get(trimmedIdemKey, req.user!.id) as
+            | { id: string; contract_number: string; client_id: string }
+            | undefined;
           if (existingContract) {
             res.status(200).json({
               id: existingContract.id,
@@ -2705,12 +2870,22 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             return;
           }
           const existingClient = db
-            .prepare('SELECT id, full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ?')
-            .get(resolvedClientId) as
+            .prepare(
+              'SELECT id, full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ? AND owner_user_id = ?'
+            )
+            .get(resolvedClientId, req.user!.id) as
             | { id: string; full_name: string; phone: string; secondary_phone: string; document_ref: string; address: string }
             | undefined;
           if (!existingClient) {
-            res.status(400).json({ error: 'Выбранный клиент не найден в базе данных.' });
+            recordAudit(db, {
+              actorUserId: req.user!.id,
+              actorEmail: req.user!.phone || req.user!.email,
+              action: 'IDOR_ATTEMPT_BLOCKED',
+              entityType: 'client',
+              entityId: resolvedClientId,
+              summary: `Попытка привязки чужого/несуществующего клиента ${resolvedClientId} при создании договора.`,
+            });
+            res.status(404).json({ error: 'Выбранный клиент не найден в базе данных.' });
             return;
           }
           resolvedPrimaryPhone = normalizeRussianPhone(existingClient.phone) || existingClient.phone.trim();
@@ -2735,10 +2910,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             return;
           }
 
-          // Check phone duplicate
+          // Check phone duplicate within THIS user's isolated account
           const phoneDup = db
-            .prepare('SELECT id, full_name, phone, document_ref, address FROM clients WHERE phone = ? OR secondary_phone = ?')
-            .get(normalizedPhone, normalizedPhone) as
+            .prepare(
+              'SELECT id, full_name, phone, document_ref, address FROM clients WHERE owner_user_id = ? AND (phone = ? OR secondary_phone = ?)'
+            )
+            .get(req.user!.id, normalizedPhone, normalizedPhone) as
             | { id: string; full_name: string; phone: string; document_ref: string; address: string }
             | undefined;
 
@@ -2756,11 +2933,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             return;
           }
 
-          // Check exact or close fullName duplicate unless allowSimilarName is explicitly passed
+          // Check exact or close fullName duplicate within THIS user's isolated account unless allowSimilarName is explicitly passed
           if (!newClient.allowSimilarName) {
             const exactNameMatches = db
-              .prepare('SELECT id, full_name, phone, document_ref, address FROM clients WHERE LOWER(TRIM(full_name)) = LOWER(TRIM(?))')
-              .all(rawName) as Array<{
+              .prepare(
+                'SELECT id, full_name, phone, document_ref, address FROM clients WHERE owner_user_id = ? AND LOWER(TRIM(full_name)) = LOWER(TRIM(?))'
+              )
+              .all(req.user!.id, rawName) as Array<{
                 id: string;
                 full_name: string;
                 phone: string;
@@ -2870,12 +3049,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
           if (explicitGClientId) {
             const existingG = db
-              .prepare('SELECT id, full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ?')
-              .get(explicitGClientId) as
+              .prepare(
+                'SELECT id, full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ? AND owner_user_id = ?'
+              )
+              .get(explicitGClientId, req.user!.id) as
               | { id: string; full_name: string; phone: string; secondary_phone: string; document_ref: string; address: string }
               | undefined;
             if (!existingG) {
-              res.status(400).json({ error: `${gLabel}: выбранный поручитель не найден в базе.` });
+              res.status(404).json({ error: `${gLabel}: выбранный поручитель не найден в базе.` });
               return;
             }
             resolvedGClientId = existingG.id;
@@ -2921,8 +3102,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             }
 
             const existingByPhone = db
-              .prepare('SELECT id, full_name, phone, document_ref, address FROM clients WHERE phone = ? OR secondary_phone = ?')
-              .get(normalizedGPhone, normalizedGPhone) as
+              .prepare(
+                'SELECT id, full_name, phone, document_ref, address FROM clients WHERE owner_user_id = ? AND (phone = ? OR secondary_phone = ?)'
+              )
+              .get(req.user!.id, normalizedGPhone, normalizedGPhone) as
               | { id: string; full_name: string; phone: string; document_ref: string; address: string }
               | undefined;
 
@@ -3031,6 +3214,17 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             signedGuaranteeReceived: Boolean(g.signedGuaranteeReceived),
             attachments: gAttachments,
           });
+        }
+
+        // Validate optional purchaseId ownership BEFORE opening DB transaction
+        if (purchaseId) {
+          const purRow = db
+            .prepare('SELECT id FROM purchases WHERE id = ? AND owner_user_id = ?')
+            .get(purchaseId, req.user!.id) as { id: string } | undefined;
+          if (!purRow) {
+            res.status(404).json({ error: 'Связанная закупка не найдена.' });
+            return;
+          }
         }
 
         // Validate optional contract attachments BEFORE opening DB transaction
@@ -3153,16 +3347,31 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         let planVersion = 1;
         if (planId) {
           const planRow = db
-            .prepare('SELECT version FROM installment_plans WHERE id = ?')
-            .get(planId) as { version: number } | undefined;
+            .prepare('SELECT version FROM installment_plans WHERE id = ? AND owner_user_id = ?')
+            .get(planId, req.user!.id) as { version: number } | undefined;
           if (planRow) {
             planVersion = planRow.version;
           }
         }
 
-        const countRow = db.prepare('SELECT COUNT(*) as cnt FROM contracts').get() as { cnt: number };
-        const nextNum = String(countRow.cnt + 1).padStart(4, '0');
-        const contractNumber = `ДГ-2026-${nextNum}`;
+        const dpMethod = downPaymentMethod || 'cash';
+        const resolvedDpAccountId = resolveTenantAccountId(
+          db,
+          req.user!.id,
+          downPaymentAccountId,
+          dpMethod === 'bank_transfer' ? 'bank' : 'cash'
+        );
+
+        const countRow = db
+          .prepare('SELECT COUNT(*) as cnt FROM contracts WHERE owner_user_id = ?')
+          .get(req.user!.id) as { cnt: number };
+        let seq = countRow.cnt + 1;
+        let contractNumber = `ДГ-2026-${String(seq).padStart(4, '0')}`;
+        while (db.prepare('SELECT 1 FROM contracts WHERE contract_number = ?').get(contractNumber)) {
+          seq++;
+          contractNumber = `ДГ-2026-${String(seq).padStart(4, '0')}`;
+        }
+
         const contractId = `cnt_${crypto.randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
         const uploadedDocumentIds: string[] = [];
@@ -3172,8 +3381,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         withTransaction(db, () => {
           if (createdNewClientData) {
             db.prepare(`
-              INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_by, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+              INSERT INTO clients (
+                id, full_name, phone, secondary_phone, document_ref, address, notes,
+                status, created_by, owner_user_id, created_at
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
             `).run(
               createdNewClientData.id,
               createdNewClientData.fullName,
@@ -3182,6 +3394,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               createdNewClientData.documentRef,
               createdNewClientData.address,
               createdNewClientData.notes,
+              req.user!.id,
               req.user!.id,
               now
             );
@@ -3197,8 +3410,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           } else if (clientUpdates && resolvedClientId) {
             // Optional inline updates to existing primary client's passport/address/secondaryPhone
             const cur = db
-              .prepare('SELECT secondary_phone, document_ref, address FROM clients WHERE id = ?')
-              .get(resolvedClientId) as
+              .prepare('SELECT secondary_phone, document_ref, address FROM clients WHERE id = ? AND owner_user_id = ?')
+              .get(resolvedClientId, req.user!.id) as
               | { secondary_phone: string; document_ref: string; address: string }
               | undefined;
             if (cur) {
@@ -3213,8 +3426,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               const nextAddr =
                 clientUpdates.address !== undefined ? clientUpdates.address.trim() : cur.address;
               db.prepare(
-                'UPDATE clients SET secondary_phone = ?, document_ref = ?, address = ? WHERE id = ?'
-              ).run(nextSec, nextDoc, nextAddr, resolvedClientId);
+                'UPDATE clients SET secondary_phone = ?, document_ref = ?, address = ? WHERE id = ? AND owner_user_id = ?'
+              ).run(nextSec, nextDoc, nextAddr, resolvedClientId, req.user!.id);
             }
           }
 
@@ -3226,8 +3439,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               planned_down_payment_kopecks, actual_down_payment_kopecks, down_payment_diff_kopecks,
               extra_down_payment_kopecks, down_payment_shortfall_kopecks, is_custom_down_payment,
               financed_principal_kopecks, term_months, rounding_rule, schedule_type,
-              start_date, payment_day_of_month, current_schedule_version, status, notes, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+              start_date, payment_day_of_month, current_schedule_version, status, notes, created_by, owner_user_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
           `).run(
             contractId,
             trimmedIdemKey || null,
@@ -3259,6 +3472,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             activeScheduleVersion,
             (notes || '').trim(),
             req.user!.id,
+            req.user!.id,
             now
           );
 
@@ -3267,8 +3481,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             if (gItem.createdNewGuarantorClient) {
               const gc = gItem.createdNewGuarantorClient;
               db.prepare(`
-                INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                INSERT INTO clients (
+                  id, full_name, phone, secondary_phone, document_ref, address, notes,
+                  status, created_by, owner_user_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
               `).run(
                 gc.id,
                 gc.fullName,
@@ -3277,6 +3494,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                 gc.documentRef,
                 gc.address,
                 gc.notes,
+                req.user!.id,
                 req.user!.id,
                 now
               );
@@ -3291,27 +3509,29 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               });
             } else if (gItem.updateExistingGuarantorFields) {
               const curG = db
-                .prepare('SELECT secondary_phone, document_ref, address FROM clients WHERE id = ?')
-                .get(gItem.resolvedGuarantorClientId) as
+                .prepare('SELECT secondary_phone, document_ref, address FROM clients WHERE id = ? AND owner_user_id = ?')
+                .get(gItem.resolvedGuarantorClientId, req.user!.id) as
                 | { secondary_phone: string; document_ref: string; address: string }
                 | undefined;
               if (curG) {
                 const upd = gItem.updateExistingGuarantorFields;
                 db.prepare(
-                  'UPDATE clients SET secondary_phone = ?, document_ref = ?, address = ? WHERE id = ?'
+                  'UPDATE clients SET secondary_phone = ?, document_ref = ?, address = ? WHERE id = ? AND owner_user_id = ?'
                 ).run(
                   upd.secondaryPhone !== undefined ? upd.secondaryPhone.trim() : curG.secondary_phone,
                   upd.documentRef !== undefined ? upd.documentRef.trim() : curG.document_ref,
                   upd.address !== undefined ? upd.address.trim() : curG.address,
-                  gItem.resolvedGuarantorClientId
+                  gItem.resolvedGuarantorClientId,
+                  req.user!.id
                 );
               }
             }
 
             db.prepare(`
               INSERT INTO contract_guarantors (
-                id, contract_id, client_id, guarantor_order, notes, signed_guarantee_received, created_by, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                id, contract_id, client_id, guarantor_order, notes, signed_guarantee_received,
+                created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               gItem.guarantorRowId,
               contractId,
@@ -3319,6 +3539,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               gItem.guarantorOrder,
               gItem.notes,
               gItem.signedGuaranteeReceived ? 1 : 0,
+              req.user!.id,
               req.user!.id,
               now
             );
@@ -3330,8 +3551,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                 INSERT INTO documents (
                   id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
                   stored_filename, mime_type, size_bytes, sha256_hash, content_base64,
-                  is_archived, guarantor_client_id, guarantor_doc_type, created_by, created_at
-                ) VALUES (?, 'contract', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                  is_archived, guarantor_client_id, guarantor_doc_type, created_by, owner_user_id, created_at
+                ) VALUES (?, 'contract', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
               `).run(
                 gAtt.id,
                 contractId,
@@ -3347,6 +3568,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                 gAtt.contentBase64,
                 gItem.resolvedGuarantorClientId,
                 gAtt.guarantorDocType,
+                req.user!.id,
                 req.user!.id,
                 now
               );
@@ -3433,15 +3655,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           }
 
           if (purchaseId) {
-            db.prepare(`UPDATE purchases SET handover_status = 'handed_over', client_id = ? WHERE id = ?`).run(
-              resolvedClientId,
-              purchaseId
-            );
+            db.prepare(
+              `UPDATE purchases SET handover_status = 'handed_over', client_id = ? WHERE id = ? AND owner_user_id = ?`
+            ).run(resolvedClientId, purchaseId, req.user!.id);
           }
 
           if (collectDownPaymentNow !== false && calc.downPaymentKopecks > 0) {
-            const dpAcc = downPaymentAccountId || 'acc_cash_main';
-            const dpMethod = downPaymentMethod || 'cash';
+            const dpAcc = resolvedDpAccountId;
             const payId = `pay_dp_${contractId}`;
 
             let dpPaymentNotes = `Первоначальный взнос по договору ${contractNumber}`;
@@ -3457,8 +3677,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO payments (
                 id, idempotency_key, client_id, contract_id, account_id, payment_method,
                 amount_kopecks, allocated_kopecks, unallocated_kopecks, is_down_payment,
-                status, event_date, notes, created_by, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'confirmed', ?, ?, ?, ?)
+                status, event_date, notes, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'confirmed', ?, ?, ?, ?, ?)
             `).run(
               payId,
               `idem_dp_${contractId}`,
@@ -3471,6 +3691,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               startDate || now.slice(0, 10),
               dpPaymentNotes,
               req.user!.id,
+              req.user!.id,
               now
             );
 
@@ -3478,8 +3699,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, NULL, 'client_payment', 'Первоначальный взнос клиента', 'in', ?, 'payment', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, NULL, 'client_payment', 'Первоначальный взнос клиента', 'in', ?, 'payment', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               `led_dp_${contractId}`,
               `idem_led_dp_${contractId}`,
@@ -3489,13 +3710,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               `${dpPaymentNotes} (${itemTitle.trim()})`,
               startDate || now.slice(0, 10),
               req.user!.id,
+              req.user!.id,
               now
             );
 
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ?').run(
-              calc.downPaymentKopecks,
-              dpAcc
-            );
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+            ).run(calc.downPaymentKopecks, dpAcc, req.user!.id);
           }
 
           // Save any attached contract scans/photos atomically with the contract
@@ -3504,8 +3725,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             db.prepare(`
               INSERT INTO documents (
                 id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
-                stored_filename, mime_type, size_bytes, sha256_hash, content_base64, is_archived, created_by, created_at
-              ) VALUES (?, 'contract', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                stored_filename, mime_type, size_bytes, sha256_hash, content_base64, is_archived,
+                created_by, owner_user_id, created_at
+              ) VALUES (?, 'contract', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             `).run(
               att.id,
               contractId,
@@ -3519,6 +3741,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               att.buffer.length,
               sha256,
               att.contentBase64,
+              req.user!.id,
               req.user!.id,
               now
             );
@@ -3551,8 +3774,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           paymentDayOfMonth: calc.paymentDayOfMonth,
           scheduleVersion: activeScheduleVersion,
         });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка оформления договора.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка оформления договора.' });
       }
     }
   );
@@ -3566,8 +3790,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       try {
         const contractId = req.params.id;
         const cRow = db
-          .prepare('SELECT id, contract_number, client_id FROM contracts WHERE id = ?')
-          .get(contractId) as { id: string; contract_number: string; client_id: string } | undefined;
+          .prepare('SELECT id, contract_number, client_id FROM contracts WHERE id = ? AND owner_user_id = ?')
+          .get(contractId, req.user!.id) as { id: string; contract_number: string; client_id: string } | undefined;
 
         if (!cRow) {
           res.status(404).json({ error: 'Договор не найден.' });
@@ -3624,11 +3848,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         } | null = null;
 
         if (resolvedGuarantorClientId) {
-          const ex = db.prepare('SELECT id FROM clients WHERE id = ?').get(resolvedGuarantorClientId) as
-            | { id: string }
-            | undefined;
+          const ex = db
+            .prepare('SELECT id FROM clients WHERE id = ? AND owner_user_id = ?')
+            .get(resolvedGuarantorClientId, req.user!.id) as { id: string } | undefined;
           if (!ex) {
-            res.status(400).json({ error: 'Выбранный поручитель не найден в базе данных.' });
+            res.status(404).json({ error: 'Выбранный поручитель не найден в базе данных.' });
             return;
           }
         } else {
@@ -3659,8 +3883,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             return;
           }
           const dup = db
-            .prepare('SELECT id, full_name, phone FROM clients WHERE phone = ? OR secondary_phone = ?')
-            .get(normPhone, normPhone) as { id: string; full_name: string; phone: string } | undefined;
+            .prepare(
+              'SELECT id, full_name, phone FROM clients WHERE owner_user_id = ? AND (phone = ? OR secondary_phone = ?)'
+            )
+            .get(req.user!.id, normPhone, normPhone) as
+            | { id: string; full_name: string; phone: string }
+            | undefined;
           if (dup) {
             res.status(409).json({
               error: `Человек с номером ${normPhone} уже есть в базе («${dup.full_name}»). Выберите его из базы.`,
@@ -3690,8 +3918,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         }
 
         const existingLink = db
-          .prepare('SELECT id FROM contract_guarantors WHERE contract_id = ? AND client_id = ?')
-          .get(contractId, resolvedGuarantorClientId) as { id: string } | undefined;
+          .prepare('SELECT id FROM contract_guarantors WHERE contract_id = ? AND client_id = ? AND owner_user_id = ?')
+          .get(contractId, resolvedGuarantorClientId, req.user!.id) as { id: string } | undefined;
         if (existingLink) {
           res.status(400).json({
             error: 'Этот человек уже добавлен поручителем в данный договор.',
@@ -3700,8 +3928,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         }
 
         const maxOrderRow = db
-          .prepare('SELECT COALESCE(MAX(guarantor_order), 0) as max_ord FROM contract_guarantors WHERE contract_id = ?')
-          .get(contractId) as { max_ord: number };
+          .prepare(
+            'SELECT COALESCE(MAX(guarantor_order), 0) as max_ord FROM contract_guarantors WHERE contract_id = ? AND owner_user_id = ?'
+          )
+          .get(contractId, req.user!.id) as { max_ord: number };
         const nextOrder = Number(maxOrderRow.max_ord || 0) + 1;
         const guarantorId = `cg_${crypto.randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
@@ -3709,8 +3939,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         withTransaction(db, () => {
           if (createdNewG) {
             db.prepare(`
-              INSERT INTO clients (id, full_name, phone, secondary_phone, document_ref, address, notes, status, created_by, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+              INSERT INTO clients (
+                id, full_name, phone, secondary_phone, document_ref, address, notes,
+                status, created_by, owner_user_id, created_at
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
             `).run(
               createdNewG.id,
               createdNewG.fullName,
@@ -3720,14 +3953,16 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               createdNewG.address,
               createdNewG.notes,
               req.user!.id,
+              req.user!.id,
               now
             );
           }
 
           db.prepare(`
             INSERT INTO contract_guarantors (
-              id, contract_id, client_id, guarantor_order, notes, signed_guarantee_received, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              id, contract_id, client_id, guarantor_order, notes, signed_guarantee_received,
+              created_by, owner_user_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             guarantorId,
             contractId,
@@ -3735,6 +3970,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             nextOrder,
             (notes || '').trim(),
             signedGuaranteeReceived ? 1 : 0,
+            req.user!.id,
             req.user!.id,
             now
           );
@@ -3775,9 +4011,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
              FROM contract_guarantors cg
              JOIN contracts c ON c.id = cg.contract_id
              JOIN clients cl ON cl.id = cg.client_id
-             WHERE cg.id = ? AND cg.contract_id = ?`
+             WHERE cg.id = ? AND cg.contract_id = ? AND c.owner_user_id = ? AND cg.owner_user_id = ?`
           )
-          .get(guarantorId, contractId) as
+          .get(guarantorId, contractId, req.user!.id, req.user!.id) as
           | { id: string; client_id: string; guarantor_order: number; contract_number: string; full_name: string }
           | undefined;
 
@@ -3787,17 +4023,22 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         }
 
         withTransaction(db, () => {
-          db.prepare('DELETE FROM contract_guarantors WHERE id = ? AND contract_id = ?').run(
-            guarantorId,
-            contractId
-          );
+          db.prepare(
+            'DELETE FROM contract_guarantors WHERE id = ? AND contract_id = ? AND owner_user_id = ?'
+          ).run(guarantorId, contractId, req.user!.id);
 
           // Re-index remaining guarantors on this contract so numbering stays sequential (1, 2, 3...)
           const remaining = db
-            .prepare('SELECT id FROM contract_guarantors WHERE contract_id = ? ORDER BY guarantor_order ASC, created_at ASC')
-            .all(contractId) as Array<{ id: string }>;
+            .prepare(
+              'SELECT id FROM contract_guarantors WHERE contract_id = ? AND owner_user_id = ? ORDER BY guarantor_order ASC, created_at ASC'
+            )
+            .all(contractId, req.user!.id) as Array<{ id: string }>;
           remaining.forEach((rem, idx) => {
-            db.prepare('UPDATE contract_guarantors SET guarantor_order = ? WHERE id = ?').run(idx + 1, rem.id);
+            db.prepare('UPDATE contract_guarantors SET guarantor_order = ? WHERE id = ? AND owner_user_id = ?').run(
+              idx + 1,
+              rem.id,
+              req.user!.id
+            );
           });
 
           recordAudit(db, {
@@ -3830,8 +4071,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         };
 
         const cRow = db
-          .prepare('SELECT * FROM contracts WHERE id = ?')
-          .get(contractId) as Record<string, unknown> | undefined;
+          .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+          .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
 
         if (!cRow) {
           res.status(404).json({ error: 'Договор не найден.' });
@@ -3839,8 +4080,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         }
 
         const clientRow = db
-          .prepare('SELECT id, full_name, phone, secondary_phone FROM clients WHERE id = ?')
-          .get(String(cRow.client_id)) as
+          .prepare('SELECT id, full_name, phone, secondary_phone FROM clients WHERE id = ? AND owner_user_id = ?')
+          .get(String(cRow.client_id), req.user!.id) as
           | { id: string; full_name: string; phone: string; secondary_phone: string }
           | undefined;
 
@@ -3873,10 +4114,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             `SELECT id, title, original_filename, mime_type, size_bytes, created_at
              FROM documents
              WHERE (contract_id = ? OR (entity_type = 'contract' AND entity_id = ?))
+               AND owner_user_id = ?
                AND COALESCE(is_archived, 0) = 0
              ORDER BY created_at DESC`
           )
-          .all(contractId, contractId) as Array<{
+          .all(contractId, contractId, req.user!.id) as Array<{
             id: string;
             title: string;
             original_filename: string;
@@ -3972,9 +4214,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
         const effectiveReason = (reason && reason.trim()) || 'Обновление графика с учётом внесённых платежей';
 
-        const cRow = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId) as
-          | Record<string, unknown>
-          | undefined;
+        const cRow = db
+          .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+          .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
         if (!cRow) {
           res.status(404).json({ error: 'Договор не найден.' });
           return;
@@ -4069,8 +4311,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           db.prepare(`
             UPDATE contracts
             SET current_schedule_version = ?, status = 'restructured'
-            WHERE id = ?
-          `).run(newVer, contractId);
+            WHERE id = ? AND owner_user_id = ?
+          `).run(newVer, contractId, req.user!.id);
 
           recordAudit(db, {
             actorUserId: req.user!.id,
@@ -4105,9 +4347,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
       const validDay = assertPaymentDayOfMonth(paymentDayOfMonth);
 
-      const cRow = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId) as
-        | Record<string, unknown>
-        | undefined;
+      const cRow = db
+        .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+        .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
       if (!cRow) {
         res.status(404).json({ error: 'Договор не найден.' });
         return;
@@ -4136,7 +4378,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       let preservedPaidCount = 0;
 
       withTransaction(db, () => {
-        db.prepare('UPDATE contracts SET payment_day_of_month = ? WHERE id = ?').run(validDay, contractId);
+        db.prepare('UPDATE contracts SET payment_day_of_month = ? WHERE id = ? AND owner_user_id = ?').run(
+          validDay,
+          contractId,
+          req.user!.id
+        );
 
         const updateStmt = db.prepare('UPDATE schedule_items SET due_date = ? WHERE id = ?');
         for (let i = 0; i < recalculatedItems.length; i++) {
@@ -4194,9 +4440,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     const contractId = req.params.id;
     const { manualPayoffKopecks } = req.body as { manualPayoffKopecks?: number };
 
-    const cRow = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId) as
-      | Record<string, unknown>
-      | undefined;
+    const cRow = db
+      .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+      .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
     if (!cRow) {
       res.status(404).json({ error: 'Договор не найден.' });
       return;
@@ -4217,8 +4463,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     let planDiscountPercent = 30;
     if (cRow.plan_id) {
       const pRow = db
-        .prepare('SELECT early_payoff_discount_percent FROM installment_plans WHERE id = ?')
-        .get(String(cRow.plan_id)) as { early_payoff_discount_percent: number } | undefined;
+        .prepare('SELECT early_payoff_discount_percent FROM installment_plans WHERE id = ? AND owner_user_id = ?')
+        .get(String(cRow.plan_id), req.user!.id) as { early_payoff_discount_percent: number } | undefined;
       if (pRow) planDiscountPercent = Number(pRow.early_payoff_discount_percent);
     }
 
@@ -4251,9 +4497,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           reason?: string;
         };
 
-        const cRow = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId) as
-          | Record<string, unknown>
-          | undefined;
+        const cRow = db
+          .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+          .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
         if (!cRow) {
           res.status(404).json({ error: 'Договор не найден.' });
           return;
@@ -4278,8 +4524,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
         const discountKopecks = remainingScheduleKopecks - finalPayoff;
         const now = new Date().toISOString();
-        const accId = accountId || 'acc_bank_main';
         const method = paymentMethod || 'bank_transfer';
+        const accId = resolveTenantAccountId(
+          db,
+          req.user!.id,
+          accountId,
+          method === 'cash' ? 'cash' : 'bank'
+        );
 
         withTransaction(db, () => {
           const payId = `pay_early_${crypto.randomUUID().slice(0, 8)}`;
@@ -4288,8 +4539,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO payments (
                 id, idempotency_key, client_id, contract_id, account_id, payment_method,
                 amount_kopecks, allocated_kopecks, unallocated_kopecks, is_down_payment,
-                status, event_date, notes, created_by, created_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'confirmed', ?, ?, ?, ?)
+                status, event_date, notes, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'confirmed', ?, ?, ?, ?, ?)
             `).run(
               payId,
               `idem_early_${contractId}_${Date.now()}`,
@@ -4302,6 +4553,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               now.slice(0, 10),
               `Досрочное закрытие договора ${String(cRow.contract_number)}. Скидка: ${formatRubles(discountKopecks)}`,
               req.user!.id,
+              req.user!.id,
               now
             );
 
@@ -4309,8 +4561,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, NULL, 'client_payment', 'Досрочное погашение договора', 'in', ?, 'payment', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, NULL, 'client_payment', 'Досрочное погашение договора', 'in', ?, 'payment', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               `led_early_${crypto.randomUUID().slice(0, 8)}`,
               `idem_led_early_${payId}`,
@@ -4320,13 +4572,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               `Досрочное погашение договора ${String(cRow.contract_number)}`,
               now.slice(0, 10),
               req.user!.id,
+              req.user!.id,
               now
             );
 
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ?').run(
-              finalPayoff,
-              accId
-            );
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+            ).run(finalPayoff, accId, req.user!.id);
           }
 
           let remainingToAllocate = finalPayoff;
@@ -4370,8 +4622,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           db.prepare(`
             UPDATE contracts
             SET status = 'completed', closing_discount_kopecks = ?, closed_at = ?
-            WHERE id = ?
-          `).run(discountKopecks, now, contractId);
+            WHERE id = ? AND owner_user_id = ?
+          `).run(discountKopecks, now, contractId, req.user!.id);
 
           recordAudit(db, {
             actorUserId: req.user!.id,
@@ -4384,8 +4636,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
         res.json({ ok: true });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка досрочного погашения.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка досрочного погашения.' });
       }
     }
   );
@@ -4409,9 +4662,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
-        const cRow = db.prepare('SELECT * FROM contracts WHERE id = ?').get(contractId) as
-          | Record<string, unknown>
-          | undefined;
+        const cRow = db
+          .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+          .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
         if (!cRow) {
           res.status(404).json({ error: 'Договор не найден.' });
           return;
@@ -4419,19 +4672,23 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
         const refund = Number(refundToClientKopecks || 0);
         assertKopecks(refund, 'Сумма возврата клиенту', true);
-        const accId = accountId || 'acc_cash_main';
+        const accId = resolveTenantAccountId(db, req.user!.id, accountId, 'cash');
         const now = new Date().toISOString();
 
         withTransaction(db, () => {
-          db.prepare(`UPDATE contracts SET status = 'returned', closed_at = ?, notes = ? WHERE id = ?`).run(
+          db.prepare(
+            `UPDATE contracts SET status = 'returned', closed_at = ?, notes = ? WHERE id = ? AND owner_user_id = ?`
+          ).run(
             now,
             `${String(cRow.notes || '')} | Возврат: ${reason.trim()}`,
-            contractId
+            contractId,
+            req.user!.id
           );
 
           if (cRow.purchase_id) {
-            db.prepare(`UPDATE purchases SET handover_status = 'returned' WHERE id = ?`).run(
-              String(cRow.purchase_id)
+            db.prepare(`UPDATE purchases SET handover_status = 'returned' WHERE id = ? AND owner_user_id = ?`).run(
+              String(cRow.purchase_id),
+              req.user!.id
             );
           }
 
@@ -4440,8 +4697,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, NULL, 'client_refund', 'Возврат средств клиенту при расторжении', 'out', ?, 'contract', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, NULL, 'client_refund', 'Возврат средств клиенту при расторжении', 'out', ?, 'contract', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               `led_ref_${crypto.randomUUID().slice(0, 8)}`,
               `idem_refund_${contractId}_${Date.now()}`,
@@ -4451,13 +4708,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               `Возврат клиенту при расторжении договора ${String(cRow.contract_number)}: ${reason.trim()}`,
               now.slice(0, 10),
               req.user!.id,
+              req.user!.id,
               now
             );
 
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ?').run(
-              refund,
-              accId
-            );
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ? AND owner_user_id = ?'
+            ).run(refund, accId, req.user!.id);
           }
 
           recordAudit(db, {
@@ -4471,13 +4728,50 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
         res.json({ ok: true });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка оформления возврата.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка оформления возврата.' });
       }
     }
   );
 
   // ==================== 6. PAYMENTS & MANUAL ALLOCATION ====================
+
+  router.get(
+    '/payments/:id',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      const paymentId = req.params.id;
+      const row = db
+        .prepare('SELECT * FROM payments WHERE id = ? AND owner_user_id = ?')
+        .get(paymentId, req.user!.id) as Record<string, unknown> | undefined;
+
+      if (!row) {
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'IDOR_ATTEMPT_BLOCKED',
+          entityType: 'payment',
+          entityId: paymentId,
+          summary: `Предотвращена попытка доступа к платежу ${paymentId} другого аккаунта.`,
+        });
+        res.status(404).json({ error: 'Платёж не найден.' });
+        return;
+      }
+
+      res.json({
+        id: String(row.id),
+        clientId: String(row.client_id),
+        contractId: row.contract_id ? String(row.contract_id) : null,
+        accountId: String(row.account_id),
+        amountKopecks: Number(row.amount_kopecks),
+        allocatedKopecks: Number(row.allocated_kopecks),
+        unallocatedKopecks: Number(row.unallocated_kopecks),
+        status: String(row.status),
+        eventDate: String(row.event_date),
+      });
+    }
+  );
 
   router.post(
     '/payments',
@@ -4516,10 +4810,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
-        // Check idempotency key to prevent duplicate payment registration
+        // Check idempotency key to prevent duplicate payment registration within THIS user's isolated account
         const existingPay = db
-          .prepare('SELECT id, amount_kopecks, allocated_kopecks, unallocated_kopecks FROM payments WHERE idempotency_key = ?')
-          .get(idempotencyKey.trim()) as Record<string, unknown> | undefined;
+          .prepare(
+            'SELECT id, amount_kopecks, allocated_kopecks, unallocated_kopecks FROM payments WHERE idempotency_key = ? AND owner_user_id = ?'
+          )
+          .get(idempotencyKey.trim(), req.user!.id) as Record<string, unknown> | undefined;
 
         if (existingPay) {
           res.status(200).json({
@@ -4535,6 +4831,48 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
+        const clRow = db
+          .prepare('SELECT id FROM clients WHERE id = ? AND owner_user_id = ?')
+          .get(clientId, req.user!.id) as { id: string } | undefined;
+        if (!clRow) {
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'IDOR_ATTEMPT_BLOCKED',
+            entityType: 'client',
+            entityId: clientId,
+            summary: `Попытка регистрации платежа на чужого/несуществующего клиента ${clientId}.`,
+          });
+          res.status(404).json({ error: 'Выбранный клиент не найден.' });
+          return;
+        }
+
+        if (contractId) {
+          const cntCheck = db
+            .prepare('SELECT id FROM contracts WHERE id = ? AND owner_user_id = ?')
+            .get(contractId, req.user!.id) as { id: string } | undefined;
+          if (!cntCheck) {
+            recordAudit(db, {
+              actorUserId: req.user!.id,
+              actorEmail: req.user!.phone || req.user!.email,
+              action: 'IDOR_ATTEMPT_BLOCKED',
+              entityType: 'contract',
+              entityId: contractId,
+              summary: `Попытка регистрации платежа на чужой/несуществующий договор ${contractId}.`,
+            });
+            res.status(404).json({ error: 'Выбранный договор не найден.' });
+            return;
+          }
+        }
+
+        const method = paymentMethod || 'bank_transfer';
+        const resolvedAccountId = resolveTenantAccountId(
+          db,
+          req.user!.id,
+          accountId,
+          method === 'cash' ? 'cash' : 'bank'
+        );
+
         const amount = Number(amountKopecks || 0);
         assertKopecks(amount, 'Сумма поступления', false);
 
@@ -4548,8 +4886,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         // Automatic allocation across schedule if requested and contractId is specified
         if (autoAllocate && contractId && requestedAllocs.length === 0) {
           const cRow = db
-            .prepare('SELECT current_schedule_version FROM contracts WHERE id = ?')
-            .get(contractId) as { current_schedule_version: number } | undefined;
+            .prepare('SELECT current_schedule_version FROM contracts WHERE id = ? AND owner_user_id = ?')
+            .get(contractId, req.user!.id) as { current_schedule_version: number } | undefined;
           if (cRow) {
             const curVer = Number(cRow.current_schedule_version);
             const unpaidItems = db
@@ -4590,27 +4928,27 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const payId = `pay_${crypto.randomUUID().slice(0, 8)}`;
         const now = new Date().toISOString();
         const evDate = eventDate || now.slice(0, 10);
-        const method = paymentMethod || 'bank_transfer';
 
         withTransaction(db, () => {
           db.prepare(`
             INSERT INTO payments (
               id, idempotency_key, client_id, contract_id, account_id, payment_method,
               amount_kopecks, allocated_kopecks, unallocated_kopecks, is_down_payment,
-              status, event_date, notes, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'confirmed', ?, ?, ?, ?)
+              status, event_date, notes, created_by, owner_user_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'confirmed', ?, ?, ?, ?, ?)
           `).run(
             payId,
             idempotencyKey.trim(),
             clientId,
             contractId || null,
-            accountId,
+            resolvedAccountId,
             method,
             amount,
             totalRequestedAlloc,
             amount - totalRequestedAlloc,
             evDate,
             (notes || '').trim(),
+            req.user!.id,
             req.user!.id,
             now
           );
@@ -4619,24 +4957,24 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             INSERT INTO ledger_entries (
               id, idempotency_key, account_id, related_account_id, entry_type, category,
               direction, amount_kopecks, reference_type, reference_id, description,
-              event_date, status, created_by, created_at
-            ) VALUES (?, ?, ?, NULL, 'client_payment', 'Поступление от клиента', 'in', ?, 'payment', ?, ?, ?, 'confirmed', ?, ?)
+              event_date, status, created_by, owner_user_id, created_at
+            ) VALUES (?, ?, ?, NULL, 'client_payment', 'Поступление от клиента', 'in', ?, 'payment', ?, ?, ?, 'confirmed', ?, ?, ?)
           `).run(
             `led_${crypto.randomUUID().slice(0, 8)}`,
             `idem_led_${idempotencyKey.trim()}`,
-            accountId,
+            resolvedAccountId,
             amount,
             payId,
             notes ? notes.trim() : 'Поступление от клиента по рассрочке',
             evDate,
             req.user!.id,
+            req.user!.id,
             now
           );
 
-          db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ?').run(
-            amount,
-            accountId
-          );
+          db.prepare(
+            'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+          ).run(amount, resolvedAccountId, req.user!.id);
 
           // Apply manual allocations if selected by user
           for (const alloc of requestedAllocs) {
@@ -4644,11 +4982,19 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             assertKopecks(allocAmt, 'Сумма распределения по строке', false);
 
             const itemRow = db
-              .prepare('SELECT * FROM schedule_items WHERE id = ?')
-              .get(alloc.scheduleItemId) as Record<string, unknown> | undefined;
+              .prepare(
+                `SELECT si.* FROM schedule_items si
+                 JOIN contracts c ON c.id = si.contract_id
+                 WHERE si.id = ? AND c.owner_user_id = ?`
+              )
+              .get(alloc.scheduleItemId, req.user!.id) as Record<string, unknown> | undefined;
 
             if (!itemRow) {
-              throw new Error(`Строка графика ${alloc.scheduleItemId} не найдена.`);
+              const notFoundErr = new Error(`Строка графика ${alloc.scheduleItemId} не найдена.`) as Error & {
+                statusCode?: number;
+              };
+              notFoundErr.statusCode = 404;
+              throw notFoundErr;
             }
 
             const remainingOnItem = Number(itemRow.planned_kopecks) - Number(itemRow.paid_kopecks);
@@ -4694,8 +5040,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
         res.status(201).json({ id: payId });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка регистрации платежа.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка регистрации платежа.' });
       }
     }
   );
@@ -4715,12 +5062,22 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           autoAllocationStrategy?: AutoAllocationStrategy;
         };
 
-        const payRow = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId) as
-          | Record<string, unknown>
-          | undefined;
+        const payRow = db
+          .prepare('SELECT * FROM payments WHERE id = ? AND owner_user_id = ?')
+          .get(paymentId, req.user!.id) as Record<string, unknown> | undefined;
         if (!payRow || payRow.status !== 'confirmed') {
           res.status(404).json({ error: 'Подтверждённый платёж не найден.' });
           return;
+        }
+
+        if (contractId) {
+          const cntCheck = db
+            .prepare('SELECT id FROM contracts WHERE id = ? AND owner_user_id = ?')
+            .get(contractId, req.user!.id) as { id: string } | undefined;
+          if (!cntCheck) {
+            res.status(404).json({ error: 'Выбранный договор не найден.' });
+            return;
+          }
         }
 
         const effectiveContractId = contractId || (payRow.contract_id ? String(payRow.contract_id) : undefined);
@@ -4733,8 +5090,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
         if (autoAllocate && effectiveContractId && requestedAllocs.length === 0) {
           const cRow = db
-            .prepare('SELECT current_schedule_version FROM contracts WHERE id = ?')
-            .get(effectiveContractId) as { current_schedule_version: number } | undefined;
+            .prepare('SELECT current_schedule_version FROM contracts WHERE id = ? AND owner_user_id = ?')
+            .get(effectiveContractId, req.user!.id) as { current_schedule_version: number } | undefined;
           if (cRow) {
             const curVer = Number(cRow.current_schedule_version);
             const unpaidItems = db
@@ -4786,10 +5143,18 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             assertKopecks(allocAmt, 'Сумма распределения', false);
 
             const itemRow = db
-              .prepare('SELECT * FROM schedule_items WHERE id = ?')
-              .get(alloc.scheduleItemId) as Record<string, unknown> | undefined;
+              .prepare(
+                `SELECT si.* FROM schedule_items si
+                 JOIN contracts c ON c.id = si.contract_id
+                 WHERE si.id = ? AND c.owner_user_id = ?`
+              )
+              .get(alloc.scheduleItemId, req.user!.id) as Record<string, unknown> | undefined;
             if (!itemRow) {
-              throw new Error('Выбранный платёж графика не найден.');
+              const notFoundErr = new Error('Выбранный платёж графика не найден.') as Error & {
+                statusCode?: number;
+              };
+              notFoundErr.statusCode = 404;
+              throw notFoundErr;
             }
 
             const remainingOnItem = Number(itemRow.planned_kopecks) - Number(itemRow.paid_kopecks);
@@ -4832,8 +5197,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             SET allocated_kopecks = ?,
                 unallocated_kopecks = ?,
                 contract_id = COALESCE(contract_id, ?)
-            WHERE id = ?
-          `).run(nextAllocated, nextUnallocated, contractId || null, paymentId);
+            WHERE id = ? AND owner_user_id = ?
+          `).run(nextAllocated, nextUnallocated, contractId || null, paymentId, req.user!.id);
 
           recordAudit(db, {
             actorUserId: req.user!.id,
@@ -4846,8 +5211,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
         res.json({ ok: true });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка распределения платежа.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка распределения платежа.' });
       }
     }
   );
@@ -4866,11 +5232,11 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
-        const payRow = db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId) as
-          | Record<string, unknown>
-          | undefined;
+        const payRow = db
+          .prepare('SELECT * FROM payments WHERE id = ? AND owner_user_id = ?')
+          .get(paymentId, req.user!.id) as Record<string, unknown> | undefined;
         if (!payRow || payRow.status !== 'confirmed') {
-          res.status(400).json({ error: 'Платёж не найден или уже был сторнирован.' });
+          res.status(404).json({ error: 'Платёж не найден или уже был сторнирован.' });
           return;
         }
         if (payRow.is_down_payment) {
@@ -4899,8 +5265,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                 revertedStatus,
                 String(alloc.schedule_item_id)
               );
-              db.prepare("UPDATE contracts SET status = 'active', closed_at = NULL WHERE id = ?").run(
-                String(alloc.contract_id)
+              db.prepare("UPDATE contracts SET status = 'active', closed_at = NULL WHERE id = ? AND owner_user_id = ?").run(
+                String(alloc.contract_id),
+                req.user!.id
               );
             }
             db.prepare("UPDATE payment_allocations SET status = 'reversed' WHERE id = ?").run(
@@ -4911,25 +5278,25 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           db.prepare(`
             UPDATE payments
             SET status = 'reversed', reversal_reason = ?, reversed_by = ?
-            WHERE id = ?
-          `).run(reason.trim(), req.user!.id, paymentId);
+            WHERE id = ? AND owner_user_id = ?
+          `).run(reason.trim(), req.user!.id, paymentId, req.user!.id);
 
           // Mark original ledger entry reversed and record audit
           const origLedger = db
-            .prepare("SELECT * FROM ledger_entries WHERE reference_type = 'payment' AND reference_id = ?")
-            .get(paymentId) as Record<string, unknown> | undefined;
+            .prepare(
+              "SELECT * FROM ledger_entries WHERE reference_type = 'payment' AND reference_id = ? AND owner_user_id = ?"
+            )
+            .get(paymentId, req.user!.id) as Record<string, unknown> | undefined;
 
           if (origLedger) {
-            db.prepare("UPDATE ledger_entries SET status = 'reversed', reversal_reason = ? WHERE id = ?").run(
-              reason.trim(),
-              String(origLedger.id)
-            );
+            db.prepare(
+              "UPDATE ledger_entries SET status = 'reversed', reversal_reason = ? WHERE id = ? AND owner_user_id = ?"
+            ).run(reason.trim(), String(origLedger.id), req.user!.id);
           }
 
-          db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ?').run(
-            Number(payRow.amount_kopecks),
-            String(payRow.account_id)
-          );
+          db.prepare(
+            'UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ? AND owner_user_id = ?'
+          ).run(Number(payRow.amount_kopecks), String(payRow.account_id), req.user!.id);
 
           recordAudit(db, {
             actorUserId: req.user!.id,
@@ -4967,6 +5334,20 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
       if (!contractId || !scheduleItemId || !summary || !summary.trim()) {
         res.status(400).json({ error: 'Укажите комментарий по результату связи с клиентом.' });
+        return;
+      }
+
+      const validItem = db
+        .prepare(
+          `SELECT si.id
+           FROM schedule_items si
+           JOIN contracts c ON c.id = si.contract_id
+           WHERE si.id = ? AND c.id = ? AND c.owner_user_id = ?`
+        )
+        .get(scheduleItemId, contractId, req.user!.id) as { id: string } | undefined;
+
+      if (!validItem) {
+        res.status(404).json({ error: 'Строка графика или договор не найдены.' });
         return;
       }
 
@@ -5017,6 +5398,73 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
   // ==================== 8. CASH, BANK & LEDGER OPERATIONS ====================
 
+  router.get(
+    '/finance/accounts/:id',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      const accountId = req.params.id;
+      const row = db
+        .prepare('SELECT * FROM financial_accounts WHERE id = ? AND owner_user_id = ?')
+        .get(accountId, req.user!.id) as Record<string, unknown> | undefined;
+
+      if (!row) {
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'IDOR_ATTEMPT_BLOCKED',
+          entityType: 'financial_account',
+          entityId: accountId,
+          summary: `Предотвращена попытка доступа к счёту/кассе ${accountId} другого аккаунта.`,
+        });
+        res.status(404).json({ error: 'Финансовый счёт или касса не найдены.' });
+        return;
+      }
+
+      res.json({
+        id: String(row.id),
+        name: String(row.name),
+        accountType: String(row.account_type),
+        balanceKopecks: Number(row.balance_kopecks),
+      });
+    }
+  );
+
+  router.get(
+    '/finance/ledger/:id',
+    requireAuth,
+    (req: AuthenticatedRequest, res: Response) => {
+      const ledgerId = req.params.id;
+      const row = db
+        .prepare('SELECT * FROM ledger_entries WHERE id = ? AND owner_user_id = ?')
+        .get(ledgerId, req.user!.id) as Record<string, unknown> | undefined;
+
+      if (!row) {
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'IDOR_ATTEMPT_BLOCKED',
+          entityType: 'ledger',
+          entityId: ledgerId,
+          summary: `Предотвращена попытка доступа к финансовой проводке ${ledgerId} другого аккаунта.`,
+        });
+        res.status(404).json({ error: 'Финансовая операция не найдена.' });
+        return;
+      }
+
+      res.json({
+        id: String(row.id),
+        accountId: String(row.account_id),
+        entryType: String(row.entry_type),
+        category: String(row.category),
+        direction: String(row.direction),
+        amountKopecks: Number(row.amount_kopecks),
+        description: String(row.description),
+        eventDate: String(row.event_date),
+        status: String(row.status),
+      });
+    }
+  );
+
   router.post(
     '/finance/ledger',
     requireAuth,
@@ -5052,6 +5500,20 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
+        const resolvedAccountId = resolveTenantAccountId(db, req.user!.id, accountId, 'cash');
+        let resolvedTargetAccountId = '';
+        if (entryType === 'internal_transfer') {
+          if (!targetAccountId) {
+            res.status(400).json({ error: 'Для внутреннего перевода выберите другой счёт зачисления.' });
+            return;
+          }
+          resolvedTargetAccountId = resolveTenantAccountId(db, req.user!.id, targetAccountId, 'bank');
+          if (resolvedTargetAccountId === resolvedAccountId) {
+            res.status(400).json({ error: 'Для внутреннего перевода выберите другой счёт зачисления.' });
+            return;
+          }
+        }
+
         if ((entryType === 'owner_injection' || entryType === 'owner_withdrawal') && req.user!.role !== 'owner') {
           res.status(403).json({
             error: 'Собственные пополнения и личные изъятия может проводить только владелец бизнеса.',
@@ -5067,9 +5529,6 @@ export function createApiRouter(db: DatabaseSync): express.Router {
 
         withTransaction(db, () => {
           if (entryType === 'internal_transfer') {
-            if (!targetAccountId || targetAccountId === accountId) {
-              throw new Error('Для внутреннего перевода выберите другой счёт зачисления.');
-            }
             const outId = `led_${crypto.randomUUID().slice(0, 8)}`;
             const inId = `led_${crypto.randomUUID().slice(0, 8)}`;
 
@@ -5077,17 +5536,18 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, ?, 'internal_transfer_out', 'Внутренний перевод между счетами', 'out', ?, 'transfer', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, ?, 'internal_transfer_out', 'Внутренний перевод между счетами', 'out', ?, 'transfer', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               outId,
               `${idem}_out`,
-              accountId,
-              targetAccountId,
+              resolvedAccountId,
+              resolvedTargetAccountId,
               amount,
               inId,
               description.trim(),
               evDate,
+              req.user!.id,
               req.user!.id,
               now
             );
@@ -5096,29 +5556,28 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, ?, 'internal_transfer_in', 'Внутренний перевод между счетами', 'in', ?, 'transfer', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, ?, 'internal_transfer_in', 'Внутренний перевод между счетами', 'in', ?, 'transfer', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               inId,
               `${idem}_in`,
-              targetAccountId,
-              accountId,
+              resolvedTargetAccountId,
+              resolvedAccountId,
               amount,
               outId,
               description.trim(),
               evDate,
               req.user!.id,
+              req.user!.id,
               now
             );
 
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ?').run(
-              amount,
-              accountId
-            );
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ?').run(
-              amount,
-              targetAccountId
-            );
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks - ? WHERE id = ? AND owner_user_id = ?'
+            ).run(amount, resolvedAccountId, req.user!.id);
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+            ).run(amount, resolvedTargetAccountId, req.user!.id);
           } else {
             const direction = entryType === 'owner_injection' ? 'in' : 'out';
             const signedDelta = direction === 'in' ? amount : -amount;
@@ -5128,12 +5587,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               INSERT INTO ledger_entries (
                 id, idempotency_key, account_id, related_account_id, entry_type, category,
                 direction, amount_kopecks, reference_type, reference_id, description,
-                event_date, status, created_by, created_at
-              ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'manual', ?, ?, ?, 'confirmed', ?, ?)
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'manual', ?, ?, ?, 'confirmed', ?, ?, ?)
             `).run(
               ledId,
               idem,
-              accountId,
+              resolvedAccountId,
               entryType,
               (category || 'Операционная деятельность').trim(),
               direction,
@@ -5142,13 +5601,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               description.trim(),
               evDate,
               req.user!.id,
+              req.user!.id,
               now
             );
 
-            db.prepare('UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ?').run(
-              signedDelta,
-              accountId
-            );
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+            ).run(signedDelta, resolvedAccountId, req.user!.id);
           }
 
           recordAudit(db, {
@@ -5162,8 +5621,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
 
         res.status(201).json({ ok: true });
-      } catch (err) {
-        res.status(400).json({ error: err instanceof Error ? err.message : 'Ошибка проведения операции.' });
+      } catch (err: any) {
+        const status = err?.statusCode === 404 ? 404 : 400;
+        res.status(status).json({ error: err instanceof Error ? err.message : 'Ошибка проведения операции.' });
       }
     }
   );
@@ -5206,6 +5666,95 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         return;
       }
 
+      let resolvedClientId: string | null = explicitClientId || null;
+      let resolvedContractId: string | null = explicitContractId || null;
+
+      // Verify ownership of the target entity and any linked client/contract/guarantor IDs
+      if (entityType === 'contract' || entityType === 'return') {
+        const cRow = db
+          .prepare('SELECT id, client_id FROM contracts WHERE id = ? AND owner_user_id = ?')
+          .get(entityId, req.user!.id) as { id: string; client_id: string } | undefined;
+        if (!cRow) {
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'IDOR_ATTEMPT_BLOCKED',
+            entityType: 'contract',
+            entityId,
+            summary: `Предотвращена попытка загрузки документа к чужому договору ${entityId}.`,
+          });
+          res.status(404).json({ error: 'Связанный договор не найден.' });
+          return;
+        }
+        resolvedContractId = entityId;
+        if (!resolvedClientId) {
+          resolvedClientId = cRow.client_id;
+        }
+      } else if (entityType === 'client') {
+        const clRow = db
+          .prepare('SELECT id FROM clients WHERE id = ? AND owner_user_id = ?')
+          .get(entityId, req.user!.id) as { id: string } | undefined;
+        if (!clRow) {
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'IDOR_ATTEMPT_BLOCKED',
+            entityType: 'client',
+            entityId,
+            summary: `Предотвращена попытка загрузки документа к чужому клиенту ${entityId}.`,
+          });
+          res.status(404).json({ error: 'Связанный клиент не найден.' });
+          return;
+        }
+        resolvedClientId = entityId;
+      } else if (entityType === 'purchase') {
+        const purRow = db
+          .prepare('SELECT id FROM purchases WHERE id = ? AND owner_user_id = ?')
+          .get(entityId, req.user!.id) as { id: string } | undefined;
+        if (!purRow) {
+          res.status(404).json({ error: 'Связанная закупка не найдена.' });
+          return;
+        }
+      } else if (entityType === 'payment') {
+        const payRow = db
+          .prepare('SELECT id, client_id, contract_id FROM payments WHERE id = ? AND owner_user_id = ?')
+          .get(entityId, req.user!.id) as { id: string; client_id: string; contract_id: string | null } | undefined;
+        if (!payRow) {
+          res.status(404).json({ error: 'Связанный платёж не найден.' });
+          return;
+        }
+        if (!resolvedClientId) resolvedClientId = payRow.client_id;
+        if (!resolvedContractId && payRow.contract_id) resolvedContractId = payRow.contract_id;
+      }
+
+      if (resolvedClientId) {
+        const clCheck = db
+          .prepare('SELECT id FROM clients WHERE id = ? AND owner_user_id = ?')
+          .get(resolvedClientId, req.user!.id);
+        if (!clCheck) {
+          res.status(404).json({ error: 'Указанный клиент не найден.' });
+          return;
+        }
+      }
+      if (resolvedContractId) {
+        const cntCheck = db
+          .prepare('SELECT id FROM contracts WHERE id = ? AND owner_user_id = ?')
+          .get(resolvedContractId, req.user!.id);
+        if (!cntCheck) {
+          res.status(404).json({ error: 'Указанный договор не найден.' });
+          return;
+        }
+      }
+      if (explicitGuarantorClientId) {
+        const gCheck = db
+          .prepare('SELECT id FROM clients WHERE id = ? AND owner_user_id = ?')
+          .get(explicitGuarantorClientId, req.user!.id);
+        if (!gCheck) {
+          res.status(404).json({ error: 'Указанный поручитель не найден.' });
+          return;
+        }
+      }
+
       const buffer = Buffer.from(contentBase64, 'base64');
       const sigCheck = validateUploadedFileSignature(buffer, mimeType || '', originalFilename);
       if (!sigCheck.valid) {
@@ -5219,21 +5768,6 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         });
         res.status(400).json({ error: sigCheck.reason });
         return;
-      }
-
-      let resolvedClientId: string | null = explicitClientId || null;
-      let resolvedContractId: string | null = explicitContractId || null;
-
-      if (entityType === 'contract') {
-        resolvedContractId = entityId;
-        if (!resolvedClientId) {
-          const cRow = db
-            .prepare('SELECT client_id FROM contracts WHERE id = ?')
-            .get(entityId) as { client_id: string } | undefined;
-          if (cRow) resolvedClientId = cRow.client_id;
-        }
-      } else if (entityType === 'client') {
-        resolvedClientId = entityId;
       }
 
       const allowedCategories = new Set([
@@ -5261,8 +5795,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         INSERT INTO documents (
           id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
           stored_filename, mime_type, size_bytes, sha256_hash, content_base64,
-          is_archived, guarantor_client_id, guarantor_doc_type, created_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+          is_archived, guarantor_client_id, guarantor_doc_type, created_by, owner_user_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
       `).run(
         id,
         entityType,
@@ -5279,6 +5813,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         contentBase64,
         explicitGuarantorClientId || null,
         (explicitGuarantorDocType || '').trim(),
+        req.user!.id,
         req.user!.id,
         now
       );
@@ -5327,8 +5862,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         }
 
         const oldDoc = db
-          .prepare('SELECT * FROM documents WHERE id = ?')
-          .get(oldDocId) as Record<string, unknown> | undefined;
+          .prepare('SELECT * FROM documents WHERE id = ? AND owner_user_id = ?')
+          .get(oldDocId, req.user!.id) as Record<string, unknown> | undefined;
 
         if (!oldDoc) {
           res.status(404).json({ error: 'Заменяемый документ не найден.' });
@@ -5353,8 +5888,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             INSERT INTO documents (
               id, entity_type, entity_id, client_id, contract_id, doc_category, title, original_filename,
               stored_filename, mime_type, size_bytes, sha256_hash, content_base64,
-              previous_document_id, replaced_by_id, is_archived, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
+              previous_document_id, replaced_by_id, is_archived, created_by, owner_user_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?)
           `).run(
             newId,
             String(oldDoc.entity_type),
@@ -5371,14 +5906,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             contentBase64,
             oldDocId,
             req.user!.id,
+            req.user!.id,
             now
           );
 
           db.prepare(`
             UPDATE documents
             SET replaced_by_id = ?, is_archived = 1
-            WHERE id = ?
-          `).run(newId, oldDocId);
+            WHERE id = ? AND owner_user_id = ?
+          `).run(newId, oldDocId, req.user!.id);
 
           recordAudit(db, {
             actorUserId: req.user!.id,
@@ -5415,9 +5951,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const docId = req.params.id;
         const row = db
           .prepare(
-            'SELECT id, title, original_filename, stored_filename, mime_type, size_bytes, sha256_hash, content_base64 FROM documents WHERE id = ?'
+            'SELECT id, title, original_filename, stored_filename, mime_type, size_bytes, sha256_hash, content_base64 FROM documents WHERE id = ? AND owner_user_id = ?'
           )
-          .get(docId) as
+          .get(docId, req.user!.id) as
           | {
               id: string;
               title: string;
@@ -5431,6 +5967,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           | undefined;
 
         if (!row) {
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'IDOR_ATTEMPT_BLOCKED',
+            entityType: 'document',
+            entityId: docId,
+            summary: `Предотвращена попытка предпросмотра чужого документа ${docId}.`,
+          });
           res.status(404).json({ error: 'Документ не найден.' });
           return;
         }
@@ -5468,9 +6012,9 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         const docId = req.params.id;
         const row = db
           .prepare(
-            'SELECT id, title, original_filename, stored_filename, mime_type, size_bytes, sha256_hash, content_base64 FROM documents WHERE id = ?'
+            'SELECT id, title, original_filename, stored_filename, mime_type, size_bytes, sha256_hash, content_base64 FROM documents WHERE id = ? AND owner_user_id = ?'
           )
-          .get(docId) as
+          .get(docId, req.user!.id) as
           | {
               id: string;
               title: string;
@@ -5484,6 +6028,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           | undefined;
 
         if (!row) {
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'IDOR_ATTEMPT_BLOCKED',
+            entityType: 'document',
+            entityId: docId,
+            summary: `Предотвращена попытка скачивания чужого документа ${docId}.`,
+          });
           res.status(404).json({ error: 'Документ не найден.' });
           return;
         }
@@ -5531,8 +6083,10 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     (req: AuthenticatedRequest, res: Response) => {
       const docId = req.params.id;
       const row = db
-        .prepare('SELECT id, title, original_filename, stored_filename, entity_type, entity_id FROM documents WHERE id = ?')
-        .get(docId) as
+        .prepare(
+          'SELECT id, title, original_filename, stored_filename, entity_type, entity_id FROM documents WHERE id = ? AND owner_user_id = ?'
+        )
+        .get(docId, req.user!.id) as
         | {
             id: string;
             title: string;
@@ -5549,7 +6103,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       }
 
       withTransaction(db, () => {
-        db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+        db.prepare('DELETE FROM documents WHERE id = ? AND owner_user_id = ?').run(docId, req.user!.id);
         recordAudit(db, {
           actorUserId: req.user!.id,
           actorEmail: req.user!.phone || req.user!.email,
@@ -5575,11 +6129,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         SELECT l.event_date, l.entry_type, l.direction, l.amount_kopecks, l.category, l.description, fa.name as account_name
         FROM ledger_entries l
         JOIN financial_accounts fa ON fa.id = l.account_id
-        WHERE l.status = 'confirmed' AND l.event_date >= ? AND l.event_date <= ?
+        WHERE l.status = 'confirmed'
+          AND l.owner_user_id = ?
+          AND fa.owner_user_id = ?
+          AND l.event_date >= ?
+          AND l.event_date <= ?
         ORDER BY l.event_date DESC, l.created_at DESC
       `
       )
-      .all(from, to) as Array<Record<string, unknown>>;
+      .all(req.user!.id, req.user!.id, from, to) as Array<Record<string, unknown>>;
 
     const csvLines = [
       toSafeCsvRow(['Дата', 'Счёт / Касса', 'Тип операции', 'Направление', 'Категория', 'Сумма (₽)', 'Описание']),
@@ -5752,13 +6310,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           nowIso
         );
 
+        ensureUserWorkspaceInitialized(db, userId);
+
         recordAudit(db, {
           actorUserId: req.user!.id,
           actorEmail: req.user!.phone,
           action: 'ADMIN_USER_CREATED',
           entityType: 'user',
           entityId: userId,
-          summary: `Администратор создал учётную запись ${normalizedPhone} (роль: ${assignedRole}, статус: ${assignedStatus}).`,
+          summary: `Администратор создал учётную запись ${normalizedPhone} (роль: ${assignedRole}, статус: ${assignedStatus}) с изолированным рабочим пространством данных.`,
         });
       });
 

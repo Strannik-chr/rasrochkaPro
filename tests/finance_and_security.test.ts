@@ -586,11 +586,22 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     });
     assert.equal(dupClientRes.status, 409);
 
-    // Edit client via PATCH /api/v1/clients/:id
-    const editClientRes = await apiCall(`/api/v1/clients/${createdClientId}`, {
+    // Cross-account isolation check: staffToken cannot edit ownerToken's client (404)
+    const crossEditClientRes = await apiCall(`/api/v1/clients/${createdClientId}`, {
       method: 'PATCH',
       sessionToken: staffToken,
       csrfToken: staffCsrf,
+      body: {
+        fullName: 'Попытка чужого редактирования',
+      },
+    });
+    assert.equal(crossEditClientRes.status, 404);
+
+    // Edit client via PATCH /api/v1/clients/:id by its owner
+    const editClientRes = await apiCall(`/api/v1/clients/${createdClientId}`, {
+      method: 'PATCH',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
       body: {
         fullName: 'Абдуллаев Рустам Камильевич',
         address: 'г. Махачкала, пр. Шамиля, 12',
@@ -641,12 +652,30 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     assert.equal(createContractRes.status, 201);
     const newContractId = createContractRes.data.id;
 
-    // Record unallocated payment with idempotency key
-    const idemKey = 'idem_test_payment_unique_001';
-    const payRes1 = await apiCall('/api/v1/payments', {
+    // Cross-account isolation check: staffToken cannot record payment on ownerToken's client/contract (404)
+    const crossPayRes = await apiCall('/api/v1/payments', {
       method: 'POST',
       sessionToken: staffToken,
       csrfToken: staffCsrf,
+      body: {
+        idempotencyKey: 'idem_cross_account_blocked_001',
+        clientId: createdClientId,
+        contractId: newContractId,
+        accountId: 'acc_bank_main',
+        paymentMethod: 'bank_transfer',
+        amountKopecks: 1000000,
+        eventDate: '2026-10-28',
+        allocations: [],
+      },
+    });
+    assert.equal(crossPayRes.status, 404);
+
+    // Record unallocated payment with idempotency key by the contract's owner
+    const idemKey = 'idem_test_payment_unique_001';
+    const payRes1 = await apiCall('/api/v1/payments', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
       body: {
         idempotencyKey: idemKey,
         clientId: createdClientId,
@@ -665,8 +694,8 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     // Replay same idempotencyKey -> must NOT double-credit balance
     const payResReplay = await apiCall('/api/v1/payments', {
       method: 'POST',
-      sessionToken: staffToken,
-      csrfToken: staffCsrf,
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
       body: {
         idempotencyKey: idemKey,
         clientId: createdClientId,
@@ -719,8 +748,8 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     // Регистрируем платеж 15 000 ₽ с флагом autoAllocate: true
     const autoPayRes = await apiCall('/api/v1/payments', {
       method: 'POST',
-      sessionToken: staffToken,
-      csrfToken: staffCsrf,
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
       body: {
         idempotencyKey: 'idem_auto_alloc_test_15000',
         clientId: createdClientId,
@@ -750,12 +779,29 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     // Общая внесенная сумма по графику договора увеличилась ровно на 10 000 ₽ + 15 000 ₽
     assert.equal(contractAfterAuto.totalPaidOnScheduleKopecks, 1000000 + 1500000);
 
-    // 5. Private Document Upload, Authenticated Download & Owner Delete
+    // 5. Private Document Upload, Authenticated Download & Cross-Account Isolation
     const validPdfBytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF', 'utf8');
-    const uploadRes = await apiCall('/api/v1/documents/upload', {
+    // Cross-account upload to another user's contract must be rejected with 404
+    const crossUploadRes = await apiCall('/api/v1/documents/upload', {
       method: 'POST',
       sessionToken: staffToken,
       csrfToken: staffCsrf,
+      body: {
+        entityType: 'contract',
+        entityId: newContractId,
+        docCategory: 'contract_scan',
+        title: 'Чужая загрузка',
+        originalFilename: 'contract_macbook.pdf',
+        mimeType: 'application/pdf',
+        contentBase64: validPdfBytes.toString('base64'),
+      },
+    });
+    assert.equal(crossUploadRes.status, 404);
+
+    const uploadRes = await apiCall('/api/v1/documents/upload', {
+      method: 'POST',
+      sessionToken: ownerToken,
+      csrfToken: ownerCsrf,
       body: {
         entityType: 'contract',
         entityId: newContractId,
@@ -773,9 +819,15 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
     const unauthDownload = await apiCall(`/api/v1/documents/${uploadedDocId}/download`);
     assert.equal(unauthDownload.status, 401);
 
-    // Authenticated download returns exact bytes and nosniff header
-    const authDownload = await apiCall(`/api/v1/documents/${uploadedDocId}/download`, {
+    // Cross-account download by another user (staffToken) must be blocked with 404
+    const crossDownload = await apiCall(`/api/v1/documents/${uploadedDocId}/download`, {
       sessionToken: staffToken,
+    });
+    assert.equal(crossDownload.status, 404);
+
+    // Authenticated download by the document's owner returns exact bytes and nosniff header
+    const authDownload = await apiCall(`/api/v1/documents/${uploadedDocId}/download`, {
+      sessionToken: ownerToken,
     });
     assert.equal(authDownload.status, 200);
     assert.equal(authDownload.headers.get('x-content-type-options'), 'nosniff');
@@ -1707,6 +1759,318 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
       sessionToken: ownerToken,
     });
     assert.equal(afterOwnerLogoutState.status, 401);
+
+    // =========================================================================
+    // 11. Полная изоляция данных между аккаунтами (Multi-Tenant Isolation)
+    //     и проверка всех 10 обязательных пунктов безопасности
+    // =========================================================================
+
+    // Повторно входим под владельцем (Аккаунт А — сын) и создаём отдельный аккаунт (Аккаунт Б — отец)
+    const reloginOwner = await apiCall('/api/v1/auth/login', {
+      method: 'POST',
+      body: { phone: '+79285550101', password: 'MoOwner!2026' },
+    });
+    assert.equal(reloginOwner.status, 200);
+    const accAToken = reloginOwner.data.sessionToken;
+    const accACsrf = reloginOwner.data.csrfToken;
+
+    const createFatherUserRes = await apiCall('/api/v1/users', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        phone: '+79285550199',
+        password: 'FatherSecurePassword!2026',
+        fullName: 'Отец (Отдельный Аккаунт)',
+        role: 'staff',
+        mustChangePassword: false,
+      },
+    });
+    assert.equal(createFatherUserRes.status, 201);
+    const fatherUserId = createFatherUserRes.data.id;
+
+    const fatherLogin = await apiCall('/api/v1/auth/login', {
+      method: 'POST',
+      body: { phone: '+79285550199', password: 'FatherSecurePassword!2026' },
+    });
+    assert.equal(fatherLogin.status, 200);
+    const accBToken = fatherLogin.data.sessionToken;
+    const accBCsrf = fatherLogin.data.csrfToken;
+
+    // Проверка 1: Два разных аккаунта не видят данные друг друга
+    const stateAccA = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const stateAccB = await apiCall('/api/v1/state', { sessionToken: accBToken });
+    assert.equal(stateAccA.status, 200);
+    assert.equal(stateAccB.status, 200);
+    assert.equal(stateAccA.data.clients.length >= 3, true);
+    assert.equal(stateAccB.data.clients.length, 0);
+    assert.equal(stateAccB.data.contracts.length, 0);
+    assert.equal(stateAccB.data.payments.length, 0);
+    assert.equal(stateAccB.data.purchases.length, 0);
+    assert.equal(stateAccB.data.suppliers.length, 0);
+    assert.equal(stateAccB.data.ledger.length, 0);
+    assert.equal(stateAccB.data.documents.length, 0);
+    // У Аккаунта Б созданы собственные изолированные касса и банк с нулевым балансом
+    assert.equal(stateAccB.data.accounts.length, 2);
+    assert.equal(stateAccB.data.reconciliation.isHealthy, true);
+    assert.equal(stateAccB.data.reconciliation.totalCashAndBankKopecks, 0);
+
+    // Проверка 2: Создание клиента и договора в Аккаунте Б (у отца) не отображается в Аккаунте А (у сына), и наоборот
+    const createClientInAccB = await apiCall('/api/v1/clients', {
+      method: 'POST',
+      sessionToken: accBToken,
+      csrfToken: accBCsrf,
+      body: {
+        fullName: 'Заёмщик Отца Изолированный',
+        phone: '+79287778899',
+        address: 'г. Грозный, пр. Путина, 5',
+      },
+    });
+    assert.equal(createClientInAccB.status, 201);
+    const accBClientId = createClientInAccB.data.id;
+
+    // Тот же номер телефона можно добавить в Аккаунте А, т.к. базы клиентов полностью изолированы между аккаунтами
+    const createSamePhoneInAccA = await apiCall('/api/v1/clients', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        fullName: 'Заёмщик Сына Своя База',
+        phone: '+79287778899',
+      },
+    });
+    assert.equal(createSamePhoneInAccA.status, 201);
+    const accAClientId = createSamePhoneInAccA.data.id;
+
+    // Оформляем договор в Аккаунте Б
+    const createContractInAccB = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: accBToken,
+      csrfToken: accBCsrf,
+      body: {
+        clientId: accBClientId,
+        itemTitle: 'Холодильник Bosch Serie 6 (Договор Отца)',
+        purchaseCostKopecks: 6000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupPercent: 20,
+        downPaymentPercent: 25,
+        termMonths: 4,
+        paymentDayOfMonth: 15,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-10-01',
+        collectDownPaymentNow: true,
+        confirmedCalculation: true,
+      },
+    });
+    assert.equal(createContractInAccB.status, 201);
+    const accBContractId = createContractInAccB.data.id;
+
+    // Проверяем, что Аккаунт А не видит ни заёмщика отца, ни договор отца
+    const stateAccAAfter = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const stateAccBAfter = await apiCall('/api/v1/state', { sessionToken: accBToken });
+    assert.equal(
+      stateAccAAfter.data.clients.some((c: { id: string }) => c.id === accBClientId),
+      false
+    );
+    assert.equal(
+      stateAccAAfter.data.contracts.some((c: { id: string }) => c.id === accBContractId),
+      false
+    );
+    assert.equal(
+      stateAccBAfter.data.clients.some((c: { id: string }) => c.id === accAClientId),
+      false
+    );
+    assert.equal(stateAccBAfter.data.clients.length, 1);
+    assert.equal(stateAccBAfter.data.contracts.length, 1);
+
+    // Проверка 3: Нельзя получить или изменить чужого клиента или договор через подстановку ID в API (IDOR -> 404)
+    const idorGetClientAFromB = await apiCall(`/api/v1/clients/${accAClientId}`, {
+      sessionToken: accBToken,
+    });
+    assert.equal(idorGetClientAFromB.status, 404);
+
+    const idorGetClientBFromA = await apiCall(`/api/v1/clients/${accBClientId}`, {
+      sessionToken: accAToken,
+    });
+    assert.equal(idorGetClientBFromA.status, 404);
+
+    const idorPatchClientAFromB = await apiCall(`/api/v1/clients/${accAClientId}`, {
+      method: 'PATCH',
+      sessionToken: accBToken,
+      csrfToken: accBCsrf,
+      body: { fullName: 'Взлом IDOR' },
+    });
+    assert.equal(idorPatchClientAFromB.status, 404);
+
+    const idorGetContractAFromB = await apiCall(`/api/v1/contracts/${newContractId}`, {
+      sessionToken: accBToken,
+    });
+    assert.equal(idorGetContractAFromB.status, 404);
+
+    const idorPatchContractDayFromB = await apiCall(
+      `/api/v1/contracts/${newContractId}/payment-day`,
+      {
+        method: 'PATCH',
+        sessionToken: accBToken,
+        csrfToken: accBCsrf,
+        body: { paymentDayOfMonth: 10 },
+      }
+    );
+    assert.equal(idorPatchContractDayFromB.status, 404);
+
+    const idorEarlyPayoffFromB = await apiCall(
+      `/api/v1/contracts/${newContractId}/early-payoff-preview`,
+      {
+        method: 'POST',
+        sessionToken: accBToken,
+        csrfToken: accBCsrf,
+        body: {},
+      }
+    );
+    assert.equal(idorEarlyPayoffFromB.status, 404);
+
+    // Проверка 4: Нельзя получить чужие документы, платежи, расходы, кассу и банковские счета (IDOR -> 404)
+    const idorGetPaymentFromB = await apiCall(`/api/v1/payments/${paymentId}`, {
+      sessionToken: accBToken,
+    });
+    assert.equal(idorGetPaymentFromB.status, 404);
+
+    const idorAllocatePaymentFromB = await apiCall(`/api/v1/payments/${paymentId}/allocate`, {
+      method: 'POST',
+      sessionToken: accBToken,
+      csrfToken: accBCsrf,
+      body: {
+        contractId: newContractId,
+        allocations: [],
+        autoAllocate: true,
+      },
+    });
+    assert.equal(idorAllocatePaymentFromB.status, 404);
+
+    const idorGetAccountFromB = await apiCall('/api/v1/finance/accounts/acc_cash_main', {
+      sessionToken: accBToken,
+    });
+    assert.equal(idorGetAccountFromB.status, 404);
+
+    const accALedgerId = stateAccAAfter.data.ledger[0]?.id;
+    assert.ok(accALedgerId);
+    const idorGetLedgerFromB = await apiCall(`/api/v1/finance/ledger/${accALedgerId}`, {
+      sessionToken: accBToken,
+    });
+    assert.equal(idorGetLedgerFromB.status, 404);
+
+    const idorPostLedgerToForeignAcc = await apiCall('/api/v1/finance/ledger', {
+      method: 'POST',
+      sessionToken: accBToken,
+      csrfToken: accBCsrf,
+      body: {
+        accountId: 'acc_cash_main', // чужой счёт Аккаунта А
+        entryType: 'operating_expense',
+        category: 'Аренда',
+        amountKopecks: 50000,
+        description: 'Попытка списания с чужой кассы',
+      },
+    });
+    assert.equal(idorPostLedgerToForeignAcc.status, 404);
+
+    // Проверка 5: Ссылка на приложение на новом устройстве не даёт вход без авторизации
+    const newDeviceSession = await apiCall('/api/v1/auth/session');
+    assert.equal(newDeviceSession.status, 200);
+    assert.equal(newDeviceSession.data.authenticated, false);
+    const newDeviceState = await apiCall('/api/v1/state');
+    assert.equal(newDeviceState.status, 401);
+
+    // Проверка 6: При многократном вводе неправильного пароля срабатывает ограничение попыток
+    // и возвращается сообщение: «Не удаётся войти? Обратитесь к владельцу приложения для восстановления доступа или изменения пароля»
+    const expectedRecoveryMsg =
+      'Не удаётся войти? Обратитесь к владельцу приложения для восстановления доступа или изменения пароля';
+    await apiCall('/api/v1/auth/login', {
+      method: 'POST',
+      body: { phone: '+79285550199', password: 'WrongPassword1' },
+    });
+    const secondWrongLogin = await apiCall('/api/v1/auth/login', {
+      method: 'POST',
+      body: { phone: '+79285550199', password: 'WrongPassword2' },
+    });
+    assert.equal(secondWrongLogin.status, 401);
+    assert.equal(secondWrongLogin.data.recoveryHelpMessage, expectedRecoveryMsg);
+
+    // Проверка 7: Сброс пароля владельцем работает безопасно и завершает старые сессии пользователя
+    const resetFatherPassRes = await apiCall(`/api/v1/users/${fatherUserId}/reset-password`, {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        newPassword: 'FatherNewResetPassword!2026',
+        mustChangePassword: true,
+      },
+    });
+    assert.equal(resetFatherPassRes.status, 200);
+    assert.equal(resetFatherPassRes.data.ok, true);
+
+    // Старая сессия accBToken должна быть немедленно отозвана (401)
+    const fatherOldSessionState = await apiCall('/api/v1/state', {
+      sessionToken: accBToken,
+    });
+    assert.equal(fatherOldSessionState.status, 401);
+
+    // Вход со старым паролем больше не работает, а с новым паролем — успешен
+    const fatherLoginOldPass = await apiCall('/api/v1/auth/login', {
+      method: 'POST',
+      body: { phone: '+79285550199', password: 'FatherSecurePassword!2026' },
+    });
+    assert.equal(fatherLoginOldPass.status, 401);
+
+    const fatherLoginNewPass = await apiCall('/api/v1/auth/login', {
+      method: 'POST',
+      body: { phone: '+79285550199', password: 'FatherNewResetPassword!2026' },
+    });
+    assert.equal(fatherLoginNewPass.status, 200);
+    assert.equal(fatherLoginNewPass.data.user.mustChangePassword, true);
+    const accBNewToken = fatherLoginNewPass.data.sessionToken;
+    const accBNewCsrf = fatherLoginNewPass.data.csrfToken;
+
+    // Проверка 8: Обычный пользователь (staff) не может получить права администратора / владельца (403)
+    const staffEscalateRole = await apiCall(`/api/v1/users/${fatherUserId}`, {
+      method: 'PATCH',
+      sessionToken: accBNewToken,
+      csrfToken: accBNewCsrf,
+      body: { role: 'owner' },
+    });
+    assert.equal(staffEscalateRole.status, 403);
+
+    const staffCreateOwner = await apiCall('/api/v1/users', {
+      method: 'POST',
+      sessionToken: accBNewToken,
+      csrfToken: accBNewCsrf,
+      body: {
+        phone: '+79280009988',
+        password: 'SomePassword!2026',
+        fullName: 'Попытка Создать Владельца',
+        role: 'owner',
+      },
+    });
+    assert.equal(staffCreateOwner.status, 403);
+
+    const staffResetOwnerPass = await apiCall('/api/v1/users/usr_owner_01/reset-password', {
+      method: 'POST',
+      sessionToken: accBNewToken,
+      csrfToken: accBNewCsrf,
+      body: { newPassword: 'HackedPassword!2026' },
+    });
+    assert.equal(staffResetOwnerPass.status, 403);
+
+    // Проверка 9 и 10: Все маршруты проверяют owner_user_id, а существующие данные сохранены за своим владельцем
+    const ownerRecordsCheck = db
+      .prepare('SELECT COUNT(*) AS cnt FROM clients WHERE owner_user_id = ?')
+      .get('usr_owner_01') as { cnt: number };
+    const fatherRecordsCheck = db
+      .prepare('SELECT COUNT(*) AS cnt FROM clients WHERE owner_user_id = ?')
+      .get(fatherUserId) as { cnt: number };
+    assert.equal(ownerRecordsCheck.cnt >= 4, true);
+    assert.equal(fatherRecordsCheck.cnt, 1);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

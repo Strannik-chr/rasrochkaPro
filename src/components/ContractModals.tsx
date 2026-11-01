@@ -190,6 +190,13 @@ export const NewContractModal: React.FC<NewContractModalProps> = ({
   const [downPaymentMethod, setDownPaymentMethod] = useState<'cash' | 'bank_transfer'>('cash');
   const [notes, setNotes] = useState('');
 
+  useEffect(() => {
+    if (accounts.length > 0 && !accounts.some((a) => a.id === downPaymentAccountId)) {
+      const cashAcc = accounts.find((a) => a.accountType === 'cash') || accounts[0];
+      setDownPaymentAccountId(cashAcc.id);
+    }
+  }, [accounts, downPaymentAccountId]);
+
   const [previewResult, setPreviewResult] = useState<any | null>(null);
   const [previewConfirmed, setPreviewConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);

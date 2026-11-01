@@ -34,13 +34,18 @@ export function recordAudit(
   );
 }
 
-export function reconcileFinance(db: DatabaseSync): ReconciliationResultDTO {
+export function reconcileFinance(db: DatabaseSync, ownerUserId?: string): ReconciliationResultDTO {
   const discrepancies: string[] = [];
+  const trimmedOwner = ownerUserId ? ownerUserId.trim() : '';
 
   // 1. Check each financial account balance vs confirmed ledger entries
-  const accounts = db
-    .prepare('SELECT id, name, balance_kopecks FROM financial_accounts')
-    .all() as Array<{ id: string; name: string; balance_kopecks: number }>;
+  const accounts = (
+    trimmedOwner
+      ? db
+          .prepare('SELECT id, name, balance_kopecks FROM financial_accounts WHERE owner_user_id = ?')
+          .all(trimmedOwner)
+      : db.prepare('SELECT id, name, balance_kopecks FROM financial_accounts').all()
+  ) as Array<{ id: string; name: string; balance_kopecks: number }>;
 
   let totalCashAndBankKopecks = 0;
   let calculatedLedgerBalanceKopecks = 0;
@@ -48,16 +53,29 @@ export function reconcileFinance(db: DatabaseSync): ReconciliationResultDTO {
 
   for (const acc of accounts) {
     totalCashAndBankKopecks += acc.balance_kopecks;
-    const ledgerRow = db
-      .prepare(
-        `
-        SELECT
-          COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_kopecks ELSE -amount_kopecks END), 0) as net_kopecks
-        FROM ledger_entries
-        WHERE account_id = ? AND status = 'confirmed'
-      `
-      )
-      .get(acc.id) as { net_kopecks: number };
+    const ledgerRow = (
+      trimmedOwner
+        ? db
+            .prepare(
+              `
+              SELECT
+                COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_kopecks ELSE -amount_kopecks END), 0) as net_kopecks
+              FROM ledger_entries
+              WHERE account_id = ? AND owner_user_id = ? AND status = 'confirmed'
+            `
+            )
+            .get(acc.id, trimmedOwner)
+        : db
+            .prepare(
+              `
+              SELECT
+                COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_kopecks ELSE -amount_kopecks END), 0) as net_kopecks
+              FROM ledger_entries
+              WHERE account_id = ? AND status = 'confirmed'
+            `
+            )
+            .get(acc.id)
+    ) as { net_kopecks: number };
 
     calculatedLedgerBalanceKopecks += ledgerRow.net_kopecks;
     if (acc.balance_kopecks !== ledgerRow.net_kopecks) {
@@ -69,15 +87,27 @@ export function reconcileFinance(db: DatabaseSync): ReconciliationResultDTO {
   }
 
   // 2. Check payments allocation invariant: allocated_kopecks + unallocated_kopecks === amount_kopecks
-  const payments = db
-    .prepare(
-      `
-      SELECT id, amount_kopecks, allocated_kopecks, unallocated_kopecks, is_down_payment, status
-      FROM payments
-      WHERE status = 'confirmed'
-    `
-    )
-    .all() as Array<{
+  const payments = (
+    trimmedOwner
+      ? db
+          .prepare(
+            `
+            SELECT id, amount_kopecks, allocated_kopecks, unallocated_kopecks, is_down_payment, status
+            FROM payments
+            WHERE status = 'confirmed' AND owner_user_id = ?
+          `
+          )
+          .all(trimmedOwner)
+      : db
+          .prepare(
+            `
+            SELECT id, amount_kopecks, allocated_kopecks, unallocated_kopecks, is_down_payment, status
+            FROM payments
+            WHERE status = 'confirmed'
+          `
+          )
+          .all()
+  ) as Array<{
     id: string;
     amount_kopecks: number;
     allocated_kopecks: number;
@@ -113,15 +143,27 @@ export function reconcileFinance(db: DatabaseSync): ReconciliationResultDTO {
   }
 
   // 3. Check schedule items invariant for active version of contracts
-  const contracts = db
-    .prepare(
-      `
-      SELECT id, contract_number, financed_principal_kopecks, closing_discount_kopecks, current_schedule_version, status
-      FROM contracts
-      WHERE status IN ('active', 'completed', 'restructured')
-    `
-    )
-    .all() as Array<{
+  const contracts = (
+    trimmedOwner
+      ? db
+          .prepare(
+            `
+            SELECT id, contract_number, financed_principal_kopecks, closing_discount_kopecks, current_schedule_version, status
+            FROM contracts
+            WHERE status IN ('active', 'completed', 'restructured') AND owner_user_id = ?
+          `
+          )
+          .all(trimmedOwner)
+      : db
+          .prepare(
+            `
+            SELECT id, contract_number, financed_principal_kopecks, closing_discount_kopecks, current_schedule_version, status
+            FROM contracts
+            WHERE status IN ('active', 'completed', 'restructured')
+          `
+          )
+          .all()
+  ) as Array<{
     id: string;
     contract_number: string;
     financed_principal_kopecks: number;

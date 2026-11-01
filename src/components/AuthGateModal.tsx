@@ -26,6 +26,8 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   const [mfaRequired, setMfaRequired] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [recoveryHelpMessage, setRecoveryHelpMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -46,11 +48,27 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       if (res.mfaRequired) {
         setMfaRequired(true);
       } else if (res.authenticated) {
+        setFailedAttempts(0);
+        setRecoveryHelpMessage(null);
         await onSuccessLogin(res);
         if (onClose) onClose();
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Неверный номер телефона или пароль');
+    } catch (err: any) {
+      const nextCount = failedAttempts + 1;
+      setFailedAttempts(nextCount);
+      const errMsg = err instanceof Error ? err.message : 'Неверный номер телефона или пароль';
+      setError(errMsg);
+      if (
+        err?.recoveryHelpMessage ||
+        nextCount >= 2 ||
+        errMsg.includes('Слишком много') ||
+        errMsg.includes('429')
+      ) {
+        setRecoveryHelpMessage(
+          err?.recoveryHelpMessage ||
+            'Не удаётся войти? Обратитесь к владельцу приложения для восстановления доступа или изменения пароля'
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -87,9 +105,14 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
       {error && (
         <div
           role="alert"
-          className="mt-5 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 font-medium"
+          className="mt-5 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 font-medium space-y-1.5"
         >
-          {error}
+          <div>{error}</div>
+          {recoveryHelpMessage && (
+            <div className="pt-1.5 border-t border-red-200/80 text-slate-800 font-normal leading-relaxed">
+              {recoveryHelpMessage}
+            </div>
+          )}
         </div>
       )}
 

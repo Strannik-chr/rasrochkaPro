@@ -22,6 +22,14 @@ export function getDb(customPath?: string): DatabaseSync {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    const backupFilePath = `${storagePath}.pre_isolation.backup`;
+    if (fs.existsSync(storagePath) && !fs.existsSync(backupFilePath)) {
+      try {
+        fs.copyFileSync(storagePath, backupFilePath);
+      } catch {
+        // Non-fatal if filesystem is read-only
+      }
+    }
   }
 
   const db = new DatabaseSync(storagePath);
@@ -110,6 +118,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS installment_plans (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       name TEXT NOT NULL,
       term_months INTEGER NOT NULL CHECK (term_months > 0 AND term_months <= 120),
       markup_percent REAL NOT NULL CHECK (markup_percent >= 0),
@@ -137,6 +146,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS clients (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       full_name TEXT NOT NULL,
       phone TEXT NOT NULL,
       secondary_phone TEXT NOT NULL DEFAULT '',
@@ -150,6 +160,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS suppliers (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       name TEXT NOT NULL,
       category TEXT NOT NULL DEFAULT 'Магазин электроники',
       contact_info TEXT NOT NULL DEFAULT '',
@@ -160,6 +171,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS purchases (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       supplier_id TEXT NOT NULL REFERENCES suppliers(id),
       client_id TEXT REFERENCES clients(id),
       item_name TEXT NOT NULL,
@@ -180,6 +192,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS contracts (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       contract_number TEXT NOT NULL UNIQUE,
       client_id TEXT NOT NULL REFERENCES clients(id),
       purchase_id TEXT REFERENCES purchases(id),
@@ -216,6 +229,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS contract_guarantors (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
       client_id TEXT NOT NULL REFERENCES clients(id),
       guarantor_order INTEGER NOT NULL DEFAULT 1 CHECK (guarantor_order > 0),
@@ -263,6 +277,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS financial_accounts (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       name TEXT NOT NULL,
       account_type TEXT NOT NULL CHECK (account_type IN ('cash', 'bank')),
       balance_kopecks INTEGER NOT NULL DEFAULT 0,
@@ -272,6 +287,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS payments (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       idempotency_key TEXT NOT NULL UNIQUE,
       client_id TEXT NOT NULL REFERENCES clients(id),
       contract_id TEXT REFERENCES contracts(id),
@@ -303,6 +319,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS ledger_entries (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       idempotency_key TEXT NOT NULL UNIQUE,
       account_id TEXT NOT NULL REFERENCES financial_accounts(id),
       related_account_id TEXT REFERENCES financial_accounts(id),
@@ -335,6 +352,7 @@ function initializeSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01',
       entity_type TEXT NOT NULL CHECK (entity_type IN ('client', 'contract', 'purchase', 'payment', 'return')),
       entity_id TEXT NOT NULL,
       client_id TEXT,
@@ -646,8 +664,146 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     });
   }
 
+  const tenantTables = [
+    'installment_plans',
+    'clients',
+    'suppliers',
+    'purchases',
+    'contracts',
+    'contract_guarantors',
+    'financial_accounts',
+    'payments',
+    'ledger_entries',
+    'documents',
+  ];
+
+  for (const tbl of tenantTables) {
+    const cols = db.prepare(`PRAGMA table_info(${tbl})`).all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has('owner_user_id')) {
+      db.exec(`ALTER TABLE ${tbl} ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'usr_owner_01';`);
+    }
+  }
+
+  const migration010Applied = db
+    .prepare("SELECT version FROM schema_migrations WHERE version = '010_per_account_data_isolation'")
+    .get() as { version: string } | undefined;
+
+  if (!migration010Applied) {
+    withTransaction(db, () => {
+      db.exec(`
+        UPDATE installment_plans
+        SET owner_user_id = COALESCE(NULLIF(updated_by, ''), 'usr_owner_01')
+        WHERE owner_user_id IS NULL OR owner_user_id = '' OR (owner_user_id = 'usr_owner_01' AND updated_by IS NOT NULL AND updated_by != '' AND updated_by != 'system');
+
+        UPDATE clients
+        SET owner_user_id = COALESCE(NULLIF(created_by, ''), 'usr_owner_01')
+        WHERE owner_user_id IS NULL OR owner_user_id = '' OR (owner_user_id = 'usr_owner_01' AND created_by IS NOT NULL AND created_by != '' AND created_by != 'system');
+
+        UPDATE contracts
+        SET owner_user_id = COALESCE(
+          (SELECT cl.owner_user_id FROM clients cl WHERE cl.id = contracts.client_id),
+          NULLIF(created_by, ''),
+          'usr_owner_01'
+        );
+
+        UPDATE contract_guarantors
+        SET owner_user_id = COALESCE(
+          (SELECT c.owner_user_id FROM contracts c WHERE c.id = contract_guarantors.contract_id),
+          NULLIF(created_by, ''),
+          'usr_owner_01'
+        );
+
+        UPDATE purchases
+        SET owner_user_id = COALESCE(
+          (SELECT cl.owner_user_id FROM clients cl WHERE cl.id = purchases.client_id),
+          NULLIF(created_by, ''),
+          'usr_owner_01'
+        );
+
+        UPDATE suppliers
+        SET owner_user_id = COALESCE(
+          (SELECT p.owner_user_id FROM purchases p WHERE p.supplier_id = suppliers.id LIMIT 1),
+          NULLIF(owner_user_id, ''),
+          'usr_owner_01'
+        );
+
+        UPDATE payments
+        SET owner_user_id = COALESCE(
+          (SELECT c.owner_user_id FROM contracts c WHERE c.id = payments.contract_id),
+          (SELECT cl.owner_user_id FROM clients cl WHERE cl.id = payments.client_id),
+          NULLIF(created_by, ''),
+          'usr_owner_01'
+        );
+
+        UPDATE ledger_entries
+        SET owner_user_id = COALESCE(
+          (SELECT p.owner_user_id FROM payments p WHERE ledger_entries.reference_type = 'payment' AND p.id = ledger_entries.reference_id),
+          (SELECT pur.owner_user_id FROM purchases pur WHERE ledger_entries.reference_type = 'purchase' AND pur.id = ledger_entries.reference_id),
+          (SELECT c.owner_user_id FROM contracts c WHERE ledger_entries.reference_type = 'contract' AND c.id = ledger_entries.reference_id),
+          NULLIF(created_by, ''),
+          'usr_owner_01'
+        );
+
+        UPDATE documents
+        SET owner_user_id = COALESCE(
+          (SELECT c.owner_user_id FROM contracts c WHERE c.id = documents.contract_id),
+          (SELECT cl.owner_user_id FROM clients cl WHERE cl.id = documents.client_id),
+          NULLIF(created_by, ''),
+          'usr_owner_01'
+        );
+      `);
+
+      // If any non-owner_01 user already had payments or ledger entries pointing to acc_cash_main/acc_bank_main,
+      // provision their isolated accounts and re-point those entries so registers stay 100% consistent.
+      const distinctLedgerOwners = db
+        .prepare("SELECT DISTINCT owner_user_id FROM ledger_entries WHERE owner_user_id != 'usr_owner_01'")
+        .all() as Array<{ owner_user_id: string }>;
+
+      for (const row of distinctLedgerOwners) {
+        if (!row.owner_user_id) continue;
+        const userAccs = ensureUserWorkspaceInitialized(db, row.owner_user_id);
+        db.prepare(
+          "UPDATE payments SET account_id = ? WHERE owner_user_id = ? AND account_id = 'acc_cash_main'"
+        ).run(userAccs.cashAccountId, row.owner_user_id);
+        db.prepare(
+          "UPDATE payments SET account_id = ? WHERE owner_user_id = ? AND account_id = 'acc_bank_main'"
+        ).run(userAccs.bankAccountId, row.owner_user_id);
+        db.prepare(
+          "UPDATE ledger_entries SET account_id = ? WHERE owner_user_id = ? AND account_id = 'acc_cash_main'"
+        ).run(userAccs.cashAccountId, row.owner_user_id);
+        db.prepare(
+          "UPDATE ledger_entries SET account_id = ? WHERE owner_user_id = ? AND account_id = 'acc_bank_main'"
+        ).run(userAccs.bankAccountId, row.owner_user_id);
+      }
+
+      // Recalculate all financial_accounts balances from confirmed ledger_entries
+      db.exec(`
+        UPDATE financial_accounts
+        SET balance_kopecks = COALESCE(
+          (
+            SELECT SUM(CASE WHEN l.direction = 'in' THEN l.amount_kopecks ELSE -l.amount_kopecks END)
+            FROM ledger_entries l
+            WHERE l.account_id = financial_accounts.id AND l.status = 'confirmed'
+          ),
+          0
+        );
+      `);
+    });
+  }
+
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_clients_owner ON clients(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_contracts_owner ON contracts(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_contract_guarantors_owner ON contract_guarantors(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_purchases_owner ON purchases(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_suppliers_owner ON suppliers(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_payments_owner ON payments(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_ledger_owner ON ledger_entries(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_owner ON financial_accounts(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_user_id);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_plans_owner ON installment_plans(owner_user_id);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_contract ON documents(contract_id);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_client ON documents(client_id);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_guarantor_client ON documents(guarantor_client_id);');
@@ -688,9 +844,86 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     '009_contract_payment_day_and_form_upgrades',
     'Выбор даты ежемесячного платежа (1..31), пересчёт будущих неоплаченных платежей и разделение режимов клиента'
   );
+  recordMigration(
+    db,
+    '010_per_account_data_isolation',
+    'Полная изоляция операционных данных, клиентов, договоров, платежей, документов и счетов между аккаунтами пользователей (owner_user_id)'
+  );
 
   // Sync documents/photos between SQLite and disk so nothing is ever lost after updates
   syncDocumentsBetweenDbAndDisk(db);
+}
+
+/**
+ * Ensures the given user account has its own isolated Cash and Bank financial accounts.
+ */
+export function ensureUserWorkspaceInitialized(
+  db: DatabaseSync,
+  userId: string
+): { cashAccountId: string; bankAccountId: string } {
+  const safeUserId = (userId || '').trim() || 'usr_owner_01';
+  const defaultCashId = safeUserId === 'usr_owner_01' ? 'acc_cash_main' : `acc_cash_${safeUserId}`;
+  const defaultBankId = safeUserId === 'usr_owner_01' ? 'acc_bank_main' : `acc_bank_${safeUserId}`;
+  const nowIso = new Date().toISOString();
+
+  const existingCash = db
+    .prepare("SELECT id FROM financial_accounts WHERE owner_user_id = ? AND account_type = 'cash' ORDER BY created_at ASC LIMIT 1")
+    .get(safeUserId) as { id: string } | undefined;
+
+  if (!existingCash) {
+    db.prepare(
+      `INSERT OR IGNORE INTO financial_accounts (id, owner_user_id, name, account_type, balance_kopecks, is_active, created_at)
+       VALUES (?, ?, 'Основная касса (Наличные ₽)', 'cash', 0, 1, ?)`
+    ).run(defaultCashId, safeUserId, nowIso);
+  }
+
+  const existingBank = db
+    .prepare("SELECT id FROM financial_accounts WHERE owner_user_id = ? AND account_type = 'bank' ORDER BY created_at ASC LIMIT 1")
+    .get(safeUserId) as { id: string } | undefined;
+
+  if (!existingBank) {
+    db.prepare(
+      `INSERT OR IGNORE INTO financial_accounts (id, owner_user_id, name, account_type, balance_kopecks, is_active, created_at)
+       VALUES (?, ?, 'Расчётный счёт / Переводы (Банк ₽)', 'bank', 0, 1, ?)`
+    ).run(defaultBankId, safeUserId, nowIso);
+  }
+
+  return {
+    cashAccountId: existingCash ? existingCash.id : defaultCashId,
+    bankAccountId: existingBank ? existingBank.id : defaultBankId,
+  };
+}
+
+/**
+ * Resolves and validates that the requested financial account belongs to `ownerUserId`.
+ * If `requestedAccountId` is omitted or empty, returns the user's own default cash or bank account.
+ * If `requestedAccountId` belongs to another user, throws a 404 Not Found error to prevent cross-account access.
+ */
+export function resolveTenantAccountId(
+  db: DatabaseSync,
+  ownerUserId: string,
+  requestedAccountId?: string | null,
+  fallbackType: 'cash' | 'bank' = 'cash'
+): string {
+  const userAccs = ensureUserWorkspaceInitialized(db, ownerUserId);
+  const trimmed = requestedAccountId ? String(requestedAccountId).trim() : '';
+  if (!trimmed) {
+    return fallbackType === 'cash' ? userAccs.cashAccountId : userAccs.bankAccountId;
+  }
+
+  const accRow = db
+    .prepare('SELECT id, owner_user_id FROM financial_accounts WHERE id = ?')
+    .get(trimmed) as { id: string; owner_user_id: string } | undefined;
+
+  if (!accRow || accRow.owner_user_id !== ownerUserId) {
+    const err = new Error('Указанный счёт или касса не найдены в вашем аккаунте.') as Error & {
+      statusCode?: number;
+    };
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return accRow.id;
 }
 
 function seedInitialDataIfEmpty(db: DatabaseSync): void {

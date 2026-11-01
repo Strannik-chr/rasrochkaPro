@@ -398,7 +398,15 @@ export default function App() {
       if (contentType.includes('application/json')) {
         const data = await res.json();
         if (!res.ok) {
-          throw new Error(data.error || `Ошибка запроса (${res.status})`);
+          const errObj = new Error(data.error || `Ошибка запроса (${res.status})`) as Error & {
+            recoveryHelpMessage?: string;
+            status?: number;
+          };
+          if (data.recoveryHelpMessage) {
+            errObj.recoveryHelpMessage = data.recoveryHelpMessage;
+          }
+          errObj.status = res.status;
+          throw errObj;
         }
         return data;
       }
@@ -464,6 +472,7 @@ export default function App() {
         throw new Error('Не удалось загрузить данные системы.');
       }
       const data = await res.json();
+      const loadedAccounts: FinancialAccountDTO[] = data.accounts || [];
       setPlans(data.plans || []);
       setSettingsHistory(data.settingsHistory || []);
       setClients(data.clients || []);
@@ -472,7 +481,7 @@ export default function App() {
       setContracts(data.contracts || []);
       setPayments(data.payments || []);
       setOverdues(data.overdues || []);
-      setAccounts(data.accounts || []);
+      setAccounts(loadedAccounts);
       setLedger(data.ledger || []);
       setDocuments(data.documents || []);
       setUsers(data.users || []);
@@ -481,6 +490,25 @@ export default function App() {
       setReconciliation(data.reconciliation || null);
       if (data.statusRules) {
         setStatusRules(data.statusRules);
+      }
+      if (loadedAccounts.length > 0) {
+        const cashAcc = loadedAccounts.find((a) => a.accountType === 'cash') || loadedAccounts[0];
+        const bankAcc = loadedAccounts.find((a) => a.accountType === 'bank') || loadedAccounts[0];
+        setPurchaseForm((prev) => ({
+          ...prev,
+          paymentAccountId: loadedAccounts.some((a) => a.id === prev.paymentAccountId)
+            ? prev.paymentAccountId
+            : bankAcc.id,
+        }));
+        setLedgerForm((prev) => ({
+          ...prev,
+          accountId: loadedAccounts.some((a) => a.id === prev.accountId)
+            ? prev.accountId
+            : cashAcc.id,
+          targetAccountId: loadedAccounts.some((a) => a.id === prev.targetAccountId)
+            ? prev.targetAccountId
+            : bankAcc.id,
+        }));
       }
       setHasLoadedConfidentialState(true);
     },
