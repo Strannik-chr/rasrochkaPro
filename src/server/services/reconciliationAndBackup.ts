@@ -2,8 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ReconciliationResultDTO } from '../../shared/types';
-import { decryptBackupPayload, encryptBackupPayload } from '../security/crypto';
+import type { ReconciliationResultDTO } from '../../shared/types.ts';
+import { decryptBackupPayload, encryptBackupPayload } from '../security/crypto.ts';
 
 export function recordAudit(
   db: DatabaseSync,

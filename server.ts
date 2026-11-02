@@ -1,10 +1,9 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { createServer as createViteServer } from 'vite';
-import { getDb } from './src/server/db/database';
-import { createApiRouter } from './src/server/routes/api';
+import { getDb } from './src/server/db/database.ts';
+import { createApiRouter } from './src/server/routes/api.ts';
 
 function ensurePersistentProductionSecrets(): void {
   const storagePath =
@@ -156,6 +155,7 @@ async function startServer() {
   const { app } = await createAppServer();
 
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

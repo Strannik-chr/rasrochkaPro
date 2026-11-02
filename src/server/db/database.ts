@@ -2,8 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { hashPassword, normalizeRussianPhone } from '../security/crypto';
-import { calculateContractAndSchedule } from '../finance/calculator';
+import { hashPassword, normalizeRussianPhone } from '../security/crypto.ts';
+import { calculateContractAndSchedule } from '../finance/calculator.ts';
 
 let dbInstance: DatabaseSync | null = null;
 

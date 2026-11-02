@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import {
@@ -6,9 +6,9 @@ import {
   ensureUserWorkspaceInitialized,
   resolveTenantAccountId,
   withTransaction,
-} from '../db/database';
+} from '../db/database.ts';
 import {
-  AutoAllocationStrategy,
+  type AutoAllocationStrategy,
   assertKopecks,
   assertPaymentDayOfMonth,
   calculateContractAndSchedule,
@@ -20,7 +20,7 @@ import {
   recalculateContractEditSchedule,
   recalculateUnpaidScheduleDates,
   toSafeCsvRow,
-} from '../finance/calculator';
+} from '../finance/calculator.ts';
 import {
   generateSecureToken,
   generateTotpSecret,
@@ -33,7 +33,7 @@ import {
   verifyPasswordConstantTime,
   verifyTotpCode,
   computeTotpCode,
-} from '../security/crypto';
+} from '../security/crypto.ts';
 import {
   createEncryptedBackup,
   getBackupEnvelopeFile,
@@ -42,14 +42,14 @@ import {
   restoreEncryptedBackup,
   restoreEncryptedBackupFromEnvelope,
   verifyEncryptedBackup,
-} from '../services/reconciliationAndBackup';
+} from '../services/reconciliationAndBackup.ts';
 import {
   getStorageStatus,
   readPrivateDocumentBuffer,
   removePrivateDocumentFile,
   writePrivateDocumentBuffer,
-} from '../services/storage';
-import {
+} from '../services/storage.ts';
+import type {
   DownPaymentMode,
   MarkupMode,
   RoundingRule,
@@ -57,7 +57,7 @@ import {
   StatusRulesConfigDTO,
   UserRole,
   UserStatus,
-} from '../../shared/types';
+} from '../../shared/types.ts';
 import {
   DEFAULT_STATUS_RULES,
   buildContractWhatsAppMessage,
@@ -66,7 +66,7 @@ import {
   evaluateContractStatus,
   formatTelHref,
   formatWhatsAppPhoneDigits,
-} from '../../shared/clientStatus';
+} from '../../shared/clientStatus.ts';
 
 export function getStatusRulesConfig(db: DatabaseSync): StatusRulesConfigDTO {
   try {

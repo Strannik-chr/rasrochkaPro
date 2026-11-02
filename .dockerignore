@@ -3,7 +3,12 @@ dist
 .env
 .git
 .github
+.aistudio
+bun.lock
+package-lock.json
 data/*.sqlite*
+data/backups/*
+data/uploads/*
 uploads/*
 backups/*
 public/assets/aistudio

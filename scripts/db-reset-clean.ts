@@ -10,12 +10,12 @@
  *        while preserving schema, migrations, system installment_plans, financial_accounts (0 ₽), and the primary owner account.
  */
 
-import { cleanResetOperationalData, getDb, inspectDatabaseRecords } from '../src/server/db/database';
+import { cleanResetOperationalData, getDb, inspectDatabaseRecords } from '../src/server/db/database.ts';
 import {
   createEncryptedBackup,
   reconcileFinance,
   verifyEncryptedBackup,
-} from '../src/server/services/reconciliationAndBackup';
+} from '../src/server/services/reconciliationAndBackup.ts';
 
 function main(): void {
   const args = process.argv.slice(2);

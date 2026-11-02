@@ -1,4 +1,4 @@
-import { DownPaymentMode, MarkupMode, RoundingRule, ScheduleType } from '../../shared/types';
+import type { DownPaymentMode, MarkupMode, RoundingRule, ScheduleType } from '../../shared/types.ts';
 
 export interface ContractCalculationInput {
   purchaseCostKopecks: number;

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import { getDb, withTransaction } from '../src/server/db/database';
-import { hashPassword, normalizeRussianPhone } from '../src/server/security/crypto';
-import { recordAudit } from '../src/server/services/reconciliationAndBackup';
+import { getDb, withTransaction } from '../src/server/db/database.ts';
+import { hashPassword, normalizeRussianPhone } from '../src/server/security/crypto.ts';
+import { recordAudit } from '../src/server/services/reconciliationAndBackup.ts';
 
 function parseArg(flag: string): string | undefined {
   const prefix = `${flag}=`;

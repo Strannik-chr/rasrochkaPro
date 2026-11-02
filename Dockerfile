@@ -5,17 +5,19 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# 1. Установка зависимостей
-COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+# Увеличенный лимит памяти для сборки крупного фронтенд-бандла (Vite / Rolldown)
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+
+# 1. Установка зависимостей (независимо от старого package-lock.json и NODE_ENV сборщика)
+COPY package.json ./
+RUN NODE_ENV=development npm install --include=dev --legacy-peer-deps --no-audit --no-fund
 
 # 2. Копирование исходного кода и сборка фронтенда
 COPY . .
 RUN npm run build
 
-# 3. Создание приватных каталогов (включая постоянное хранилище /data для Amvera Cloud)
-RUN mkdir -p /data /data/uploads /data/backups /app/data /app/uploads /app/backups && \
-    chmod 700 /data /data/uploads /data/backups /app/data /app/uploads /app/backups
+# 3. Создание рабочих каталогов для хранения данных
+RUN mkdir -p /data /data/uploads /data/backups /app/data /app/uploads /app/backups
 
 ENV NODE_ENV=production
 ENV PORT=3000
@@ -26,8 +28,4 @@ ENV BACKUP_STORAGE_DIR=/data/backups
 
 EXPOSE 3000
 
-# Проверка работоспособности контейнера
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/api/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
-
-CMD ["npx", "tsx", "server.ts"]
+CMD ["node", "server.ts"]

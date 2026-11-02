@@ -1,4 +1,4 @@
-import { ClientPaymentStatus, StatusRulesConfigDTO } from './types';
+import type { ClientPaymentStatus, StatusRulesConfigDTO } from './types.ts';
 
 export const DEFAULT_STATUS_RULES: StatusRulesConfigDTO = {
   gracePeriodDays: 3,

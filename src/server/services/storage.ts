@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { sha256Hex } from '../security/crypto';
+import { sha256Hex } from '../security/crypto.ts';
 
 export type StorageBackendMode = 'local_private' | 'cloudflare_r2_configured';
 

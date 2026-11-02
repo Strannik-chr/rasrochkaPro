@@ -4,7 +4,6 @@ meta:
     name: docker
 build:
   dockerfile: Dockerfile
-  skip: false
 run:
   persistenceMount: /data
   containerPort: 3000
