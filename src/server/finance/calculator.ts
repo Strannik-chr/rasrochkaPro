@@ -1,11 +1,15 @@
-import { RoundingRule, ScheduleType } from '../../shared/types';
+import { DownPaymentMode, MarkupMode, RoundingRule, ScheduleType } from '../../shared/types';
 
 export interface ContractCalculationInput {
   purchaseCostKopecks: number;
   deliveryCostKopecks: number;
   otherCostKopecks: number;
+  markupMode?: MarkupMode;
   markupPercent: number;
+  explicitMarkupKopecks?: number;
+  downPaymentMode?: DownPaymentMode;
   downPaymentPercent?: number;
+  fixedDownPaymentKopecks?: number;
   explicitDownPaymentKopecks?: number;
   useCustomActualDownPayment?: boolean;
   actualDownPaymentKopecks?: number;
@@ -14,6 +18,7 @@ export interface ContractCalculationInput {
   roundingRule: RoundingRule;
   scheduleType: ScheduleType;
   startDate: string; // YYYY-MM-DD
+  scheduleStartDate?: string | null; // Optional YYYY-MM-DD anchor for schedule generation
   paymentDayOfMonth?: number | null; // 1..31
   customInstallmentsKopecks?: number[];
 }
@@ -31,9 +36,11 @@ export interface ContractCalculationResult {
   deliveryCostKopecks: number;
   otherCostKopecks: number;
   totalCostKopecks: number;
+  markupMode: MarkupMode;
   markupPercent: number;
   markupKopecks: number;
   salePriceKopecks: number;
+  downPaymentMode: DownPaymentMode;
   downPaymentPercent: number;
   downPaymentKopecks: number;
   plannedDownPaymentKopecks: number;
@@ -48,6 +55,7 @@ export interface ContractCalculationResult {
   roundingRule: RoundingRule;
   scheduleType: ScheduleType;
   paymentDayOfMonth: number;
+  scheduleStartDate: string;
   schedule: PlannedScheduleItem[];
   plannedSchedule: PlannedScheduleItem[];
   scheduleChanged: boolean;
@@ -233,28 +241,62 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
     throw new Error('Полная себестоимость товара должна быть больше 0 копеек.');
   }
 
-  if (!Number.isFinite(input.markupPercent) || input.markupPercent < 0 || input.markupPercent > 500) {
-    throw new Error('Процент наценки должен быть в диапазоне от 0% до 500%.');
-  }
-
   if (!Number.isInteger(input.termMonths) || input.termMonths < 1 || input.termMonths > 120) {
     throw new Error('Срок рассрочки должен составлять от 1 до 120 месяцев.');
   }
 
-  // Basis points (1% = 100 bp) for deterministic integer-safe percentage calculation
-  const markupBasisPoints = Math.round(input.markupPercent * 100);
-  const markupKopecks = Math.round((totalCostKopecks * markupBasisPoints) / 10000);
+  const resolvedMarkupMode: MarkupMode =
+    input.markupMode === 'fixed' || (input.markupMode === undefined && typeof input.explicitMarkupKopecks === 'number')
+      ? 'fixed'
+      : 'percent';
+
+  let markupKopecks: number;
+  let effectiveMarkupPercent: number;
+
+  if (resolvedMarkupMode === 'fixed' && typeof input.explicitMarkupKopecks === 'number') {
+    assertKopecks(input.explicitMarkupKopecks, 'Сумма наценки', true);
+    markupKopecks = input.explicitMarkupKopecks;
+    effectiveMarkupPercent = Number(((markupKopecks * 100) / totalCostKopecks).toFixed(2));
+    if (effectiveMarkupPercent > 500) {
+      throw new Error('Сумма наценки превышает максимально допустимые 500% от себестоимости.');
+    }
+  } else {
+    if (!Number.isFinite(input.markupPercent) || input.markupPercent < 0 || input.markupPercent > 500) {
+      throw new Error('Процент наценки должен быть в диапазоне от 0% до 500%.');
+    }
+    // Basis points (1% = 100 bp) for deterministic integer-safe percentage calculation
+    const markupBasisPoints = Math.round(input.markupPercent * 100);
+    markupKopecks = Math.round((totalCostKopecks * markupBasisPoints) / 10000);
+    effectiveMarkupPercent = input.markupPercent;
+  }
+
   const salePriceKopecks = totalCostKopecks + markupKopecks;
+
+  const resolvedDownPaymentMode: DownPaymentMode =
+    input.downPaymentMode === 'fixed' ||
+    typeof input.fixedDownPaymentKopecks === 'number' ||
+    (input.downPaymentMode === undefined &&
+      typeof input.explicitDownPaymentKopecks === 'number' &&
+      !input.useCustomActualDownPayment)
+      ? 'fixed'
+      : 'percent';
 
   let plannedDownPaymentKopecks: number;
   let effectiveDownPaymentPercent: number;
 
-  if (typeof input.explicitDownPaymentKopecks === 'number' && !input.useCustomActualDownPayment) {
-    assertKopecks(input.explicitDownPaymentKopecks, 'Первоначальный взнос', true);
-    if (input.explicitDownPaymentKopecks >= salePriceKopecks) {
+  const fixedDpCandidate =
+    typeof input.fixedDownPaymentKopecks === 'number'
+      ? input.fixedDownPaymentKopecks
+      : resolvedDownPaymentMode === 'fixed' && typeof input.explicitDownPaymentKopecks === 'number'
+        ? input.explicitDownPaymentKopecks
+        : undefined;
+
+  if (resolvedDownPaymentMode === 'fixed' && typeof fixedDpCandidate === 'number') {
+    assertKopecks(fixedDpCandidate, 'Первоначальный взнос', true);
+    if (fixedDpCandidate >= salePriceKopecks) {
       throw new Error('Первоначальный взнос должен быть меньше полной цены продажи в рассрочку.');
     }
-    plannedDownPaymentKopecks = input.explicitDownPaymentKopecks;
+    plannedDownPaymentKopecks = fixedDpCandidate;
     effectiveDownPaymentPercent = Number(((plannedDownPaymentKopecks * 100) / salePriceKopecks).toFixed(2));
   } else {
     const dpPercent = input.downPaymentPercent ?? 30;
@@ -275,16 +317,25 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
   if (!startMatch) {
     throw new Error(`Некорректный формат даты: ${input.startDate}. Ожидается ГГГГ-ММ-ДД.`);
   }
+  const effectiveScheduleStartDate =
+    input.scheduleStartDate && input.scheduleStartDate.trim() !== ''
+      ? input.scheduleStartDate.trim()
+      : input.startDate.trim();
+  const schedStartMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(effectiveScheduleStartDate);
+  if (!schedStartMatch) {
+    throw new Error(`Некорректный формат даты начала графика: ${effectiveScheduleStartDate}. Ожидается ГГГГ-ММ-ДД.`);
+  }
+
   const resolvedPaymentDayOfMonth =
     input.paymentDayOfMonth !== undefined && input.paymentDayOfMonth !== null
       ? assertPaymentDayOfMonth(input.paymentDayOfMonth)
-      : assertPaymentDayOfMonth(Number(startMatch[3]));
+      : assertPaymentDayOfMonth(Number(schedStartMatch[3]));
 
   const plannedSchedule = generateEqualInstallmentSchedule(
     plannedFinancedPrincipalKopecks,
     input.termMonths,
     input.roundingRule,
-    input.startDate,
+    effectiveScheduleStartDate,
     resolvedPaymentDayOfMonth
   );
 
@@ -322,9 +373,11 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
       deliveryCostKopecks: input.deliveryCostKopecks,
       otherCostKopecks: input.otherCostKopecks,
       totalCostKopecks,
-      markupPercent: input.markupPercent,
+      markupMode: resolvedMarkupMode,
+      markupPercent: effectiveMarkupPercent,
       markupKopecks,
       salePriceKopecks,
+      downPaymentMode: resolvedDownPaymentMode,
       downPaymentPercent: effectiveDownPaymentPercent,
       downPaymentKopecks: actualDownPaymentKopecks,
       plannedDownPaymentKopecks,
@@ -339,6 +392,7 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
       roundingRule: input.roundingRule,
       scheduleType: input.scheduleType,
       paymentDayOfMonth: resolvedPaymentDayOfMonth,
+      scheduleStartDate: effectiveScheduleStartDate,
       schedule: [],
       plannedSchedule,
       scheduleChanged: true,
@@ -368,7 +422,7 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
       const origPlanned = plannedSchedule[i]?.plannedKopecks ?? amount;
       schedule.push({
         installmentNumber: i + 1,
-        dueDate: addMonthsIsoDate(input.startDate, i + 1, resolvedPaymentDayOfMonth),
+        dueDate: addMonthsIsoDate(effectiveScheduleStartDate, i + 1, resolvedPaymentDayOfMonth),
         plannedKopecks: amount,
         originalPlannedKopecks: origPlanned,
         diffKopecks: amount - origPlanned,
@@ -384,7 +438,7 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
       financedPrincipalKopecks,
       input.termMonths,
       input.roundingRule,
-      input.startDate,
+      effectiveScheduleStartDate,
       resolvedPaymentDayOfMonth
     );
     schedule = rawSchedule.map((item, idx) => {
@@ -404,9 +458,11 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
     deliveryCostKopecks: input.deliveryCostKopecks,
     otherCostKopecks: input.otherCostKopecks,
     totalCostKopecks,
-    markupPercent: input.markupPercent,
+    markupMode: resolvedMarkupMode,
+    markupPercent: effectiveMarkupPercent,
     markupKopecks,
     salePriceKopecks,
+    downPaymentMode: resolvedDownPaymentMode,
     downPaymentPercent: effectiveDownPaymentPercent,
     downPaymentKopecks,
     plannedDownPaymentKopecks,
@@ -421,12 +477,229 @@ export function calculateContractAndSchedule(input: ContractCalculationInput): C
     roundingRule: input.roundingRule,
     scheduleType: input.scheduleType,
     paymentDayOfMonth: resolvedPaymentDayOfMonth,
+    scheduleStartDate: effectiveScheduleStartDate,
     schedule,
     plannedSchedule,
     scheduleChanged,
     exceedsTotalContractDebt: false,
     excessOverContractKopecks: 0,
     warningMessage: null,
+  };
+}
+
+export interface ExistingScheduleItemForEdit {
+  id: string;
+  installmentNumber: number;
+  dueDate: string;
+  originalDueDate: string;
+  plannedKopecks: number;
+  paidKopecks: number;
+  status: string;
+  promisedDate?: string | null;
+  postponeReason?: string;
+}
+
+export interface EditedScheduleItemResult {
+  installmentNumber: number;
+  dueDate: string;
+  originalDueDate: string;
+  plannedKopecks: number;
+  paidKopecks: number;
+  remainingKopecks: number;
+  status: 'paid' | 'partial' | 'pending';
+  promisedDate: string | null;
+  postponeReason: string;
+  preservedFromItemId: string | null;
+}
+
+export interface ContractEditScheduleResult {
+  calc: ContractCalculationResult;
+  items: EditedScheduleItemResult[];
+  totalPaidOnScheduleKopecks: number;
+  remainingDebtKopecks: number;
+  fullyPaidInstallmentsCount: number;
+  partiallyPaidInstallmentsCount: number;
+  unpaidInstallmentsCount: number;
+  hasExistingPaymentsWarning: boolean;
+  paymentPreservationSummary: string | null;
+}
+
+/**
+ * Safely recalculates a contract's payment schedule during full contract editing,
+ * preserving already-paid and partially-paid installments and redistributing
+ * only the remaining unpaid balance across non-closed installments.
+ */
+export function recalculateContractEditSchedule(
+  input: ContractCalculationInput,
+  existingItems: ExistingScheduleItemForEdit[]
+): ContractEditScheduleResult {
+  const calc = calculateContractAndSchedule(input);
+
+  const sortedExisting = [...existingItems].sort((a, b) => a.installmentNumber - b.installmentNumber);
+  const totalPaidOnScheduleKopecks = sortedExisting.reduce(
+    (sum, it) => sum + Math.max(0, Math.trunc(it.paidKopecks || 0)),
+    0
+  );
+
+  const itemsWithPayments = sortedExisting.filter((it) => (it.paidKopecks || 0) > 0);
+  const fullyPaidItems = itemsWithPayments.filter((it) => it.paidKopecks >= it.plannedKopecks && it.plannedKopecks > 0);
+  const partiallyPaidItems = itemsWithPayments.filter((it) => it.paidKopecks > 0 && it.paidKopecks < it.plannedKopecks);
+
+  if (calc.financedPrincipalKopecks < totalPaidOnScheduleKopecks) {
+    throw new Error(
+      `Новый остаток по договору к рассрочке (${formatRubles(calc.financedPrincipalKopecks)}) меньше суммы, уже оплаченной клиентом по графику (${formatRubles(totalPaidOnScheduleKopecks)}). Увеличьте стоимость товара/наценку, уменьшите первоначальный взнос или сначала сторнируйте лишний платёж.`
+    );
+  }
+
+  const remainingDebtKopecks = calc.financedPrincipalKopecks - totalPaidOnScheduleKopecks;
+  const touchedCount = itemsWithPayments.length;
+
+  if (calc.termMonths < touchedCount) {
+    throw new Error(
+      `Новый срок рассрочки (${calc.termMonths} мес.) меньше количества платежей, по которым уже внесены оплаты (${touchedCount} мес.). Укажите срок не менее ${touchedCount} мес.`
+    );
+  }
+
+  if (remainingDebtKopecks > 0 && calc.termMonths <= fullyPaidItems.length) {
+    throw new Error(
+      `По договору уже полностью оплачено ${fullyPaidItems.length} мес., при этом остаётся непогашенный долг (${formatRubles(remainingDebtKopecks)}). Увеличьте срок рассрочки минимум до ${fullyPaidItems.length + 1} мес.`
+    );
+  }
+
+  // Case 1: No schedule payments have been made yet -> use fresh schedule from calc
+  if (totalPaidOnScheduleKopecks === 0) {
+    const items: EditedScheduleItemResult[] = calc.schedule.map((s) => ({
+      installmentNumber: s.installmentNumber,
+      dueDate: s.dueDate,
+      originalDueDate: s.dueDate,
+      plannedKopecks: s.plannedKopecks,
+      paidKopecks: 0,
+      remainingKopecks: s.plannedKopecks,
+      status: 'pending',
+      promisedDate: null,
+      postponeReason: '',
+      preservedFromItemId: null,
+    }));
+
+    return {
+      calc,
+      items,
+      totalPaidOnScheduleKopecks: 0,
+      remainingDebtKopecks: calc.financedPrincipalKopecks,
+      fullyPaidInstallmentsCount: 0,
+      partiallyPaidInstallmentsCount: 0,
+      unpaidInstallmentsCount: items.length,
+      hasExistingPaymentsWarning: false,
+      paymentPreservationSummary: null,
+    };
+  }
+
+  // Case 2: Contract already has schedule payments -> preserve paid items and redistribute remainingDebtKopecks
+  const openSlotsCount = calc.termMonths - fullyPaidItems.length;
+  const shares: number[] = [];
+
+  if (openSlotsCount > 0 && remainingDebtKopecks > 0) {
+    const rawMonthly = remainingDebtKopecks / openSlotsCount;
+    let regularShare = applyRoundingRuleToInstallment(rawMonthly, calc.roundingRule);
+    if (regularShare <= 0 || regularShare * (openSlotsCount - 1) >= remainingDebtKopecks) {
+      regularShare = Math.floor(rawMonthly);
+    }
+    let accumulated = 0;
+    for (let i = 0; i < openSlotsCount; i++) {
+      const isLast = i === openSlotsCount - 1;
+      const share = isLast ? remainingDebtKopecks - accumulated : regularShare;
+      accumulated += share;
+      shares.push(share);
+    }
+  } else {
+    for (let i = 0; i < openSlotsCount; i++) {
+      shares.push(0);
+    }
+  }
+
+  const finalItems: EditedScheduleItemResult[] = [];
+  let lastAnchorDate = calc.scheduleStartDate;
+
+  // 1. Add all fully paid installments first, preserving their exact paid amounts and due dates
+  for (let i = 0; i < fullyPaidItems.length; i++) {
+    const fp = fullyPaidItems[i];
+    if (fp.dueDate > lastAnchorDate) {
+      lastAnchorDate = fp.dueDate;
+    }
+    finalItems.push({
+      installmentNumber: finalItems.length + 1,
+      dueDate: fp.dueDate,
+      originalDueDate: fp.originalDueDate || fp.dueDate,
+      plannedKopecks: fp.paidKopecks,
+      paidKopecks: fp.paidKopecks,
+      remainingKopecks: 0,
+      status: 'paid',
+      promisedDate: fp.promisedDate || null,
+      postponeReason: fp.postponeReason || '',
+      preservedFromItemId: fp.id,
+    });
+  }
+
+  // 2. Fill the remaining open slots (partially paid items first, then new unpaid items)
+  for (let slotIdx = 0; slotIdx < openSlotsCount; slotIdx++) {
+    const instNum = finalItems.length + 1;
+    const unpaidShare = shares[slotIdx] || 0;
+    const partialItem = partiallyPaidItems[slotIdx];
+
+    let candidateDate = addMonthsIsoDate(calc.scheduleStartDate, instNum, calc.paymentDayOfMonth);
+    let extraMonths = 1;
+    while (candidateDate <= lastAnchorDate && extraMonths <= 240) {
+      candidateDate = addMonthsIsoDate(calc.scheduleStartDate, instNum + extraMonths, calc.paymentDayOfMonth);
+      extraMonths++;
+    }
+    lastAnchorDate = candidateDate;
+
+    if (partialItem) {
+      const planned = partialItem.paidKopecks + unpaidShare;
+      const remaining = unpaidShare;
+      finalItems.push({
+        installmentNumber: instNum,
+        dueDate: candidateDate,
+        originalDueDate: partialItem.originalDueDate || candidateDate,
+        plannedKopecks: planned,
+        paidKopecks: partialItem.paidKopecks,
+        remainingKopecks: remaining,
+        status: remaining === 0 ? 'paid' : 'partial',
+        promisedDate: partialItem.promisedDate || null,
+        postponeReason: partialItem.postponeReason || '',
+        preservedFromItemId: partialItem.id,
+      });
+    } else if (unpaidShare > 0) {
+      finalItems.push({
+        installmentNumber: instNum,
+        dueDate: candidateDate,
+        originalDueDate: candidateDate,
+        plannedKopecks: unpaidShare,
+        paidKopecks: 0,
+        remainingKopecks: unpaidShare,
+        status: 'pending',
+        promisedDate: null,
+        postponeReason: '',
+        preservedFromItemId: null,
+      });
+    }
+  }
+
+  const paymentPreservationSummary =
+    `По графику уже внесено ${formatRubles(totalPaidOnScheduleKopecks)} ` +
+    `(закрыто месяцев: ${fullyPaidItems.length}${partiallyPaidItems.length > 0 ? `, частично оплачено: ${partiallyPaidItems.length}` : ''}). ` +
+    `Оставшийся долг ${formatRubles(remainingDebtKopecks)} распределён на ${openSlotsCount} мес.`;
+
+  return {
+    calc,
+    items: finalItems,
+    totalPaidOnScheduleKopecks,
+    remainingDebtKopecks,
+    fullyPaidInstallmentsCount: fullyPaidItems.length,
+    partiallyPaidInstallmentsCount: partiallyPaidItems.length,
+    unpaidInstallmentsCount: openSlotsCount,
+    hasExistingPaymentsWarning: true,
+    paymentPreservationSummary,
   };
 }
 

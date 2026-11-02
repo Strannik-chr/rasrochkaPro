@@ -2071,9 +2071,369 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
       .get(fatherUserId) as { cnt: number };
     assert.equal(ownerRecordsCheck.cnt >= 4, true);
     assert.equal(fatherRecordsCheck.cnt, 1);
+
+    // =========================================================================
+    // 10. Тестирование редактирования, удаления договоров и режимов ПВ (% и ₽)
+    // =========================================================================
+
+    // 10.1 Создание договора с ПВ по проценту (percent)
+    const percentDpContractRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        idempotencyKey: 'idem_dp_percent_001',
+        clientMode: 'new',
+        newClient: {
+          fullName: 'Тестов Клиент Процентный',
+          phone: '+79287771122',
+        },
+        itemTitle: 'Ноутбук MacBook Air M3',
+        purchaseCostKopecks: 8000000, // 80 000 ₽
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupMode: 'percent',
+        markupPercent: 25, // salePrice = 100 000 ₽
+        downPaymentMode: 'percent',
+        downPaymentPercent: 20, // downPayment = 20 000 ₽, financed = 80 000 ₽
+        termMonths: 4,
+        paymentDayOfMonth: 10,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-03-01',
+        collectDownPaymentNow: true,
+        downPaymentAccountId: 'acc_cash_main',
+        downPaymentMethod: 'cash',
+        confirmedCalculation: true,
+      },
+    });
+    assert.equal(percentDpContractRes.status, 201);
+    const percentDpContractId = percentDpContractRes.data.contractId;
+
+    // 10.2 Создание договора с фиксированным первоначальным взносом (fixed: 100 000 ₽ продажа, 25 000 ₽ ПВ, 6 мес.)
+    const fixedDpPreviewRes = await apiCall('/api/v1/contracts/preview', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        purchaseCostKopecks: 8000000, // 80 000 ₽
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupMode: 'fixed',
+        explicitMarkupKopecks: 2000000, // +20 000 ₽ => 100 000 ₽
+        downPaymentMode: 'fixed',
+        fixedDownPaymentKopecks: 2500000, // 25 000 ₽ фиксированный ПВ
+        termMonths: 6,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-03-01',
+        paymentDayOfMonth: 15,
+      },
+    });
+    assert.equal(fixedDpPreviewRes.status, 200);
+    assert.equal(fixedDpPreviewRes.data.salePriceKopecks, 10000000); // 100 000 ₽
+    assert.equal(fixedDpPreviewRes.data.downPaymentKopecks, 2500000); // 25 000 ₽
+    assert.equal(fixedDpPreviewRes.data.downPaymentPercent, 25); // 25%
+    assert.equal(fixedDpPreviewRes.data.financedPrincipalKopecks, 7500000); // 75 000 ₽ остаток
+    assert.equal(fixedDpPreviewRes.data.schedule.length, 6);
+    assert.equal(fixedDpPreviewRes.data.schedule[0].plannedKopecks, 1250000); // 12 500 ₽ / мес.
+
+    const stateAfterPercentContract = await apiCall('/api/v1/state', {
+      sessionToken: accAToken,
+    });
+    const testClient = stateAfterPercentContract.data.clients.find(
+      (cl: { phone: string }) => cl.phone === '+79287771122'
+    );
+    assert.ok(testClient);
+
+    const fixedDpContractRes = await apiCall('/api/v1/contracts', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        idempotencyKey: 'idem_dp_fixed_002',
+        clientMode: 'existing',
+        clientId: testClient.id,
+        itemTitle: 'iPhone 16 Pro Max 512GB',
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupMode: 'fixed',
+        explicitMarkupKopecks: 2000000,
+        downPaymentMode: 'fixed',
+        fixedDownPaymentKopecks: 2500000, // 25 000 ₽
+        termMonths: 6,
+        paymentDayOfMonth: 15,
+        roundingRule: 'kopeck',
+        scheduleType: 'equal',
+        startDate: '2026-03-01',
+        collectDownPaymentNow: false,
+        confirmedCalculation: true,
+      },
+    });
+    assert.equal(fixedDpContractRes.status, 201);
+    const fixedDpContractId = fixedDpContractRes.data.contractId;
+
+    // Проверяем, что в выдаче договора сохранился downPaymentMode === 'fixed' и markupMode === 'fixed'
+    const fixedContractDetails = await apiCall(`/api/v1/contracts/${fixedDpContractId}`, {
+      sessionToken: accAToken,
+    });
+    assert.equal(fixedContractDetails.status, 200);
+    assert.equal(fixedContractDetails.data.downPaymentMode, 'fixed');
+    assert.equal(fixedContractDetails.data.markupMode, 'fixed');
+    assert.equal(fixedContractDetails.data.downPaymentKopecks, 2500000);
+    assert.equal(fixedContractDetails.data.financedPrincipalKopecks, 7500000);
+
+    // 10.3 Редактирование договора без платежей (изменение стоимости, фиксированного ПВ, срока и даты ежемесячного платежа)
+    const editZeroPaidRes = await apiCall(`/api/v1/contracts/${fixedDpContractId}`, {
+      method: 'PUT',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        clientMode: 'existing',
+        clientId: testClient.id,
+        itemTitle: 'iPhone 16 Pro Max 1TB (Обновлён)',
+        purchaseCostKopecks: 9000000, // 90 000 ₽
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupMode: 'fixed',
+        explicitMarkupKopecks: 3000000, // +30 000 ₽ => 120 000 ₽
+        downPaymentMode: 'fixed',
+        fixedDownPaymentKopecks: 3000000, // 30 000 ₽ ПВ => 90 000 ₽ остаток
+        termMonths: 5, // 5 месяцев по 18 000 ₽
+        roundingRule: 'kopeck',
+        startDate: '2026-03-01',
+        paymentDayOfMonth: 20, // перенос на 20-е число
+        confirmEdit: true,
+        reason: 'Изменение комплектации и условий до начала выплат',
+      },
+    });
+    assert.equal(editZeroPaidRes.status, 200);
+    assert.equal(editZeroPaidRes.data.salePriceKopecks, 12000000);
+    assert.equal(editZeroPaidRes.data.downPaymentKopecks, 3000000);
+    assert.equal(editZeroPaidRes.data.remainingDebtKopecks, 9000000);
+
+    const editedZeroPaidDetails = await apiCall(`/api/v1/contracts/${fixedDpContractId}`, {
+      sessionToken: accAToken,
+    });
+    assert.equal(editedZeroPaidDetails.data.itemTitle, 'iPhone 16 Pro Max 1TB (Обновлён)');
+    assert.equal(editedZeroPaidDetails.data.termMonths, 5);
+    assert.equal(editedZeroPaidDetails.data.paymentDayOfMonth, 20);
+    assert.equal(editedZeroPaidDetails.data.schedule.length, 5);
+    assert.equal(editedZeroPaidDetails.data.schedule[0].plannedKopecks, 1800000);
+    assert.equal(editedZeroPaidDetails.data.schedule[0].dueDate, '2026-04-20');
+
+    // 10.4 Повторное сохранение при редактировании договора с ПВ не дублирует платежи и не меняет кассу
+    const stateBeforeRepeatEdit = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const cashBalanceBeforeRepeat = stateBeforeRepeatEdit.data.accounts.find(
+      (a: { id: string }) => a.id === 'acc_cash_main'
+    ).balanceKopecks;
+    const paymentsCountBeforeRepeat = stateBeforeRepeatEdit.data.payments.length;
+
+    const repeatEditRes = await apiCall(`/api/v1/contracts/${percentDpContractId}`, {
+      method: 'PUT',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        clientMode: 'existing',
+        clientId: testClient.id,
+        itemTitle: 'Ноутбук MacBook Air M3 (повторное сохранение)',
+        purchaseCostKopecks: 8000000,
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupMode: 'percent',
+        markupPercent: 25,
+        downPaymentMode: 'percent',
+        downPaymentPercent: 20, // те же 20 000 ₽ ПВ
+        termMonths: 4,
+        roundingRule: 'kopeck',
+        startDate: '2026-03-01',
+        paymentDayOfMonth: 10,
+        confirmEdit: true,
+      },
+    });
+    assert.equal(repeatEditRes.status, 200);
+
+    const stateAfterRepeatEdit = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const cashBalanceAfterRepeat = stateAfterRepeatEdit.data.accounts.find(
+      (a: { id: string }) => a.id === 'acc_cash_main'
+    ).balanceKopecks;
+    assert.equal(cashBalanceAfterRepeat, cashBalanceBeforeRepeat);
+    assert.equal(stateAfterRepeatEdit.data.payments.length, paymentsCountBeforeRepeat);
+    assert.equal(stateAfterRepeatEdit.data.reconciliation.isHealthy, true);
+
+    // 10.5 Редактирование договора с уже внесёнными платежами по графику
+    const percentContractSchedule = stateAfterRepeatEdit.data.contracts.find(
+      (c: { id: string }) => c.id === percentDpContractId
+    ).schedule;
+    // Оплачиваем 1-й взнос графика (20 000 ₽)
+    const payFirstMonthRes = await apiCall('/api/v1/payments', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        idempotencyKey: 'idem_pay_first_month_edit_test',
+        clientId: testClient.id,
+        contractId: percentDpContractId,
+        accountId: 'acc_cash_main',
+        amountKopecks: percentContractSchedule[0].plannedKopecks, // 20 000 ₽
+        paymentMethod: 'cash',
+        eventDate: '2026-04-10',
+        allocations: [
+          {
+            scheduleItemId: percentContractSchedule[0].id,
+            amountKopecks: percentContractSchedule[0].plannedKopecks,
+          },
+        ],
+      },
+    });
+    assert.equal(payFirstMonthRes.status, 201);
+
+    // 10.6 Попытка уменьшить сумму договора меньше уже выплаченной суммы по графику (< 20 000 ₽) блокируется (400)
+    const invalidShrinkEditRes = await apiCall(`/api/v1/contracts/${percentDpContractId}`, {
+      method: 'PUT',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        clientMode: 'existing',
+        clientId: testClient.id,
+        itemTitle: 'Ноутбук MacBook Air M3',
+        purchaseCostKopecks: 2000000, // 20 000 ₽
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupMode: 'fixed',
+        explicitMarkupKopecks: 500000, // salePrice = 25 000 ₽
+        downPaymentMode: 'fixed',
+        fixedDownPaymentKopecks: 1500000, // ПВ 15 000 ₽ => остаток 10 000 ₽ < 20 000 ₽ уже оплаченных по графику!
+        termMonths: 4,
+        roundingRule: 'kopeck',
+        startDate: '2026-03-01',
+        paymentDayOfMonth: 10,
+        confirmEdit: true,
+      },
+    });
+    assert.equal(invalidShrinkEditRes.status, 400);
+
+    // 10.7 Корректное редактирование договора с уже оплаченным 1-м взносом:
+    // увеличиваем срок до 5 месяцев и день платежа до 25-го числа, продажная цена 110 000 ₽, ПВ 20 000 ₽ => финансируемый остаток 90 000 ₽.
+    // Так как 1-й месяц (20 000 ₽) уже оплачен, оставшиеся 70 000 ₽ распределяются на 4 оставшихся месяца по 17 500 ₽!
+    const validPaidContractEditRes = await apiCall(`/api/v1/contracts/${percentDpContractId}`, {
+      method: 'PUT',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        clientMode: 'existing',
+        clientId: testClient.id,
+        itemTitle: 'Ноутбук MacBook Air M3 + Чехол',
+        purchaseCostKopecks: 8800000, // 88 000 ₽
+        deliveryCostKopecks: 0,
+        otherCostKopecks: 0,
+        markupMode: 'percent',
+        markupPercent: 25, // salePrice = 110 000 ₽
+        downPaymentMode: 'fixed',
+        fixedDownPaymentKopecks: 2000000, // 20 000 ₽ ПВ => 90 000 ₽ в рассрочку
+        termMonths: 5,
+        roundingRule: 'kopeck',
+        startDate: '2026-03-01',
+        paymentDayOfMonth: 25,
+        confirmEdit: true,
+      },
+    });
+    assert.equal(validPaidContractEditRes.status, 200);
+    assert.equal(validPaidContractEditRes.data.remainingDebtKopecks, 7000000); // 70 000 ₽
+
+    const afterPaidEditState = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    assert.equal(afterPaidEditState.data.reconciliation.isHealthy, true);
+    const updatedPercentContract = afterPaidEditState.data.contracts.find(
+      (c: { id: string }) => c.id === percentDpContractId
+    );
+    assert.equal(updatedPercentContract.schedule.length, 5);
+    // 1-й платёж сохранён как оплаченный на 20 000 ₽ (дата 2026-04-10 не изменилась)
+    assert.equal(updatedPercentContract.schedule[0].status, 'paid');
+    assert.equal(updatedPercentContract.schedule[0].paidKopecks, 2000000);
+    assert.equal(updatedPercentContract.schedule[0].dueDate, '2026-04-10');
+    // Оставшиеся 4 платежа пересчитаны по 17 500 ₽ (1750000 коп.) на 25-е число каждого месяца
+    assert.equal(updatedPercentContract.schedule[1].plannedKopecks, 1750000);
+    assert.equal(updatedPercentContract.schedule[1].dueDate, '2026-05-25');
+
+    // 10.8 Защита от чужого редактирования и удаления (IDOR 404): второй пользователь не может изменить или удалить договор первого
+    const crossTenantEditAttempt = await apiCall(`/api/v1/contracts/${percentDpContractId}`, {
+      method: 'PUT',
+      sessionToken: accBNewToken,
+      csrfToken: accBNewCsrf,
+      body: {
+        itemTitle: 'Взлом чужого договора',
+        purchaseCostKopecks: 5000000,
+        termMonths: 3,
+        paymentDayOfMonth: 10,
+        confirmEdit: true,
+      },
+    });
+    assert.equal(crossTenantEditAttempt.status, 404);
+
+    const crossTenantDeleteAttempt = await apiCall(`/api/v1/contracts/${percentDpContractId}`, {
+      method: 'DELETE',
+      sessionToken: accBNewToken,
+      csrfToken: accBNewCsrf,
+      body: { confirmDelete: true },
+    });
+    assert.equal(crossTenantDeleteAttempt.status, 404);
+
+    // 10.9 Удаление договора без платежей (fixedDpContractId)
+    const deleteWithoutConfirmRes = await apiCall(`/api/v1/contracts/${fixedDpContractId}`, {
+      method: 'DELETE',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: { confirmDelete: false },
+    });
+    assert.equal(deleteWithoutConfirmRes.status, 400);
+
+    const deleteNoPayContractRes = await apiCall(`/api/v1/contracts/${fixedDpContractId}`, {
+      method: 'DELETE',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        confirmDelete: true,
+        reason: 'Тестовое удаление договора без платежей',
+      },
+    });
+    assert.equal(deleteNoPayContractRes.status, 200);
+    assert.equal(deleteNoPayContractRes.data.ok, true);
+
+    // 10.10 Удаление договора с внесёнными платежами (percentDpContractId):
+    // платежи безопасно сторнируются, сверка финансов чистая, а сам клиент остаётся в базе!
+    const deleteWithPayContractRes = await apiCall(`/api/v1/contracts/${percentDpContractId}`, {
+      method: 'DELETE',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        confirmDelete: true,
+        reason: 'Тестовое удаление договора с платежами',
+      },
+    });
+    assert.equal(deleteWithPayContractRes.status, 200);
+    assert.equal(deleteWithPayContractRes.data.ok, true);
+    assert.equal(deleteWithPayContractRes.data.reversedPaymentsCount >= 2, true);
+
+    const finalStateAfterDeletes = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    assert.equal(finalStateAfterDeletes.data.reconciliation.isHealthy, true);
+    // Оба удалённых договора исчезли из активного списка договоров
+    assert.equal(
+      finalStateAfterDeletes.data.contracts.some(
+        (c: { id: string }) => c.id === fixedDpContractId || c.id === percentDpContractId
+      ),
+      false
+    );
+    // Клиент и другие договоры остались нетронутыми
+    assert.equal(
+      finalStateAfterDeletes.data.clients.some((cl: { id: string }) => cl.id === testClient.id),
+      true
+    );
+    assert.equal(finalStateAfterDeletes.data.contracts.length >= 1, true);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
 
 

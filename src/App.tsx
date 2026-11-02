@@ -33,7 +33,9 @@ import {
   translateScheduleStatus,
 } from './utils/format';
 import {
+  DeleteContractModal,
   EarlyPayoffModal,
+  EditContractModal,
   NewContractModal,
   PrintableDocumentModal,
   RestructureScheduleModal,
@@ -75,6 +77,7 @@ import {
   MessageCircle,
   Paperclip,
   Trash2,
+  Edit3,
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
@@ -171,6 +174,8 @@ export default function App() {
 
   // Modals
   const [showNewContractModal, setShowNewContractModal] = useState(false);
+  const [editingContract, setEditingContract] = useState<ContractDTO | null>(null);
+  const [deletingContract, setDeletingContract] = useState<ContractDTO | null>(null);
   const [earlyPayoffContract, setEarlyPayoffContract] = useState<ContractDTO | null>(null);
   const [restructureContract, setRestructureContract] = useState<ContractDTO | null>(null);
   const [printTemplateModal, setPrintTemplateModal] = useState<{
@@ -2472,6 +2477,22 @@ export default function App() {
                               >
                                 <Printer className="w-3.5 h-3.5" />
                                 <span>Печать договора</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingContract(c)}
+                                className="px-3 py-1.5 text-xs font-medium text-slate-900 bg-slate-100 border border-slate-300 rounded-lg hover:bg-slate-200 inline-flex items-center gap-1.5"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                                <span>Редактировать договор</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeletingContract(c)}
+                                className="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 inline-flex items-center gap-1.5"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Удалить договор</span>
                               </button>
                             </div>
                           </div>
@@ -5746,6 +5767,33 @@ export default function App() {
               'success',
               'График договора обновлён с учётом выплаченных месяцев.'
             );
+          }}
+        />
+      )}
+
+      {editingContract && (
+        <EditContractModal
+          contract={contracts.find((c) => c.id === editingContract.id) || editingContract}
+          clients={clients}
+          purchases={purchases}
+          plans={plans}
+          onClose={() => setEditingContract(null)}
+          apiFetch={apiFetch}
+          onSuccess={async () => {
+            await loadFullState();
+            notify('success', 'Параметры договора и график платежей успешно обновлены.');
+          }}
+        />
+      )}
+
+      {deletingContract && (
+        <DeleteContractModal
+          contract={contracts.find((c) => c.id === deletingContract.id) || deletingContract}
+          onClose={() => setDeletingContract(null)}
+          apiFetch={apiFetch}
+          onSuccess={async (msg) => {
+            await loadFullState();
+            notify('success', msg);
           }}
         />
       )}

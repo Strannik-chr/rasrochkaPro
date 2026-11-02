@@ -17,6 +17,7 @@ import {
   calculateTotalCostKopecks,
   computeAutomaticScheduleAllocations,
   formatRubles,
+  recalculateContractEditSchedule,
   recalculateUnpaidScheduleDates,
   toSafeCsvRow,
 } from '../finance/calculator';
@@ -49,6 +50,8 @@ import {
   writePrivateDocumentBuffer,
 } from '../services/storage';
 import {
+  DownPaymentMode,
+  MarkupMode,
   RoundingRule,
   ScheduleType,
   StatusRulesConfigDTO,
@@ -1055,7 +1058,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       )
       .all(ownerId, ownerId) as Array<Record<string, unknown>>;
 
-    // Contracts (scoped strictly to ownerId)
+    // Contracts (scoped strictly to ownerId, excluding deleted contracts)
     const contractsRaw = db
       .prepare(
         `
@@ -1065,7 +1068,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
                cl.address as client_address
         FROM contracts c
         JOIN clients cl ON cl.id = c.client_id
-        WHERE c.owner_user_id = ? AND cl.owner_user_id = ?
+        WHERE c.owner_user_id = ? AND cl.owner_user_id = ? AND COALESCE(c.is_deleted, 0) = 0
         ORDER BY c.created_at DESC
       `
       )
@@ -1238,6 +1241,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           };
         });
 
+      const extraCost = Number(c.extra_cost_kopecks || 0);
+      const otherCost = Number(c.other_cost_kopecks || 0);
+      const deliveryCost =
+        c.delivery_cost_kopecks !== null && c.delivery_cost_kopecks !== undefined &&
+        (Number(c.delivery_cost_kopecks) > 0 || otherCost > 0)
+          ? Number(c.delivery_cost_kopecks)
+          : Math.max(0, extraCost - otherCost);
+
       return {
         id: cId,
         contractNumber: String(c.contract_number),
@@ -1252,11 +1263,15 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         planVersion: Number(c.plan_version),
         itemTitle: String(c.item_title),
         purchaseCostKopecks: Number(c.purchase_cost_kopecks),
-        extraCostKopecks: Number(c.extra_cost_kopecks),
+        deliveryCostKopecks: deliveryCost,
+        otherCostKopecks: otherCost,
+        extraCostKopecks: extraCost,
         totalCostKopecks: totalCost,
+        markupMode: (c.markup_mode === 'fixed' ? 'fixed' : 'percent') as MarkupMode,
         markupPercent: Number(c.markup_percent),
         markupKopecks: salePrice - totalCost,
         salePriceKopecks: salePrice,
+        downPaymentMode: (c.down_payment_mode === 'fixed' ? 'fixed' : 'percent') as DownPaymentMode,
         downPaymentPercent: Number(c.down_payment_percent),
         downPaymentKopecks: downPayment,
         plannedDownPaymentKopecks,
@@ -1266,6 +1281,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         downPaymentShortfallKopecks,
         isCustomDownPayment,
         downPaymentPaidKopecks,
+        downPaymentDate: c.down_payment_date ? String(c.down_payment_date) : String(c.start_date),
+        scheduleStartDate: c.schedule_start_date ? String(c.schedule_start_date) : String(c.start_date),
         financedPrincipalKopecks: Number(c.financed_principal_kopecks),
         termMonths: Number(c.term_months),
         roundingRule: String(c.rounding_rule) as RoundingRule,
@@ -1281,6 +1298,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         closedAt: c.closed_at ? String(c.closed_at) : null,
         notes: String(c.notes || ''),
         createdAt: String(c.created_at),
+        updatedAt: c.updated_at ? String(c.updated_at) : null,
         totalPaidOnScheduleKopecks,
         totalCollectedKopecks: downPaymentPaidKopecks + totalPaidOnScheduleKopecks,
         remainingDebtKopecks,
@@ -1386,7 +1404,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
         FROM purchases p
         JOIN suppliers s ON s.id = p.supplier_id
         LEFT JOIN clients cl ON cl.id = p.client_id
-        LEFT JOIN contracts c ON c.purchase_id = p.id
+        LEFT JOIN contracts c ON c.purchase_id = p.id AND COALESCE(c.is_deleted, 0) = 0
         WHERE p.owner_user_id = ?
         ORDER BY p.purchase_date DESC, p.created_at DESC
       `
@@ -2641,7 +2659,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
     (req: AuthenticatedRequest, res: Response) => {
       const contractId = req.params.id;
       const cRow = db
-        .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ?')
+        .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ? AND COALESCE(is_deleted, 0) = 0')
         .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
 
       if (!cRow) {
@@ -2651,24 +2669,59 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           action: 'IDOR_ATTEMPT_BLOCKED',
           entityType: 'contract',
           entityId: contractId,
-          summary: `Предотвращена попытка доступа к договору ${contractId} другого аккаунта.`,
+          summary: `Предотвращена попытка доступа к договору ${contractId} другого аккаунта или удалённому договору.`,
         });
         res.status(404).json({ error: 'Договор не найден.' });
         return;
       }
 
+      const currentScheduleVersion = Number(cRow.current_schedule_version || 1);
+      const scheduleRows = db
+        .prepare(
+          'SELECT * FROM schedule_items WHERE contract_id = ? AND schedule_version = ? ORDER BY installment_number ASC'
+        )
+        .all(contractId, currentScheduleVersion) as Array<Record<string, unknown>>;
+
       res.json({
         id: String(cRow.id),
+        contractId: String(cRow.id),
         contractNumber: String(cRow.contract_number),
         clientId: String(cRow.client_id),
         itemTitle: String(cRow.item_title),
+        purchaseCostKopecks: Number(cRow.purchase_cost_kopecks),
+        deliveryCostKopecks: Number(cRow.delivery_cost_kopecks ?? cRow.extra_cost_kopecks ?? 0),
+        otherCostKopecks: Number(cRow.other_cost_kopecks ?? 0),
+        totalCostKopecks: Number(cRow.total_cost_kopecks),
+        markupMode: (cRow.markup_mode === 'fixed' ? 'fixed' : 'percent') as MarkupMode,
+        markupPercent: Number(cRow.markup_percent),
         salePriceKopecks: Number(cRow.sale_price_kopecks),
+        downPaymentMode: (cRow.down_payment_mode === 'fixed' ? 'fixed' : 'percent') as DownPaymentMode,
+        downPaymentPercent: Number(cRow.down_payment_percent),
         downPaymentKopecks: Number(cRow.down_payment_kopecks),
+        plannedDownPaymentKopecks: Number(cRow.planned_down_payment_kopecks ?? cRow.down_payment_kopecks),
+        actualDownPaymentKopecks: Number(cRow.actual_down_payment_kopecks ?? cRow.down_payment_kopecks),
+        downPaymentDate: cRow.down_payment_date ? String(cRow.down_payment_date) : String(cRow.start_date),
+        scheduleStartDate: cRow.schedule_start_date ? String(cRow.schedule_start_date) : String(cRow.start_date),
         financedPrincipalKopecks: Number(cRow.financed_principal_kopecks),
         termMonths: Number(cRow.term_months),
+        roundingRule: String(cRow.rounding_rule),
+        paymentDayOfMonth: cRow.payment_day_of_month ? Number(cRow.payment_day_of_month) : null,
+        currentScheduleVersion,
         status: String(cRow.status),
         startDate: String(cRow.start_date),
+        notes: String(cRow.notes || ''),
         createdAt: String(cRow.created_at),
+        updatedAt: cRow.updated_at ? String(cRow.updated_at) : null,
+        schedule: scheduleRows.map((it) => ({
+          id: String(it.id),
+          installmentNumber: Number(it.installment_number),
+          dueDate: String(it.due_date),
+          originalDueDate: String(it.original_due_date),
+          plannedKopecks: Number(it.planned_kopecks),
+          paidKopecks: Number(it.paid_kopecks),
+          remainingKopecks: Math.max(0, Number(it.planned_kopecks) - Number(it.paid_kopecks)),
+          status: String(it.status),
+        })),
       });
     }
   );
@@ -2704,8 +2757,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           purchaseCostKopecks,
           deliveryCostKopecks,
           otherCostKopecks,
+          markupMode,
           markupPercent,
+          explicitMarkupKopecks,
+          downPaymentMode,
           downPaymentPercent,
+          fixedDownPaymentKopecks,
           explicitDownPaymentKopecks,
           useCustomActualDownPayment,
           actualDownPaymentKopecks,
@@ -2714,6 +2771,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           roundingRule,
           scheduleType,
           startDate,
+          downPaymentDate,
+          scheduleStartDate,
           paymentDayOfMonth,
           customInstallmentsKopecks,
           downPaymentAccountId,
@@ -2782,8 +2841,12 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           purchaseCostKopecks?: number;
           deliveryCostKopecks?: number;
           otherCostKopecks?: number;
+          markupMode?: MarkupMode;
           markupPercent?: number;
+          explicitMarkupKopecks?: number;
+          downPaymentMode?: DownPaymentMode;
           downPaymentPercent?: number;
+          fixedDownPaymentKopecks?: number;
           explicitDownPaymentKopecks?: number;
           useCustomActualDownPayment?: boolean;
           actualDownPaymentKopecks?: number;
@@ -2792,6 +2855,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           roundingRule?: RoundingRule;
           scheduleType?: ScheduleType;
           startDate?: string;
+          downPaymentDate?: string | null;
+          scheduleStartDate?: string | null;
           paymentDayOfMonth?: number | string | null;
           customInstallmentsKopecks?: number[];
           downPaymentAccountId?: string;
@@ -2821,6 +2886,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           if (existingContract) {
             res.status(200).json({
               id: existingContract.id,
+              contractId: existingContract.id,
               contractNumber: existingContract.contract_number,
               clientId: existingContract.client_id,
               idempotentReplay: true,
@@ -3300,7 +3366,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
+        const effectiveMarkupMode: MarkupMode =
+          markupMode === 'fixed' || (markupMode === undefined && typeof explicitMarkupKopecks === 'number')
+            ? 'fixed'
+            : 'percent';
+
         if (
+          effectiveMarkupMode === 'percent' &&
           Object.prototype.hasOwnProperty.call(req.body || {}, 'markupPercent') &&
           (markupPercent === ('' as any) || markupPercent === null || markupPercent === undefined || !Number.isFinite(Number(markupPercent)) || Number(markupPercent) < 0)
         ) {
@@ -3308,21 +3380,48 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           return;
         }
 
+        const effectiveDownPaymentMode: DownPaymentMode =
+          downPaymentMode === 'fixed' ||
+          typeof fixedDownPaymentKopecks === 'number' ||
+          (downPaymentMode === undefined &&
+            typeof explicitDownPaymentKopecks === 'number' &&
+            !useCustomActualDownPayment)
+            ? 'fixed'
+            : 'percent';
+
         if (
+          effectiveDownPaymentMode === 'percent' &&
           Object.prototype.hasOwnProperty.call(req.body || {}, 'downPaymentPercent') &&
           typeof explicitDownPaymentKopecks !== 'number' &&
+          typeof fixedDownPaymentKopecks !== 'number' &&
           (downPaymentPercent === ('' as any) || downPaymentPercent === null || downPaymentPercent === undefined || !Number.isFinite(Number(downPaymentPercent)) || Number(downPaymentPercent) < 0 || Number(downPaymentPercent) >= 100)
         ) {
           res.status(400).json({ error: 'Укажите корректный процент первоначального взноса (от 0% до 99,99%).' });
           return;
         }
 
+        const resolvedStartDate = (startDate && startDate.trim()) || new Date().toISOString().slice(0, 10);
+        const resolvedDownPaymentDate =
+          (downPaymentDate && downPaymentDate.trim()) || resolvedStartDate;
+        const resolvedScheduleStartDate =
+          (scheduleStartDate && scheduleStartDate.trim()) || resolvedStartDate;
+
         const calc = calculateContractAndSchedule({
           purchaseCostKopecks: Number(purchaseCostKopecks || 0),
           deliveryCostKopecks: Number(deliveryCostKopecks || 0),
           otherCostKopecks: Number(otherCostKopecks || 0),
+          markupMode: effectiveMarkupMode,
           markupPercent: Number(markupPercent ?? 25),
+          explicitMarkupKopecks:
+            typeof explicitMarkupKopecks === 'number' ? explicitMarkupKopecks : undefined,
+          downPaymentMode: effectiveDownPaymentMode,
           downPaymentPercent: typeof downPaymentPercent === 'number' ? downPaymentPercent : undefined,
+          fixedDownPaymentKopecks:
+            typeof fixedDownPaymentKopecks === 'number'
+              ? fixedDownPaymentKopecks
+              : effectiveDownPaymentMode === 'fixed' && typeof explicitDownPaymentKopecks === 'number'
+                ? explicitDownPaymentKopecks
+                : undefined,
           explicitDownPaymentKopecks:
             typeof explicitDownPaymentKopecks === 'number' ? explicitDownPaymentKopecks : undefined,
           useCustomActualDownPayment: Boolean(useCustomActualDownPayment),
@@ -3331,7 +3430,8 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           termMonths: Number(termMonths || 6),
           roundingRule: roundingRule || 'kopeck',
           scheduleType: scheduleType || 'equal',
-          startDate: startDate || new Date().toISOString().slice(0, 10),
+          startDate: resolvedStartDate,
+          scheduleStartDate: resolvedScheduleStartDate,
           paymentDayOfMonth: validatedPaymentDay,
           customInstallmentsKopecks,
         });
@@ -3434,13 +3534,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           db.prepare(`
             INSERT INTO contracts (
               id, idempotency_key, contract_number, client_id, purchase_id, plan_id, plan_version,
-              item_title, purchase_cost_kopecks, extra_cost_kopecks, total_cost_kopecks,
-              markup_percent, sale_price_kopecks, down_payment_percent, down_payment_kopecks,
+              item_title, purchase_cost_kopecks, delivery_cost_kopecks, other_cost_kopecks, extra_cost_kopecks, total_cost_kopecks,
+              markup_mode, markup_percent, sale_price_kopecks, down_payment_mode, down_payment_percent, down_payment_kopecks,
               planned_down_payment_kopecks, actual_down_payment_kopecks, down_payment_diff_kopecks,
               extra_down_payment_kopecks, down_payment_shortfall_kopecks, is_custom_down_payment,
+              down_payment_date, schedule_start_date,
               financed_principal_kopecks, term_months, rounding_rule, schedule_type,
               start_date, payment_day_of_month, current_schedule_version, status, notes, created_by, owner_user_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
           `).run(
             contractId,
             trimmedIdemKey || null,
@@ -3451,10 +3552,14 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             planVersion,
             itemTitle.trim(),
             calc.purchaseCostKopecks,
+            calc.deliveryCostKopecks,
+            calc.otherCostKopecks,
             calc.deliveryCostKopecks + calc.otherCostKopecks,
             calc.totalCostKopecks,
+            calc.markupMode,
             calc.markupPercent,
             calc.salePriceKopecks,
+            calc.downPaymentMode,
             calc.downPaymentPercent,
             calc.downPaymentKopecks,
             calc.plannedDownPaymentKopecks,
@@ -3463,11 +3568,13 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             calc.extraDownPaymentKopecks,
             calc.downPaymentShortfallKopecks,
             calc.useCustomActualDownPayment ? 1 : 0,
+            resolvedDownPaymentDate,
+            calc.scheduleStartDate,
             calc.financedPrincipalKopecks,
             calc.termMonths,
             calc.roundingRule,
             calc.scheduleType,
-            startDate || now.slice(0, 10),
+            resolvedStartDate,
             calc.paymentDayOfMonth,
             activeScheduleVersion,
             (notes || '').trim(),
@@ -3688,7 +3795,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               dpMethod,
               calc.downPaymentKopecks,
               calc.downPaymentKopecks,
-              startDate || now.slice(0, 10),
+              resolvedDownPaymentDate,
               dpPaymentNotes,
               req.user!.id,
               req.user!.id,
@@ -3708,7 +3815,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
               calc.downPaymentKopecks,
               payId,
               `${dpPaymentNotes} (${itemTitle.trim()})`,
-              startDate || now.slice(0, 10),
+              resolvedDownPaymentDate,
               req.user!.id,
               req.user!.id,
               now
@@ -3754,17 +3861,20 @@ export function createApiRouter(db: DatabaseSync): express.Router {
             action: 'CONTRACT_CREATED',
             entityType: 'contract',
             entityId: contractId,
-            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, плановый ПВ: ${formatRubles(calc.plannedDownPaymentKopecks)}, фактический ПВ: ${formatRubles(calc.actualDownPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес., поручителей: ${createdGuarantorIds.length}, файлов: ${uploadedDocumentIds.length}).`,
+            summary: `Оформлен договор ${contractNumber} на товар «${itemTitle.trim()}» (себестоимость: ${formatRubles(calc.totalCostKopecks)}, наценка: ${calc.markupPercent}%, цена продажи: ${formatRubles(calc.salePriceKopecks)}, режим ПВ: ${calc.downPaymentMode === 'fixed' ? 'фиксированная сумма' : 'процент'}, плановый ПВ: ${formatRubles(calc.plannedDownPaymentKopecks)}, фактический ПВ: ${formatRubles(calc.actualDownPaymentKopecks)}, остаток: ${formatRubles(calc.financedPrincipalKopecks)}, срок: ${calc.termMonths} мес., поручителей: ${createdGuarantorIds.length}, файлов: ${uploadedDocumentIds.length}).`,
           });
         });
 
         res.status(201).json({
           id: contractId,
+          contractId,
           contractNumber,
           clientId: resolvedClientId,
           createdNewClient: Boolean(createdNewClientData),
           guarantorIds: createdGuarantorIds,
           documentIds: uploadedDocumentIds,
+          downPaymentMode: calc.downPaymentMode,
+          markupMode: calc.markupMode,
           plannedDownPaymentKopecks: calc.plannedDownPaymentKopecks,
           actualDownPaymentKopecks: calc.actualDownPaymentKopecks,
           downPaymentDiffKopecks: calc.downPaymentDiffKopecks,
@@ -3780,6 +3890,1092 @@ export function createApiRouter(db: DatabaseSync): express.Router {
       }
     }
   );
+
+  // Preview full contract edit with existing payment preservation & schedule recalculation
+  router.post(
+    '/contracts/:id/edit-preview',
+    requireAuth,
+    requireRoles(['owner', 'staff']),
+    (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const contractId = req.params.id;
+        const cRow = db
+          .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ? AND COALESCE(is_deleted, 0) = 0')
+          .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
+
+        if (!cRow) {
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'IDOR_ATTEMPT_BLOCKED',
+            entityType: 'contract',
+            entityId: contractId,
+            summary: `Предотвращена попытка предпросмотра редактирования договора ${contractId} другого аккаунта.`,
+          });
+          res.status(404).json({ error: 'Договор не найден.' });
+          return;
+        }
+
+        const currentVer = Number(cRow.current_schedule_version);
+        const existingItemsRaw = db
+          .prepare(
+            'SELECT * FROM schedule_items WHERE contract_id = ? AND schedule_version = ? ORDER BY installment_number ASC'
+          )
+          .all(contractId, currentVer) as Array<Record<string, unknown>>;
+
+        const existingItems = existingItemsRaw.map((it) => ({
+          id: String(it.id),
+          installmentNumber: Number(it.installment_number),
+          dueDate: String(it.due_date),
+          originalDueDate: String(it.original_due_date),
+          plannedKopecks: Number(it.planned_kopecks),
+          paidKopecks: Number(it.paid_kopecks),
+          status: String(it.status),
+          promisedDate: it.promised_date ? String(it.promised_date) : null,
+          postponeReason: String(it.postpone_reason || ''),
+        }));
+
+        const dpPaidRow = db
+          .prepare(
+            `SELECT COALESCE(SUM(amount_kopecks), 0) as paid_dp
+             FROM payments
+             WHERE contract_id = ? AND owner_user_id = ? AND is_down_payment = 1 AND status = 'confirmed'`
+          )
+          .get(contractId, req.user!.id) as { paid_dp: number };
+        const downPaymentPaidKopecks = Number(dpPaidRow.paid_dp || 0);
+
+        const extraCost = Number(cRow.extra_cost_kopecks || 0);
+        const defaultOtherCost = Number(cRow.other_cost_kopecks || 0);
+        const defaultDeliveryCost =
+          cRow.delivery_cost_kopecks !== null &&
+          cRow.delivery_cost_kopecks !== undefined &&
+          (Number(cRow.delivery_cost_kopecks) > 0 || defaultOtherCost > 0)
+            ? Number(cRow.delivery_cost_kopecks)
+            : Math.max(0, extraCost - defaultOtherCost);
+
+        const body = (req.body || {}) as Record<string, any>;
+        const resolvedStartDate =
+          (typeof body.startDate === 'string' && body.startDate.trim()) || String(cRow.start_date);
+        const resolvedScheduleStartDate =
+          (typeof body.scheduleStartDate === 'string' && body.scheduleStartDate.trim()) ||
+          (cRow.schedule_start_date ? String(cRow.schedule_start_date) : resolvedStartDate);
+        const resolvedPaymentDay =
+          body.paymentDayOfMonth !== undefined && body.paymentDayOfMonth !== null && body.paymentDayOfMonth !== ''
+            ? assertPaymentDayOfMonth(body.paymentDayOfMonth)
+            : cRow.payment_day_of_month
+              ? Number(cRow.payment_day_of_month)
+              : Number(resolvedStartDate.slice(8, 10));
+
+        const resolvedMarkupMode: MarkupMode =
+          body.markupMode === 'fixed' ||
+          (body.markupMode === undefined &&
+            (typeof body.explicitMarkupKopecks === 'number' || cRow.markup_mode === 'fixed'))
+            ? 'fixed'
+            : 'percent';
+
+        const resolvedDownPaymentMode: DownPaymentMode =
+          body.downPaymentMode === 'fixed' ||
+          typeof body.fixedDownPaymentKopecks === 'number' ||
+          (body.downPaymentMode === undefined && cRow.down_payment_mode === 'fixed')
+            ? 'fixed'
+            : 'percent';
+
+        const editResult = recalculateContractEditSchedule(
+          {
+            purchaseCostKopecks:
+              body.purchaseCostKopecks !== undefined
+                ? Number(body.purchaseCostKopecks)
+                : Number(cRow.purchase_cost_kopecks),
+            deliveryCostKopecks:
+              body.deliveryCostKopecks !== undefined ? Number(body.deliveryCostKopecks) : defaultDeliveryCost,
+            otherCostKopecks:
+              body.otherCostKopecks !== undefined ? Number(body.otherCostKopecks) : defaultOtherCost,
+            markupMode: resolvedMarkupMode,
+            markupPercent:
+              body.markupPercent !== undefined ? Number(body.markupPercent) : Number(cRow.markup_percent),
+            explicitMarkupKopecks:
+              typeof body.explicitMarkupKopecks === 'number'
+                ? body.explicitMarkupKopecks
+                : resolvedMarkupMode === 'fixed'
+                  ? Number(cRow.sale_price_kopecks) - Number(cRow.total_cost_kopecks)
+                  : undefined,
+            downPaymentMode: resolvedDownPaymentMode,
+            downPaymentPercent:
+              body.downPaymentPercent !== undefined
+                ? Number(body.downPaymentPercent)
+                : Number(cRow.down_payment_percent),
+            fixedDownPaymentKopecks:
+              typeof body.fixedDownPaymentKopecks === 'number'
+                ? body.fixedDownPaymentKopecks
+                : typeof body.explicitDownPaymentKopecks === 'number' && !body.useCustomActualDownPayment
+                  ? body.explicitDownPaymentKopecks
+                  : resolvedDownPaymentMode === 'fixed'
+                    ? Number(cRow.planned_down_payment_kopecks || cRow.down_payment_kopecks)
+                    : undefined,
+            useCustomActualDownPayment:
+              body.useCustomActualDownPayment !== undefined
+                ? Boolean(body.useCustomActualDownPayment)
+                : Boolean(cRow.is_custom_down_payment),
+            actualDownPaymentKopecks:
+              typeof body.actualDownPaymentKopecks === 'number'
+                ? body.actualDownPaymentKopecks
+                : Boolean(body.useCustomActualDownPayment ?? cRow.is_custom_down_payment)
+                  ? Number(cRow.actual_down_payment_kopecks || cRow.down_payment_kopecks)
+                  : undefined,
+            termMonths: body.termMonths !== undefined ? Number(body.termMonths) : Number(cRow.term_months),
+            roundingRule: (body.roundingRule || String(cRow.rounding_rule)) as RoundingRule,
+            scheduleType: (body.scheduleType || String(cRow.schedule_type || 'equal')) as ScheduleType,
+            startDate: resolvedStartDate,
+            scheduleStartDate: resolvedScheduleStartDate,
+            paymentDayOfMonth: resolvedPaymentDay,
+          },
+          existingItems
+        );
+
+        res.json({
+          isValid: true,
+          validationError: null,
+          ...editResult.calc,
+          calculation: editResult.calc,
+          recalculation: {
+            items: editResult.items,
+            totalPaidOnScheduleKopecks: editResult.totalPaidOnScheduleKopecks,
+            paidInstallmentsCount:
+              editResult.fullyPaidInstallmentsCount + editResult.partiallyPaidInstallmentsCount,
+            newRemainingDebtKopecks: editResult.remainingDebtKopecks,
+          },
+          editedSchedule: editResult.items,
+          totalPaidOnScheduleKopecks: editResult.totalPaidOnScheduleKopecks,
+          downPaymentPaidKopecks,
+          remainingDebtKopecks: editResult.remainingDebtKopecks,
+          fullyPaidInstallmentsCount: editResult.fullyPaidInstallmentsCount,
+          partiallyPaidInstallmentsCount: editResult.partiallyPaidInstallmentsCount,
+          unpaidInstallmentsCount: editResult.unpaidInstallmentsCount,
+          hasExistingPaymentsWarning:
+            editResult.hasExistingPaymentsWarning || downPaymentPaidKopecks > 0,
+          paymentPreservationSummary: editResult.paymentPreservationSummary,
+          previousValues: {
+            itemTitle: String(cRow.item_title),
+            totalCostKopecks: Number(cRow.total_cost_kopecks),
+            salePriceKopecks: Number(cRow.sale_price_kopecks),
+            downPaymentKopecks: Number(cRow.down_payment_kopecks),
+            financedPrincipalKopecks: Number(cRow.financed_principal_kopecks),
+            termMonths: Number(cRow.term_months),
+            markupPercent: Number(cRow.markup_percent),
+            downPaymentPercent: Number(cRow.down_payment_percent),
+            downPaymentMode: String(cRow.down_payment_mode || 'percent'),
+            paymentDayOfMonth: cRow.payment_day_of_month ? Number(cRow.payment_day_of_month) : null,
+            startDate: String(cRow.start_date),
+            clientId: String(cRow.client_id),
+          },
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Ошибка предпросмотра изменений договора.';
+        res.status(400).json({
+          isValid: false,
+          validationError: msg,
+          error: msg,
+        });
+      }
+    }
+  );
+
+  // Full Contract Editing (PUT /contracts/:id and PATCH /contracts/:id)
+  const handleUpdateContract = (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const contractId = req.params.id;
+      const cRow = db
+        .prepare('SELECT * FROM contracts WHERE id = ? AND owner_user_id = ? AND COALESCE(is_deleted, 0) = 0')
+        .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
+
+      if (!cRow) {
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'IDOR_ATTEMPT_BLOCKED',
+          entityType: 'contract',
+          entityId: contractId,
+          summary: `Предотвращена попытка редактирования договора ${contractId} другого аккаунта или удалённого договора.`,
+        });
+        res.status(404).json({ error: 'Договор не найден.' });
+        return;
+      }
+
+      const body = (req.body || {}) as Record<string, any>;
+      if (body.confirmedCalculation === false) {
+        res.status(400).json({
+          error: 'Подтвердите предпросмотр изменений договора и нового графика платежей перед сохранением.',
+        });
+        return;
+      }
+
+      const nextItemTitle =
+        typeof body.itemTitle === 'string' ? body.itemTitle.trim() : String(cRow.item_title);
+      if (!nextItemTitle) {
+        res.status(400).json({ error: 'Наименование товара не может быть пустым.' });
+        return;
+      }
+
+      // Resolve client (keep existing, switch to another existing client, or create new client)
+      let resolvedClientId = String(cRow.client_id);
+      let createdNewClientData: {
+        id: string;
+        fullName: string;
+        phone: string;
+        secondaryPhone: string;
+        documentRef: string;
+        address: string;
+        notes: string;
+      } | null = null;
+
+      if (body.clientMode === 'new' && body.newClient) {
+        const nc = body.newClient;
+        const composedName = [nc.lastName, nc.firstName, nc.middleName]
+          .map((s: string) => (s || '').trim())
+          .filter(Boolean)
+          .join(' ');
+        const rawName = (nc.fullName || composedName || '').trim();
+        const rawPhone = (nc.phone || '').trim();
+        if (!rawName || !rawPhone) {
+          res.status(400).json({ error: 'Для нового клиента укажите ФИО и номер телефона.' });
+          return;
+        }
+        const normalizedPhone = normalizeRussianPhone(rawPhone);
+        if (!normalizedPhone) {
+          res.status(400).json({
+            error: 'Укажите корректный российский номер телефона клиента (+7XXXXXXXXXX или 8XXXXXXXXXX).',
+          });
+          return;
+        }
+        const phoneDup = db
+          .prepare(
+            'SELECT id, full_name, phone FROM clients WHERE owner_user_id = ? AND (phone = ? OR secondary_phone = ?)'
+          )
+          .get(req.user!.id, normalizedPhone, normalizedPhone) as
+          | { id: string; full_name: string; phone: string }
+          | undefined;
+        if (phoneDup) {
+          res.status(409).json({
+            error: `Клиент с номером ${normalizedPhone} уже зарегистрирован («${phoneDup.full_name}»). Выберите его из существующих клиентов.`,
+          });
+          return;
+        }
+        resolvedClientId = `cli_${crypto.randomUUID().slice(0, 8)}`;
+        createdNewClientData = {
+          id: resolvedClientId,
+          fullName: rawName,
+          phone: normalizedPhone,
+          secondaryPhone: nc.secondaryPhone?.trim()
+            ? normalizeRussianPhone(nc.secondaryPhone) || nc.secondaryPhone.trim()
+            : '',
+          documentRef: (nc.documentRef || '').trim(),
+          address: (nc.address || '').trim(),
+          notes: (nc.notes || '').trim(),
+        };
+      } else if (body.clientId && String(body.clientId).trim() !== String(cRow.client_id)) {
+        const targetClientId = String(body.clientId).trim();
+        const existingClient = db
+          .prepare('SELECT id FROM clients WHERE id = ? AND owner_user_id = ?')
+          .get(targetClientId, req.user!.id) as { id: string } | undefined;
+        if (!existingClient) {
+          recordAudit(db, {
+            actorUserId: req.user!.id,
+            actorEmail: req.user!.phone || req.user!.email,
+            action: 'IDOR_ATTEMPT_BLOCKED',
+            entityType: 'client',
+            entityId: targetClientId,
+            summary: `Предотвращена попытка привязки чужого клиента ${targetClientId} при редактировании договора ${contractId}.`,
+          });
+          res.status(404).json({ error: 'Выбранный клиент не найден в вашем аккаунте.' });
+          return;
+        }
+        resolvedClientId = existingClient.id;
+      }
+
+      // Validate optional purchaseId
+      const nextPurchaseId =
+        body.purchaseId !== undefined
+          ? body.purchaseId
+            ? String(body.purchaseId).trim()
+            : null
+          : cRow.purchase_id
+            ? String(cRow.purchase_id)
+            : null;
+      if (nextPurchaseId) {
+        const purRow = db
+          .prepare('SELECT id FROM purchases WHERE id = ? AND owner_user_id = ?')
+          .get(nextPurchaseId, req.user!.id) as { id: string } | undefined;
+        if (!purRow) {
+          res.status(404).json({ error: 'Связанная закупка не найдена в вашем аккаунте.' });
+          return;
+        }
+      }
+
+      const currentVer = Number(cRow.current_schedule_version);
+      const existingItemsRaw = db
+        .prepare(
+          'SELECT * FROM schedule_items WHERE contract_id = ? AND schedule_version = ? ORDER BY installment_number ASC'
+        )
+        .all(contractId, currentVer) as Array<Record<string, unknown>>;
+
+      const existingItems = existingItemsRaw.map((it) => ({
+        id: String(it.id),
+        installmentNumber: Number(it.installment_number),
+        dueDate: String(it.due_date),
+        originalDueDate: String(it.original_due_date),
+        plannedKopecks: Number(it.planned_kopecks),
+        paidKopecks: Number(it.paid_kopecks),
+        status: String(it.status),
+        promisedDate: it.promised_date ? String(it.promised_date) : null,
+        postponeReason: String(it.postpone_reason || ''),
+      }));
+
+      const extraCost = Number(cRow.extra_cost_kopecks || 0);
+      const defaultOtherCost = Number(cRow.other_cost_kopecks || 0);
+      const defaultDeliveryCost =
+        cRow.delivery_cost_kopecks !== null &&
+        cRow.delivery_cost_kopecks !== undefined &&
+        (Number(cRow.delivery_cost_kopecks) > 0 || defaultOtherCost > 0)
+          ? Number(cRow.delivery_cost_kopecks)
+          : Math.max(0, extraCost - defaultOtherCost);
+
+      const resolvedStartDate =
+        (typeof body.startDate === 'string' && body.startDate.trim()) || String(cRow.start_date);
+      const resolvedDownPaymentDate =
+        (typeof body.downPaymentDate === 'string' && body.downPaymentDate.trim()) ||
+        (cRow.down_payment_date ? String(cRow.down_payment_date) : resolvedStartDate);
+      const resolvedScheduleStartDate =
+        (typeof body.scheduleStartDate === 'string' && body.scheduleStartDate.trim()) ||
+        (cRow.schedule_start_date ? String(cRow.schedule_start_date) : resolvedStartDate);
+      const resolvedPaymentDay =
+        body.paymentDayOfMonth !== undefined && body.paymentDayOfMonth !== null && body.paymentDayOfMonth !== ''
+          ? assertPaymentDayOfMonth(body.paymentDayOfMonth)
+          : cRow.payment_day_of_month
+            ? Number(cRow.payment_day_of_month)
+            : Number(resolvedStartDate.slice(8, 10));
+
+      const resolvedMarkupMode: MarkupMode =
+        body.markupMode === 'fixed' ||
+        (body.markupMode === undefined &&
+          (typeof body.explicitMarkupKopecks === 'number' || cRow.markup_mode === 'fixed'))
+          ? 'fixed'
+          : 'percent';
+
+      const resolvedDownPaymentMode: DownPaymentMode =
+        body.downPaymentMode === 'fixed' ||
+        typeof body.fixedDownPaymentKopecks === 'number' ||
+        (body.downPaymentMode === undefined && cRow.down_payment_mode === 'fixed')
+          ? 'fixed'
+          : 'percent';
+
+      const editResult = recalculateContractEditSchedule(
+        {
+          purchaseCostKopecks:
+            body.purchaseCostKopecks !== undefined
+              ? Number(body.purchaseCostKopecks)
+              : Number(cRow.purchase_cost_kopecks),
+          deliveryCostKopecks:
+            body.deliveryCostKopecks !== undefined ? Number(body.deliveryCostKopecks) : defaultDeliveryCost,
+          otherCostKopecks:
+            body.otherCostKopecks !== undefined ? Number(body.otherCostKopecks) : defaultOtherCost,
+          markupMode: resolvedMarkupMode,
+          markupPercent:
+            body.markupPercent !== undefined ? Number(body.markupPercent) : Number(cRow.markup_percent),
+          explicitMarkupKopecks:
+            typeof body.explicitMarkupKopecks === 'number'
+              ? body.explicitMarkupKopecks
+              : resolvedMarkupMode === 'fixed'
+                ? Number(cRow.sale_price_kopecks) - Number(cRow.total_cost_kopecks)
+                : undefined,
+          downPaymentMode: resolvedDownPaymentMode,
+          downPaymentPercent:
+            body.downPaymentPercent !== undefined
+              ? Number(body.downPaymentPercent)
+              : Number(cRow.down_payment_percent),
+          fixedDownPaymentKopecks:
+            typeof body.fixedDownPaymentKopecks === 'number'
+              ? body.fixedDownPaymentKopecks
+              : typeof body.explicitDownPaymentKopecks === 'number' && !body.useCustomActualDownPayment
+                ? body.explicitDownPaymentKopecks
+                : resolvedDownPaymentMode === 'fixed'
+                  ? Number(cRow.planned_down_payment_kopecks || cRow.down_payment_kopecks)
+                  : undefined,
+          useCustomActualDownPayment:
+            body.useCustomActualDownPayment !== undefined
+              ? Boolean(body.useCustomActualDownPayment)
+              : Boolean(cRow.is_custom_down_payment),
+          actualDownPaymentKopecks:
+            typeof body.actualDownPaymentKopecks === 'number'
+              ? body.actualDownPaymentKopecks
+              : Boolean(body.useCustomActualDownPayment ?? cRow.is_custom_down_payment)
+                ? Number(cRow.actual_down_payment_kopecks || cRow.down_payment_kopecks)
+                : undefined,
+          termMonths: body.termMonths !== undefined ? Number(body.termMonths) : Number(cRow.term_months),
+          roundingRule: (body.roundingRule || String(cRow.rounding_rule)) as RoundingRule,
+          scheduleType: (body.scheduleType || String(cRow.schedule_type || 'equal')) as ScheduleType,
+          startDate: resolvedStartDate,
+          scheduleStartDate: resolvedScheduleStartDate,
+          paymentDayOfMonth: resolvedPaymentDay,
+        },
+        existingItems
+      );
+
+      const calc = editResult.calc;
+      const nextPlanId =
+        body.planId !== undefined ? (body.planId ? String(body.planId) : null) : cRow.plan_id ? String(cRow.plan_id) : null;
+      let nextPlanVersion = Number(cRow.plan_version || 1);
+      if (nextPlanId) {
+        const pRow = db
+          .prepare('SELECT version FROM installment_plans WHERE id = ? AND owner_user_id = ?')
+          .get(nextPlanId, req.user!.id) as { version: number } | undefined;
+        if (pRow) nextPlanVersion = pRow.version;
+      }
+
+      const nextNotes = body.notes !== undefined ? String(body.notes).trim() : String(cRow.notes || '');
+      const changeReason =
+        (typeof body.reason === 'string' && body.reason.trim()) ||
+        `Редактирование параметров договора ${String(cRow.contract_number)}`;
+      const newVer = currentVer + 1;
+      const now = new Date().toISOString();
+
+      const oldSnapshot = {
+        clientId: String(cRow.client_id),
+        purchaseId: cRow.purchase_id ? String(cRow.purchase_id) : null,
+        planId: cRow.plan_id ? String(cRow.plan_id) : null,
+        itemTitle: String(cRow.item_title),
+        purchaseCostKopecks: Number(cRow.purchase_cost_kopecks),
+        deliveryCostKopecks: defaultDeliveryCost,
+        otherCostKopecks: defaultOtherCost,
+        totalCostKopecks: Number(cRow.total_cost_kopecks),
+        markupMode: String(cRow.markup_mode || 'percent'),
+        markupPercent: Number(cRow.markup_percent),
+        salePriceKopecks: Number(cRow.sale_price_kopecks),
+        downPaymentMode: String(cRow.down_payment_mode || 'percent'),
+        downPaymentPercent: Number(cRow.down_payment_percent),
+        downPaymentKopecks: Number(cRow.down_payment_kopecks),
+        plannedDownPaymentKopecks: Number(cRow.planned_down_payment_kopecks || cRow.down_payment_kopecks),
+        actualDownPaymentKopecks: Number(cRow.actual_down_payment_kopecks || cRow.down_payment_kopecks),
+        downPaymentDate: cRow.down_payment_date ? String(cRow.down_payment_date) : String(cRow.start_date),
+        scheduleStartDate: cRow.schedule_start_date ? String(cRow.schedule_start_date) : String(cRow.start_date),
+        financedPrincipalKopecks: Number(cRow.financed_principal_kopecks),
+        termMonths: Number(cRow.term_months),
+        roundingRule: String(cRow.rounding_rule),
+        startDate: String(cRow.start_date),
+        paymentDayOfMonth: cRow.payment_day_of_month ? Number(cRow.payment_day_of_month) : null,
+        scheduleVersion: currentVer,
+        notes: String(cRow.notes || ''),
+      };
+
+      withTransaction(db, () => {
+        if (createdNewClientData) {
+          db.prepare(`
+            INSERT INTO clients (
+              id, full_name, phone, secondary_phone, document_ref, address, notes,
+              status, created_by, owner_user_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          `).run(
+            createdNewClientData.id,
+            createdNewClientData.fullName,
+            createdNewClientData.phone,
+            createdNewClientData.secondaryPhone,
+            createdNewClientData.documentRef,
+            createdNewClientData.address,
+            createdNewClientData.notes,
+            req.user!.id,
+            req.user!.id,
+            now
+          );
+        } else if (body.clientUpdates && resolvedClientId) {
+          const cur = db
+            .prepare(
+              'SELECT full_name, phone, secondary_phone, document_ref, address FROM clients WHERE id = ? AND owner_user_id = ?'
+            )
+            .get(resolvedClientId, req.user!.id) as
+            | { full_name: string; phone: string; secondary_phone: string; document_ref: string; address: string }
+            | undefined;
+          if (cur) {
+            const nextFullName =
+              typeof body.clientUpdates.fullName === 'string' && body.clientUpdates.fullName.trim()
+                ? body.clientUpdates.fullName.trim()
+                : cur.full_name;
+            const nextPhone =
+              typeof body.clientUpdates.phone === 'string' && body.clientUpdates.phone.trim()
+                ? normalizeRussianPhone(body.clientUpdates.phone) || cur.phone
+                : cur.phone;
+            const nextSec =
+              body.clientUpdates.secondaryPhone !== undefined
+                ? String(body.clientUpdates.secondaryPhone).trim()
+                : cur.secondary_phone;
+            const nextDoc =
+              body.clientUpdates.documentRef !== undefined
+                ? String(body.clientUpdates.documentRef).trim()
+                : cur.document_ref;
+            const nextAddr =
+              body.clientUpdates.address !== undefined
+                ? String(body.clientUpdates.address).trim()
+                : cur.address;
+            db.prepare(
+              'UPDATE clients SET full_name = ?, phone = ?, secondary_phone = ?, document_ref = ?, address = ? WHERE id = ? AND owner_user_id = ?'
+            ).run(nextFullName, nextPhone, nextSec, nextDoc, nextAddr, resolvedClientId, req.user!.id);
+          }
+        }
+
+        // If client was switched, keep contract's payments & primary documents linked to the selected client
+        if (resolvedClientId !== String(cRow.client_id)) {
+          db.prepare('UPDATE payments SET client_id = ? WHERE contract_id = ? AND owner_user_id = ?').run(
+            resolvedClientId,
+            contractId,
+            req.user!.id
+          );
+          db.prepare(
+            'UPDATE documents SET client_id = ? WHERE contract_id = ? AND guarantor_client_id IS NULL AND owner_user_id = ?'
+          ).run(resolvedClientId, contractId, req.user!.id);
+        }
+
+        // Handle purchase link updates safely
+        const prevPurchaseId = cRow.purchase_id ? String(cRow.purchase_id) : null;
+        if (prevPurchaseId && prevPurchaseId !== nextPurchaseId) {
+          db.prepare("UPDATE purchases SET handover_status = 'ready' WHERE id = ? AND owner_user_id = ?").run(
+            prevPurchaseId,
+            req.user!.id
+          );
+        }
+        if (nextPurchaseId) {
+          db.prepare(
+            "UPDATE purchases SET handover_status = 'handed_over', client_id = ? WHERE id = ? AND owner_user_id = ?"
+          ).run(resolvedClientId, nextPurchaseId, req.user!.id);
+        }
+
+        // Safely synchronize down payment without creating duplicates or distorting balances
+        const existingDpPayments = db
+          .prepare(
+            `SELECT * FROM payments
+             WHERE contract_id = ? AND owner_user_id = ? AND is_down_payment = 1 AND status = 'confirmed'
+             ORDER BY created_at ASC`
+          )
+          .all(contractId, req.user!.id) as Array<Record<string, unknown>>;
+
+        const existingDpSum = existingDpPayments.reduce((s, r) => s + Number(r.amount_kopecks), 0);
+        const hadConfirmedDp = existingDpPayments.length > 0;
+        const shouldHaveConfirmedDp =
+          body.collectDownPaymentNow !== undefined ? Boolean(body.collectDownPaymentNow) : hadConfirmedDp;
+        const desiredDpAmount = shouldHaveConfirmedDp ? calc.downPaymentKopecks : 0;
+
+        if (hadConfirmedDp && existingDpSum === desiredDpAmount && existingDpPayments.length === 1) {
+          // Down payment amount did not change — only update event_date if downPaymentDate changed (idempotent!)
+          const dpPayId = String(existingDpPayments[0].id);
+          db.prepare('UPDATE payments SET event_date = ?, client_id = ? WHERE id = ? AND owner_user_id = ?').run(
+            resolvedDownPaymentDate,
+            resolvedClientId,
+            dpPayId,
+            req.user!.id
+          );
+          db.prepare(
+            "UPDATE ledger_entries SET event_date = ? WHERE reference_type = 'payment' AND reference_id = ? AND owner_user_id = ?"
+          ).run(resolvedDownPaymentDate, dpPayId, req.user!.id);
+        } else if (existingDpSum !== desiredDpAmount) {
+          // Reverse previous down payment(s) and their ledger entries
+          let defaultDpAccountId = '';
+          let defaultDpMethod: 'cash' | 'bank_transfer' = 'cash';
+          for (const oldDp of existingDpPayments) {
+            const oldDpId = String(oldDp.id);
+            defaultDpAccountId = String(oldDp.account_id);
+            defaultDpMethod = (String(oldDp.payment_method) === 'bank_transfer' ? 'bank_transfer' : 'cash');
+
+            db.prepare(
+              "UPDATE payments SET status = 'reversed', reversal_reason = ? WHERE id = ? AND owner_user_id = ?"
+            ).run(`Перерасчёт ПВ при редактировании договора (v${newVer})`, oldDpId, req.user!.id);
+
+            const dpLedgers = db
+              .prepare(
+                "SELECT * FROM ledger_entries WHERE reference_type = 'payment' AND reference_id = ? AND status = 'confirmed' AND owner_user_id = ?"
+              )
+              .all(oldDpId, req.user!.id) as Array<Record<string, unknown>>;
+
+            for (const led of dpLedgers) {
+              db.prepare(
+                "UPDATE ledger_entries SET status = 'reversed', reversal_reason = ? WHERE id = ? AND owner_user_id = ?"
+              ).run(`Перерасчёт ПВ при редактировании договора (v${newVer})`, String(led.id), req.user!.id);
+
+              const delta = String(led.direction) === 'in' ? -Number(led.amount_kopecks) : Number(led.amount_kopecks);
+              db.prepare(
+                'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+              ).run(delta, String(led.account_id), req.user!.id);
+            }
+          }
+
+          if (desiredDpAmount > 0) {
+            const dpMethod: 'cash' | 'bank_transfer' =
+              body.downPaymentMethod === 'bank_transfer'
+                ? 'bank_transfer'
+                : body.downPaymentMethod === 'cash'
+                  ? 'cash'
+                  : defaultDpMethod;
+            const dpAccId = resolveTenantAccountId(
+              db,
+              req.user!.id,
+              body.downPaymentAccountId || defaultDpAccountId,
+              dpMethod === 'bank_transfer' ? 'bank' : 'cash'
+            );
+            const newDpPayId = `pay_dp_${contractId}_v${newVer}`;
+            const dpNotes = `Первоначальный взнос по договору ${String(cRow.contract_number)} (обновлён в v${newVer})`;
+
+            db.prepare(`
+              INSERT INTO payments (
+                id, idempotency_key, client_id, contract_id, account_id, payment_method,
+                amount_kopecks, allocated_kopecks, unallocated_kopecks, is_down_payment,
+                status, event_date, notes, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'confirmed', ?, ?, ?, ?, ?)
+            `).run(
+              newDpPayId,
+              `idem_dp_${contractId}_v${newVer}`,
+              resolvedClientId,
+              contractId,
+              dpAccId,
+              dpMethod,
+              desiredDpAmount,
+              desiredDpAmount,
+              resolvedDownPaymentDate,
+              dpNotes,
+              req.user!.id,
+              req.user!.id,
+              now
+            );
+
+            db.prepare(`
+              INSERT INTO ledger_entries (
+                id, idempotency_key, account_id, related_account_id, entry_type, category,
+                direction, amount_kopecks, reference_type, reference_id, description,
+                event_date, status, created_by, owner_user_id, created_at
+              ) VALUES (?, ?, ?, NULL, 'client_payment', 'Первоначальный взнос клиента', 'in', ?, 'payment', ?, ?, ?, 'confirmed', ?, ?, ?)
+            `).run(
+              `led_dp_${contractId}_v${newVer}`,
+              `idem_led_dp_${contractId}_v${newVer}`,
+              dpAccId,
+              desiredDpAmount,
+              newDpPayId,
+              `${dpNotes} (${nextItemTitle})`,
+              resolvedDownPaymentDate,
+              req.user!.id,
+              req.user!.id,
+              now
+            );
+
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+            ).run(desiredDpAmount, dpAccId, req.user!.id);
+          }
+        }
+
+        // Insert new schedule version & items, and re-point active payment allocations to the new version's items
+        db.prepare(`
+          INSERT INTO schedule_versions (id, contract_id, version, change_reason, created_by, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(`sv_${contractId}_v${newVer}`, contractId, newVer, changeReason, req.user!.id, now);
+
+        const insertScheduleItem = db.prepare(`
+          INSERT INTO schedule_items (
+            id, contract_id, schedule_version, installment_number, due_date,
+            original_due_date, planned_kopecks, paid_kopecks, status, promised_date, postpone_reason
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        for (const item of editResult.items) {
+          const newItemId = `si_${contractId}_v${newVer}_${item.installmentNumber}`;
+          insertScheduleItem.run(
+            newItemId,
+            contractId,
+            newVer,
+            item.installmentNumber,
+            item.dueDate,
+            item.originalDueDate,
+            item.plannedKopecks,
+            item.paidKopecks,
+            item.status,
+            item.promisedDate,
+            item.postponeReason
+          );
+
+          if (item.preservedFromItemId) {
+            db.prepare(
+              "UPDATE payment_allocations SET schedule_item_id = ? WHERE contract_id = ? AND schedule_item_id = ? AND status = 'active'"
+            ).run(newItemId, contractId, item.preservedFromItemId);
+          }
+        }
+
+        // Mark previous version items as superseded and clear paid_kopecks on superseded version so paid amounts are counted once on active version
+        db.prepare(
+          "UPDATE schedule_items SET status = 'superseded', paid_kopecks = 0 WHERE contract_id = ? AND schedule_version = ?"
+        ).run(contractId, currentVer);
+
+        const nextStatus =
+          editResult.remainingDebtKopecks === 0 && calc.financedPrincipalKopecks > 0
+            ? 'completed'
+            : String(cRow.status) === 'completed' && editResult.remainingDebtKopecks > 0
+              ? 'active'
+              : String(cRow.status);
+
+        db.prepare(`
+          UPDATE contracts
+          SET client_id = ?,
+              purchase_id = ?,
+              plan_id = ?,
+              plan_version = ?,
+              item_title = ?,
+              purchase_cost_kopecks = ?,
+              delivery_cost_kopecks = ?,
+              other_cost_kopecks = ?,
+              extra_cost_kopecks = ?,
+              total_cost_kopecks = ?,
+              markup_mode = ?,
+              markup_percent = ?,
+              sale_price_kopecks = ?,
+              down_payment_mode = ?,
+              down_payment_percent = ?,
+              down_payment_kopecks = ?,
+              planned_down_payment_kopecks = ?,
+              actual_down_payment_kopecks = ?,
+              down_payment_diff_kopecks = ?,
+              extra_down_payment_kopecks = ?,
+              down_payment_shortfall_kopecks = ?,
+              is_custom_down_payment = ?,
+              down_payment_date = ?,
+              schedule_start_date = ?,
+              financed_principal_kopecks = ?,
+              term_months = ?,
+              rounding_rule = ?,
+              schedule_type = ?,
+              start_date = ?,
+              payment_day_of_month = ?,
+              current_schedule_version = ?,
+              closing_discount_kopecks = 0,
+              status = ?,
+              closed_at = CASE WHEN ? = 'completed' THEN COALESCE(closed_at, ?) ELSE NULL END,
+              notes = ?,
+              updated_at = ?,
+              updated_by = ?
+          WHERE id = ? AND owner_user_id = ?
+        `).run(
+          resolvedClientId,
+          nextPurchaseId,
+          nextPlanId,
+          nextPlanVersion,
+          nextItemTitle,
+          calc.purchaseCostKopecks,
+          calc.deliveryCostKopecks,
+          calc.otherCostKopecks,
+          calc.deliveryCostKopecks + calc.otherCostKopecks,
+          calc.totalCostKopecks,
+          calc.markupMode,
+          calc.markupPercent,
+          calc.salePriceKopecks,
+          calc.downPaymentMode,
+          calc.downPaymentPercent,
+          calc.downPaymentKopecks,
+          calc.plannedDownPaymentKopecks,
+          calc.actualDownPaymentKopecks,
+          calc.downPaymentDiffKopecks,
+          calc.extraDownPaymentKopecks,
+          calc.downPaymentShortfallKopecks,
+          calc.useCustomActualDownPayment ? 1 : 0,
+          resolvedDownPaymentDate,
+          calc.scheduleStartDate,
+          calc.financedPrincipalKopecks,
+          calc.termMonths,
+          calc.roundingRule,
+          calc.scheduleType,
+          resolvedStartDate,
+          calc.paymentDayOfMonth,
+          newVer,
+          nextStatus,
+          nextStatus,
+          now,
+          nextNotes,
+          now,
+          req.user!.id,
+          contractId,
+          req.user!.id
+        );
+
+        const newSnapshot = {
+          clientId: resolvedClientId,
+          purchaseId: nextPurchaseId,
+          planId: nextPlanId,
+          itemTitle: nextItemTitle,
+          purchaseCostKopecks: calc.purchaseCostKopecks,
+          deliveryCostKopecks: calc.deliveryCostKopecks,
+          otherCostKopecks: calc.otherCostKopecks,
+          totalCostKopecks: calc.totalCostKopecks,
+          markupMode: calc.markupMode,
+          markupPercent: calc.markupPercent,
+          salePriceKopecks: calc.salePriceKopecks,
+          downPaymentMode: calc.downPaymentMode,
+          downPaymentPercent: calc.downPaymentPercent,
+          downPaymentKopecks: calc.downPaymentKopecks,
+          plannedDownPaymentKopecks: calc.plannedDownPaymentKopecks,
+          actualDownPaymentKopecks: calc.actualDownPaymentKopecks,
+          downPaymentDate: resolvedDownPaymentDate,
+          scheduleStartDate: calc.scheduleStartDate,
+          financedPrincipalKopecks: calc.financedPrincipalKopecks,
+          termMonths: calc.termMonths,
+          roundingRule: calc.roundingRule,
+          startDate: resolvedStartDate,
+          paymentDayOfMonth: calc.paymentDayOfMonth,
+          scheduleVersion: newVer,
+          notes: nextNotes,
+        };
+
+        db.prepare(`
+          INSERT INTO settings_history (id, setting_type, entity_id, old_value_json, new_value_json, reason, changed_by, created_at)
+          VALUES (?, 'contract_edited', ?, ?, ?, ?, ?, ?)
+        `).run(
+          crypto.randomUUID(),
+          contractId,
+          JSON.stringify(oldSnapshot),
+          JSON.stringify(newSnapshot),
+          changeReason,
+          req.user!.id,
+          now
+        );
+
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'CONTRACT_UPDATED',
+          entityType: 'contract',
+          entityId: contractId,
+          summary: `Отредактирован договор ${String(cRow.contract_number)} («${nextItemTitle}»): цена продажи ${formatRubles(oldSnapshot.salePriceKopecks)} → ${formatRubles(calc.salePriceKopecks)}, ПВ ${formatRubles(oldSnapshot.downPaymentKopecks)} → ${formatRubles(calc.downPaymentKopecks)} (${calc.downPaymentMode === 'fixed' ? 'фикс.' : `${calc.downPaymentPercent}%`}), срок ${oldSnapshot.termMonths} → ${calc.termMonths} мес., версия графика v${newVer}.`,
+          metadata: {
+            oldValues: oldSnapshot,
+            newValues: newSnapshot,
+          },
+        });
+      });
+
+      res.json({
+        ok: true,
+        id: contractId,
+        contractNumber: String(cRow.contract_number),
+        clientId: resolvedClientId,
+        itemTitle: nextItemTitle,
+        salePriceKopecks: calc.salePriceKopecks,
+        downPaymentMode: calc.downPaymentMode,
+        downPaymentPercent: calc.downPaymentPercent,
+        downPaymentKopecks: calc.downPaymentKopecks,
+        plannedDownPaymentKopecks: calc.plannedDownPaymentKopecks,
+        actualDownPaymentKopecks: calc.actualDownPaymentKopecks,
+        financedPrincipalKopecks: calc.financedPrincipalKopecks,
+        remainingDebtKopecks: editResult.remainingDebtKopecks,
+        totalPaidOnScheduleKopecks: editResult.totalPaidOnScheduleKopecks,
+        termMonths: calc.termMonths,
+        paymentDayOfMonth: calc.paymentDayOfMonth,
+        scheduleVersion: newVer,
+        schedule: editResult.items,
+      });
+    } catch (err: any) {
+      const status = err?.statusCode === 404 ? 404 : 400;
+      res.status(status).json({
+        error: err instanceof Error ? err.message : 'Ошибка сохранения изменений договора.',
+      });
+    }
+  };
+
+  router.put('/contracts/:id', requireAuth, requireRoles(['owner', 'staff']), handleUpdateContract);
+  router.patch('/contracts/:id', requireAuth, requireRoles(['owner', 'staff']), handleUpdateContract);
+
+  // Safe Contract Deletion / Archival (DELETE /contracts/:id and POST /contracts/:id/delete)
+  const handleDeleteContract = (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const contractId = req.params.id;
+      const cRow = db
+        .prepare(
+          `SELECT c.*, cl.full_name as client_name
+           FROM contracts c
+           LEFT JOIN clients cl ON cl.id = c.client_id
+           WHERE c.id = ? AND c.owner_user_id = ? AND COALESCE(c.is_deleted, 0) = 0`
+        )
+        .get(contractId, req.user!.id) as Record<string, unknown> | undefined;
+
+      if (!cRow) {
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'IDOR_ATTEMPT_BLOCKED',
+          entityType: 'contract',
+          entityId: contractId,
+          summary: `Предотвращена попытка удаления договора ${contractId} другого аккаунта или уже удалённого договора.`,
+        });
+        res.status(404).json({ error: 'Договор не найден.' });
+        return;
+      }
+
+      const body = (req.body || {}) as {
+        confirmDelete?: boolean;
+        confirmed?: boolean;
+        reason?: string;
+      };
+      const queryConfirm = req.query?.confirmDelete === 'true' || req.query?.confirmed === 'true';
+      const isConfirmed = Boolean(body.confirmDelete || body.confirmed || queryConfirm);
+
+      const confirmedPayments = db
+        .prepare(
+          "SELECT * FROM payments WHERE contract_id = ? AND owner_user_id = ? AND status = 'confirmed' ORDER BY created_at ASC"
+        )
+        .all(contractId, req.user!.id) as Array<Record<string, unknown>>;
+
+      const totalPaidKopecks = confirmedPayments.reduce((s, p) => s + Number(p.amount_kopecks), 0);
+      const schedulePaymentsCount = confirmedPayments.filter((p) => !p.is_down_payment).length;
+      const downPaymentCount = confirmedPayments.filter((p) => Boolean(p.is_down_payment)).length;
+
+      if (!isConfirmed) {
+        res.status(400).json({
+          error: `Для удаления договора ${String(cRow.contract_number)} клиента «${String(cRow.client_name || '')}» необходимо явное подтверждение.`,
+          requiresConfirmation: true,
+          contractId,
+          contractNumber: String(cRow.contract_number),
+          clientName: String(cRow.client_name || ''),
+          hasPayments: confirmedPayments.length > 0,
+          paymentsCount: confirmedPayments.length,
+          totalPaidKopecks,
+        });
+        return;
+      }
+
+      const deletionReason =
+        (body.reason && body.reason.trim()) ||
+        `Удаление договора ${String(cRow.contract_number)} пользователем`;
+      const now = new Date().toISOString();
+
+      withTransaction(db, () => {
+        // 1. Safely reverse all confirmed payments, allocations, and ledger entries for this contract so cash/bank registers stay 100% reconciled
+        for (const pay of confirmedPayments) {
+          const payId = String(pay.id);
+          db.prepare(
+            "UPDATE payments SET status = 'reversed', reversal_reason = ? WHERE id = ? AND owner_user_id = ?"
+          ).run(`Удаление договора ${String(cRow.contract_number)}: ${deletionReason}`, payId, req.user!.id);
+
+          db.prepare(
+            "UPDATE payment_allocations SET status = 'reversed' WHERE payment_id = ? AND contract_id = ?"
+          ).run(payId, contractId);
+
+          const payLedgers = db
+            .prepare(
+              "SELECT * FROM ledger_entries WHERE reference_type = 'payment' AND reference_id = ? AND status = 'confirmed' AND owner_user_id = ?"
+            )
+            .all(payId, req.user!.id) as Array<Record<string, unknown>>;
+
+          for (const led of payLedgers) {
+            db.prepare(
+              "UPDATE ledger_entries SET status = 'reversed', reversal_reason = ? WHERE id = ? AND owner_user_id = ?"
+            ).run(`Удаление договора ${String(cRow.contract_number)}: ${deletionReason}`, String(led.id), req.user!.id);
+
+            const delta =
+              String(led.direction) === 'in'
+                ? -Number(led.amount_kopecks)
+                : Number(led.amount_kopecks);
+            db.prepare(
+              'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+            ).run(delta, String(led.account_id), req.user!.id);
+          }
+        }
+
+        // Also reverse any direct contract ledger entries (e.g. refunds) if present
+        const directContractLedgers = db
+          .prepare(
+            "SELECT * FROM ledger_entries WHERE reference_type = 'contract' AND reference_id = ? AND status = 'confirmed' AND owner_user_id = ?"
+          )
+          .all(contractId, req.user!.id) as Array<Record<string, unknown>>;
+
+        for (const led of directContractLedgers) {
+          db.prepare(
+            "UPDATE ledger_entries SET status = 'reversed', reversal_reason = ? WHERE id = ? AND owner_user_id = ?"
+          ).run(`Удаление договора ${String(cRow.contract_number)}: ${deletionReason}`, String(led.id), req.user!.id);
+
+          const delta =
+            String(led.direction) === 'in'
+              ? -Number(led.amount_kopecks)
+              : Number(led.amount_kopecks);
+          db.prepare(
+            'UPDATE financial_accounts SET balance_kopecks = balance_kopecks + ? WHERE id = ? AND owner_user_id = ?'
+          ).run(delta, String(led.account_id), req.user!.id);
+        }
+
+        // 2. Mark schedule items as waived with 0 paid_kopecks
+        db.prepare(
+          "UPDATE schedule_items SET status = 'waived', paid_kopecks = 0, postpone_reason = ? WHERE contract_id = ?"
+        ).run(deletionReason, contractId);
+
+        // 3. Unlink purchase if linked
+        if (cRow.purchase_id) {
+          db.prepare("UPDATE purchases SET handover_status = 'ready' WHERE id = ? AND owner_user_id = ?").run(
+            String(cRow.purchase_id),
+            req.user!.id
+          );
+        }
+
+        // 4. Mark contract as deleted & cancelled (preserving client, guarantors, and other contracts of that client)
+        db.prepare(`
+          UPDATE contracts
+          SET status = 'cancelled',
+              is_deleted = 1,
+              deleted_at = ?,
+              deleted_by = ?,
+              deletion_reason = ?,
+              purchase_id = NULL,
+              closed_at = ?
+          WHERE id = ? AND owner_user_id = ?
+        `).run(now, req.user!.id, deletionReason, now, contractId, req.user!.id);
+
+        db.prepare(`
+          INSERT INTO settings_history (id, setting_type, entity_id, old_value_json, new_value_json, reason, changed_by, created_at)
+          VALUES (?, 'contract_deleted', ?, ?, ?, ?, ?, ?)
+        `).run(
+          crypto.randomUUID(),
+          contractId,
+          JSON.stringify({
+            contractNumber: String(cRow.contract_number),
+            clientId: String(cRow.client_id),
+            clientName: String(cRow.client_name || ''),
+            itemTitle: String(cRow.item_title),
+            salePriceKopecks: Number(cRow.sale_price_kopecks),
+            totalPaidKopecks,
+          }),
+          JSON.stringify({ isDeleted: true, status: 'cancelled', deletedAt: now }),
+          deletionReason,
+          req.user!.id,
+          now
+        );
+
+        recordAudit(db, {
+          actorUserId: req.user!.id,
+          actorEmail: req.user!.phone || req.user!.email,
+          action: 'CONTRACT_DELETED',
+          entityType: 'contract',
+          entityId: contractId,
+          summary: `Удалён договор ${String(cRow.contract_number)} клиента «${String(cRow.client_name || '')}» («${String(cRow.item_title)}»). Сторнировано платежей: ${confirmedPayments.length} (ПВ: ${downPaymentCount}, по графику: ${schedulePaymentsCount}) на сумму ${formatRubles(totalPaidKopecks)}. Причина: ${deletionReason}.`,
+        });
+      });
+
+      res.json({
+        ok: true,
+        deletedContractId: contractId,
+        contractNumber: String(cRow.contract_number),
+        clientId: String(cRow.client_id),
+        clientName: String(cRow.client_name || ''),
+        reversedPaymentsCount: confirmedPayments.length,
+        reversedAmountKopecks: totalPaidKopecks,
+      });
+    } catch (err: any) {
+      const status = err?.statusCode === 404 ? 404 : 400;
+      res.status(status).json({
+        error: err instanceof Error ? err.message : 'Ошибка удаления договора.',
+      });
+    }
+  };
+
+  router.delete('/contracts/:id', requireAuth, requireRoles(['owner', 'staff']), handleDeleteContract);
+  router.post('/contracts/:id/delete', requireAuth, requireRoles(['owner', 'staff']), handleDeleteContract);
 
   // Add a guarantor to an existing contract
   router.post(

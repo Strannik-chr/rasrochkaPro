@@ -193,6 +193,9 @@ export interface ScheduleVersionDTO {
   items: ScheduleItemDTO[];
 }
 
+export type DownPaymentMode = 'percent' | 'fixed';
+export type MarkupMode = 'percent' | 'fixed';
+
 export interface ContractDTO {
   id: string;
   contractNumber: string;
@@ -204,11 +207,15 @@ export interface ContractDTO {
   planVersion: number;
   itemTitle: string;
   purchaseCostKopecks: number;
+  deliveryCostKopecks?: number;
+  otherCostKopecks?: number;
   extraCostKopecks: number;
   totalCostKopecks: number;
+  markupMode?: MarkupMode;
   markupPercent: number;
   markupKopecks: number;
   salePriceKopecks: number;
+  downPaymentMode?: DownPaymentMode;
   downPaymentPercent: number;
   downPaymentKopecks: number;
   plannedDownPaymentKopecks?: number;
@@ -218,6 +225,8 @@ export interface ContractDTO {
   downPaymentShortfallKopecks?: number;
   isCustomDownPayment?: boolean;
   downPaymentPaidKopecks?: number;
+  downPaymentDate?: string | null;
+  scheduleStartDate?: string | null;
   financedPrincipalKopecks: number;
   termMonths: number;
   roundingRule: RoundingRule;
@@ -230,6 +239,7 @@ export interface ContractDTO {
   closedAt: string | null;
   notes: string;
   createdAt: string;
+  updatedAt?: string | null;
   totalPaidOnScheduleKopecks: number;
   totalCollectedKopecks: number;
   remainingDebtKopecks: number;

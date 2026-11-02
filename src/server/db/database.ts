@@ -586,6 +586,42 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
   if (!contractColNames.has('payment_day_of_month')) {
     db.exec('ALTER TABLE contracts ADD COLUMN payment_day_of_month INTEGER;');
   }
+  if (!contractColNames.has('down_payment_mode')) {
+    db.exec("ALTER TABLE contracts ADD COLUMN down_payment_mode TEXT NOT NULL DEFAULT 'percent';");
+  }
+  if (!contractColNames.has('markup_mode')) {
+    db.exec("ALTER TABLE contracts ADD COLUMN markup_mode TEXT NOT NULL DEFAULT 'percent';");
+  }
+  if (!contractColNames.has('down_payment_date')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN down_payment_date TEXT;');
+  }
+  if (!contractColNames.has('schedule_start_date')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN schedule_start_date TEXT;');
+  }
+  if (!contractColNames.has('delivery_cost_kopecks')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN delivery_cost_kopecks INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('other_cost_kopecks')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN other_cost_kopecks INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('is_deleted')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!contractColNames.has('deleted_at')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN deleted_at TEXT;');
+  }
+  if (!contractColNames.has('deleted_by')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN deleted_by TEXT;');
+  }
+  if (!contractColNames.has('deletion_reason')) {
+    db.exec("ALTER TABLE contracts ADD COLUMN deletion_reason TEXT NOT NULL DEFAULT '';");
+  }
+  if (!contractColNames.has('updated_at')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN updated_at TEXT;');
+  }
+  if (!contractColNames.has('updated_by')) {
+    db.exec('ALTER TABLE contracts ADD COLUMN updated_by TEXT;');
+  }
 
   // Backfill payment_day_of_month on existing contracts from start_date if not set
   db.exec(`
@@ -594,6 +630,23 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     WHERE payment_day_of_month IS NULL
       AND length(start_date) >= 10
       AND CAST(substr(start_date, 9, 2) AS INTEGER) BETWEEN 1 AND 31;
+  `);
+
+  // Backfill down_payment_date, schedule_start_date, and delivery_cost_kopecks on existing contracts
+  db.exec(`
+    UPDATE contracts
+    SET down_payment_date = start_date
+    WHERE down_payment_date IS NULL OR down_payment_date = '';
+
+    UPDATE contracts
+    SET schedule_start_date = start_date
+    WHERE schedule_start_date IS NULL OR schedule_start_date = '';
+
+    UPDATE contracts
+    SET delivery_cost_kopecks = extra_cost_kopecks
+    WHERE delivery_cost_kopecks = 0
+      AND other_cost_kopecks = 0
+      AND extra_cost_kopecks > 0;
   `);
 
   // Backfill planned/actual down payment on existing contracts where not yet set
@@ -848,6 +901,11 @@ function migrateAuthSchemaIfNeeded(db: DatabaseSync): void {
     db,
     '010_per_account_data_isolation',
     'Полная изоляция операционных данных, клиентов, договоров, платежей, документов и счетов между аккаунтами пользователей (owner_user_id)'
+  );
+  recordMigration(
+    db,
+    '011_contract_edit_delete_and_down_payment_modes',
+    'Удаление и полное редактирование договоров с сохранением истории версий графика, перерасчётом оплаченных договоров и режимами первоначального взноса (% / фиксированная сумма)'
   );
 
   // Sync documents/photos between SQLite and disk so nothing is ever lost after updates

@@ -42,8 +42,12 @@ export interface ContractTermsDraftState {
   otherRubles?: string;
   planId: string;
   termMonths: string;
+  markupMode?: 'percent' | 'fixed';
   markupPercent: string;
+  markupRubles?: string;
+  downPaymentMode?: 'percent' | 'fixed';
   downPaymentPercent: string;
+  downPaymentRubles?: string;
   paymentDayOfMonth: string;
   roundingRule: RoundingRule;
   useCustomActualDownPayment: boolean;
@@ -65,8 +69,12 @@ export function createInitialContractTermsState(): Required<ContractTermsDraftSt
     otherRubles: '',
     planId: '',
     termMonths: '',
+    markupMode: 'percent',
     markupPercent: '',
+    markupRubles: '',
+    downPaymentMode: 'percent',
     downPaymentPercent: '',
+    downPaymentRubles: '',
     paymentDayOfMonth: '',
     roundingRule: 'kopeck',
     useCustomActualDownPayment: false,
@@ -193,8 +201,12 @@ export function applyTariffProfileToContractTerms(
     ...prev,
     planId: found.id,
     termMonths: String(found.termMonths),
+    markupMode: 'percent',
     markupPercent: String(found.markupPercent),
+    markupRubles: '',
+    downPaymentMode: 'percent',
     downPaymentPercent: String(found.downPaymentPercent),
+    downPaymentRubles: '',
     roundingRule: found.roundingRule,
   };
 }
@@ -205,7 +217,9 @@ export interface ContractConditionsValidation {
   error: string | null;
   parsedTermMonths?: number;
   parsedMarkupPercent?: number;
+  parsedMarkupKopecks?: number;
   parsedDownPaymentPercent?: number;
+  parsedFixedDownPaymentKopecks?: number;
   parsedPaymentDayOfMonth?: number;
 }
 
@@ -214,8 +228,12 @@ export interface ContractConditionsValidation {
  */
 export function validateContractTermsState(state: ContractTermsDraftState): ContractConditionsValidation {
   const termRaw = state.termMonths.trim();
+  const markupMode = state.markupMode || 'percent';
   const markupRaw = state.markupPercent.trim();
+  const markupRublesRaw = (state.markupRubles || '').trim();
+  const dpMode = state.downPaymentMode || 'percent';
   const dpRaw = state.downPaymentPercent.trim();
+  const dpRublesRaw = (state.downPaymentRubles || '').trim();
   const dayRaw = state.paymentDayOfMonth.trim();
 
   if (!termRaw) {
@@ -234,40 +252,86 @@ export function validateContractTermsState(state: ContractTermsDraftState): Cont
     };
   }
 
-  if (!markupRaw) {
-    return {
-      valid: false,
-      readyForPreview: false,
-      error: 'Укажите процент наценки (от 0% до 500%) или выберите тарифный профиль.',
-    };
-  }
-  const markupPercent = Number(markupRaw);
-  if (!Number.isFinite(markupPercent) || markupPercent < 0 || markupPercent > 500) {
-    return {
-      valid: false,
-      readyForPreview: false,
-      error: 'Процент наценки должен быть в диапазоне от 0% до 500%.',
-    };
+  let markupPercent = 0;
+  let parsedMarkupKopecks: number | undefined;
+  if (markupMode === 'fixed') {
+    if (!markupRublesRaw) {
+      return {
+        valid: false,
+        readyForPreview: false,
+        error: 'Укажите сумму наценки в рублях (не менее 0 ₽).',
+      };
+    }
+    const markupRubNum = Number(markupRublesRaw.replace(',', '.'));
+    if (!Number.isFinite(markupRubNum) || markupRubNum < 0) {
+      return {
+        valid: false,
+        readyForPreview: false,
+        error: 'Сумма наценки должна быть неотрицательным числом.',
+      };
+    }
+    parsedMarkupKopecks = Math.round(markupRubNum * 100);
+  } else {
+    if (!markupRaw) {
+      return {
+        valid: false,
+        readyForPreview: false,
+        error: 'Укажите процент наценки (от 0% до 500%) или выберите тарифный профиль.',
+      };
+    }
+    markupPercent = Number(markupRaw.replace(',', '.'));
+    if (!Number.isFinite(markupPercent) || markupPercent < 0 || markupPercent > 500) {
+      return {
+        valid: false,
+        readyForPreview: false,
+        error: 'Процент наценки должен быть в диапазоне от 0% до 500%.',
+      };
+    }
   }
 
   let downPaymentPercent = 0;
-  if (!dpRaw) {
-    if (!state.useCustomActualDownPayment) {
-      return {
-        valid: false,
-        readyForPreview: false,
-        error: 'Укажите процент первоначального взноса (от 0% до 99,99%) или выберите тарифный профиль.',
-      };
+  let parsedFixedDownPaymentKopecks: number | undefined;
+
+  if (dpMode === 'fixed') {
+    if (!dpRublesRaw) {
+      if (!state.useCustomActualDownPayment) {
+        return {
+          valid: false,
+          readyForPreview: false,
+          error: 'Укажите фиксированную сумму первоначального взноса в рублях (от 0 ₽).',
+        };
+      }
+      parsedFixedDownPaymentKopecks = 0;
+    } else {
+      const dpRubNum = Number(dpRublesRaw.replace(',', '.'));
+      if (!Number.isFinite(dpRubNum) || dpRubNum < 0) {
+        return {
+          valid: false,
+          readyForPreview: false,
+          error: 'Сумма первоначального взноса не может быть отрицательной.',
+        };
+      }
+      parsedFixedDownPaymentKopecks = Math.round(dpRubNum * 100);
     }
-    downPaymentPercent = 0;
   } else {
-    downPaymentPercent = Number(dpRaw);
-    if (!Number.isFinite(downPaymentPercent) || downPaymentPercent < 0 || downPaymentPercent >= 100) {
-      return {
-        valid: false,
-        readyForPreview: false,
-        error: 'Процент первоначального взноса должен быть от 0% до 99,99%.',
-      };
+    if (!dpRaw) {
+      if (!state.useCustomActualDownPayment) {
+        return {
+          valid: false,
+          readyForPreview: false,
+          error: 'Укажите процент первоначального взноса (от 0% до 99,99%) или выберите тарифный профиль.',
+        };
+      }
+      downPaymentPercent = 0;
+    } else {
+      downPaymentPercent = Number(dpRaw.replace(',', '.'));
+      if (!Number.isFinite(downPaymentPercent) || downPaymentPercent < 0 || downPaymentPercent >= 100) {
+        return {
+          valid: false,
+          readyForPreview: false,
+          error: 'Процент первоначального взноса должен быть от 0% до 99,99%.',
+        };
+      }
     }
   }
 
@@ -293,7 +357,9 @@ export function validateContractTermsState(state: ContractTermsDraftState): Cont
     error: null,
     parsedTermMonths: termMonths,
     parsedMarkupPercent: markupPercent,
+    parsedMarkupKopecks,
     parsedDownPaymentPercent: downPaymentPercent,
+    parsedFixedDownPaymentKopecks,
     parsedPaymentDayOfMonth: paymentDayOfMonth,
   };
 }
