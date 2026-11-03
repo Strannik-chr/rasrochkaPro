@@ -107,30 +107,29 @@ test('Unit: Калькулятор сравнения 4 вариантов до�
   assert.equal(calculateDaysOverdue('2026-10-15', '2026-10-28'), 13);
   assert.equal(calculateDaysOverdue('2026-10-28', '2026-10-28'), 0);
 
-  // Проверка распределения по умолчанию ('spread_remaining'):
+  // Проверка распределения по умолчанию ('sequential' — по очереди на следующие месяцы):
   // Платеж по 15 000 ₽/мес (4 месяца), клиент вносит 18 000 ₽ -> 1-й месяц закрывается (15 000 ₽),
-  // оставшиеся 3 000 ₽ распределяются поровну по 1 000 ₽ на 2-й, 3-й и 4-й месяцы.
+  // а переплата 3 000 ₽ целиком переходит в счёт 2-го месяца по очереди.
   const fourMonths15k = [
     { id: 'm1', remainingKopecks: 1500000 },
     { id: 'm2', remainingKopecks: 1500000 },
     { id: 'm3', remainingKopecks: 1500000 },
     { id: 'm4', remainingKopecks: 1500000 },
   ];
-  const spreadAllocs = computeAutomaticScheduleAllocations(1800000, fourMonths15k);
+  const defaultSequentialAllocs = computeAutomaticScheduleAllocations(1800000, fourMonths15k);
+  assert.deepEqual(defaultSequentialAllocs, [
+    { scheduleItemId: 'm1', amountKopecks: 1500000 },
+    { scheduleItemId: 'm2', amountKopecks: 300000 },
+  ]);
+
+  // Проверка равномерного распределения ('spread_remaining') при явном вызове:
+  const spreadAllocs = computeAutomaticScheduleAllocations(1800000, fourMonths15k, 'spread_remaining');
   assert.equal(spreadAllocs.length, 4);
   assert.deepEqual(spreadAllocs, [
     { scheduleItemId: 'm1', amountKopecks: 1500000 },
     { scheduleItemId: 'm2', amountKopecks: 100000 },
     { scheduleItemId: 'm3', amountKopecks: 100000 },
     { scheduleItemId: 'm4', amountKopecks: 100000 },
-  ]);
-
-  // Проверка последовательного режима ('sequential'):
-  // 15 000 ₽ закрывают 1-й месяц, а 3 000 ₽ целиком идут во 2-й месяц.
-  const seqAllocs = computeAutomaticScheduleAllocations(1800000, fourMonths15k, 'sequential');
-  assert.deepEqual(seqAllocs, [
-    { scheduleItemId: 'm1', amountKopecks: 1500000 },
-    { scheduleItemId: 'm2', amountKopecks: 300000 },
   ]);
 });
 

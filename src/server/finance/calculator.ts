@@ -865,7 +865,7 @@ export interface ComputedScheduleAllocation {
 export function computeAutomaticScheduleAllocations(
   totalKopecks: number,
   items: UnpaidScheduleItemInput[],
-  strategy: AutoAllocationStrategy = 'spread_remaining'
+  strategy: AutoAllocationStrategy = 'sequential'
 ): ComputedScheduleAllocation[] {
   const validItems = items.filter((it) => it && it.remainingKopecks > 0);
   if (totalKopecks <= 0 || validItems.length === 0) {

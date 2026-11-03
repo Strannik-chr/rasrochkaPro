@@ -6077,7 +6077,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           : [];
 
         const effectiveStrategy: AutoAllocationStrategy =
-          autoAllocationStrategy === 'sequential' ? 'sequential' : 'spread_remaining';
+          autoAllocationStrategy === 'spread_remaining' ? 'spread_remaining' : 'sequential';
 
         // Automatic allocation across schedule if requested and contractId is specified
         if (autoAllocate && contractId && requestedAllocs.length === 0) {
@@ -6282,7 +6282,7 @@ export function createApiRouter(db: DatabaseSync): express.Router {
           : [];
 
         const effectiveStrategy: AutoAllocationStrategy =
-          autoAllocationStrategy === 'sequential' ? 'sequential' : 'spread_remaining';
+          autoAllocationStrategy === 'spread_remaining' ? 'spread_remaining' : 'sequential';
 
         if (autoAllocate && effectiveContractId && requestedAllocs.length === 0) {
           const cRow = db

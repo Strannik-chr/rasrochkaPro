@@ -15,20 +15,17 @@ import {
   AutoAllocationStrategy,
   computeAutomaticScheduleAllocations,
 } from '../server/finance/calculator';
-import { X, AlertTriangle, Check, Zap, SlidersHorizontal, Info, Layers, ArrowRight } from 'lucide-react';
+import { X, AlertTriangle, Check, Zap, SlidersHorizontal, Info, ArrowRight } from 'lucide-react';
 
 /**
  * Computes automatic allocation across unpaid schedule items.
- * Default strategy ('spread_remaining'):
- *   Closes the current month first (e.g. 15 000 ₽ out of 18 000 ₽),
- *   and distributes the extra 3 000 ₽ evenly across all remaining unpaid months.
- * Alternative strategy ('sequential'):
+ * Default strategy ('sequential'):
  *   Closes unpaid months strictly one after another in chronological order.
  */
 export function computeAutoAllocation(
   totalKopecks: number,
   items: Array<{ id: string; remainingKopecks: number }>,
-  strategy: AutoAllocationStrategy = 'spread_remaining'
+  strategy: AutoAllocationStrategy = 'sequential'
 ): Record<string, string> {
   const result: Record<string, string> = {};
   const allocations = computeAutomaticScheduleAllocations(totalKopecks, items, strategy);
@@ -107,7 +104,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
     payment.contractId || clientContracts[0]?.id || ''
   );
   const [allocationMode, setAllocationMode] = useState<'auto' | 'manual'>('auto');
-  const [autoStrategy, setAutoStrategy] = useState<AutoAllocationStrategy>('spread_remaining');
+  const autoStrategy: AutoAllocationStrategy = 'sequential';
   const [allocMap, setAllocMap] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -127,14 +124,6 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
     0
   );
   const remainingUnallocatedAfter = payment.unallocatedKopecks - totalSelectedKopecks;
-
-  const handleApplyStrategy = (strategy: AutoAllocationStrategy) => {
-    setAutoStrategy(strategy);
-    setAllocationMode('auto');
-    if (unpaidItems.length > 0) {
-      setAllocMap(computeAutoAllocation(payment.unallocatedKopecks, unpaidItems, strategy));
-    }
-  };
 
   const handleQuickFillItem = (itemId: string, itemRemainingKopecks: number) => {
     setAllocationMode('manual');
@@ -197,7 +186,7 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
               Распределение платежа · {payment.clientName}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5 break-words">
-              По умолчанию сумма сверх текущего платежа распределяется равномерно на все оставшиеся месяцы
+              Закрывает текущий месяц, а вся переплата целиком переходит в счёт следующих месяцев по очереди
             </p>
           </div>
           <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg shrink-0">
@@ -298,49 +287,18 @@ export const ManualAllocationModal: React.FC<ManualAllocationModalProps> = ({
                 </div>
 
                 {allocationMode === 'auto' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => handleApplyStrategy('spread_remaining')}
-                      className={`p-2.5 rounded-lg border text-left transition-all ${
-                        autoStrategy === 'spread_remaining'
-                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
-                          : 'bg-white/70 border-slate-200 hover:bg-white'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
-                          <Layers className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                          <span>На все оставшиеся месяцы</span>
-                        </span>
-                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 rounded">
-                          По умолчанию
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-600 mt-1 leading-snug">
-                        Закрывает текущий месяц, а переплату сверху делит поровну на все оставшиеся месяцы.
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleApplyStrategy('sequential')}
-                      className={`p-2.5 rounded-lg border text-left transition-all ${
-                        autoStrategy === 'sequential'
-                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
-                          : 'bg-white/70 border-slate-200 hover:bg-white'
-                      }`}
-                    >
+                  <div className="pt-1">
+                    <div className="p-3 rounded-lg border bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm text-left">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
                           <ArrowRight className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                          <span>По очереди по месяцам</span>
+                          <span>По очереди на следующие месяцы</span>
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-600 mt-1 leading-snug">
-                        Закрывает текущий месяц, а весь остаток направляет в ближайший следующий месяц.
+                        Закрывает текущий месяц, а вся переплата целиком переходит в счёт ближайшего следующего месяца по графику.
                       </p>
-                    </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -558,7 +516,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   const [eventDate, setEventDate] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState('');
   const [allocationMode, setAllocationMode] = useState<'auto' | 'manual'>('auto');
-  const [autoStrategy, setAutoStrategy] = useState<AutoAllocationStrategy>('spread_remaining');
+  const autoStrategy: AutoAllocationStrategy = 'sequential';
   const [allocMap, setAllocMap] = useState<Record<string, string>>({});
   const [idempotencyKey] = useState(() => `idem_pay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   const [error, setError] = useState<string | null>(null);
@@ -635,14 +593,6 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   );
   const unallocatedAfter = amountKopecks - allocatedKopecks;
 
-  const handleSelectAutoStrategy = (strategy: AutoAllocationStrategy) => {
-    setAutoStrategy(strategy);
-    setAllocationMode('auto');
-    if (unpaidItems.length > 0 && amountKopecks > 0) {
-      setAllocMap(computeAutoAllocation(amountKopecks, unpaidItems, strategy));
-    }
-  };
-
   const summary = summarizeAllocations(amountKopecks, unpaidItems, allocMap);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -700,7 +650,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
               Регистрация поступления от клиента
             </h2>
             <p className="text-xs text-slate-500 mt-0.5 break-words">
-              По умолчанию закрывается текущий месяц, а переплата распределяется на все оставшиеся месяцы
+              По умолчанию закрывается текущий месяц, а переплата переходит в счёт следующих месяцев по очереди
             </p>
           </div>
           <button onClick={onClose} className="p-2 text-slate-500 hover:text-slate-900 rounded-lg shrink-0">
@@ -875,39 +825,8 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                 </div>
 
                 {allocationMode === 'auto' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <button
-                      type="button"
-                      onClick={() => handleSelectAutoStrategy('spread_remaining')}
-                      className={`p-3 rounded-lg border text-left transition-all ${
-                        autoStrategy === 'spread_remaining'
-                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
-                          : 'bg-white/70 border-slate-200 hover:bg-white'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
-                          <Layers className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                          <span>На каждый оставшийся месяц</span>
-                        </span>
-                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-800 rounded">
-                          По умолчанию
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-600 mt-1 leading-snug">
-                        Если клиент заплатил больше (например, 18 000 ₽ вместо 15 000 ₽), текущий месяц закроется, а лишние 3 000 ₽ распределятся поровну на все оставшиеся месяцы.
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleSelectAutoStrategy('sequential')}
-                      className={`p-3 rounded-lg border text-left transition-all ${
-                        autoStrategy === 'sequential'
-                          ? 'bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm'
-                          : 'bg-white/70 border-slate-200 hover:bg-white'
-                      }`}
-                    >
+                  <div>
+                    <div className="p-3 rounded-lg border bg-white border-slate-900 ring-1 ring-slate-900 shadow-sm text-left">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
                           <ArrowRight className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
@@ -917,7 +836,7 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
                       <p className="text-[11px] text-slate-600 mt-1 leading-snug">
                         Закрывает текущий месяц, а вся переплата целиком переходит в счёт ближайшего следующего месяца по графику.
                       </p>
-                    </button>
+                    </div>
                   </div>
                 )}
               </div>
