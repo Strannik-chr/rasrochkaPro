@@ -1,4 +1,4 @@
-import { ClientDTO, InstallmentPlanDTO, RoundingRule } from './types';
+import { ClientDTO, ContractDTO, InstallmentPlanDTO, RoundingRule } from './types.ts';
 
 export interface NameParts {
   lastName: string;
@@ -405,4 +405,190 @@ export function formatWelcomeGreeting(userFullName?: string | null): string {
   }
   return `Добро пожаловать, ${cleaned}`;
 }
+
+export type AppSectionId =
+  | 'upcoming_payments'
+  | 'dashboard'
+  | 'clients'
+  | 'contracts'
+  | 'whatsapp_contracts'
+  | 'payments'
+  | 'overdues'
+  | 'purchases'
+  | 'suppliers'
+  | 'cash_bank'
+  | 'expenses'
+  | 'reports'
+  | 'documents'
+  | 'users'
+  | 'installment_settings'
+  | 'security_settings';
+
+export const NAV_SECTIONS: Array<{
+  id: AppSectionId;
+  label: string;
+  group: string;
+  ownerOnly?: boolean;
+}> = [
+  { id: 'upcoming_payments', label: 'Ближайшие платежи', group: 'Операционный контур' },
+  { id: 'dashboard', label: '1. Главный экран', group: 'Операционный контур' },
+  { id: 'clients', label: '2. Клиенты и статусы', group: 'Операционный контур' },
+  { id: 'contracts', label: '3. Договоры и графики', group: 'Операционный контур' },
+  { id: 'whatsapp_contracts', label: 'Найти и отправить договор', group: 'Операционный контур' },
+  { id: 'payments', label: '4. Платежи и распределение', group: 'Операционный контур' },
+  { id: 'overdues', label: '5. Просрочки и контакты', group: 'Операционный контур' },
+  { id: 'purchases', label: '6. Закупки и товары', group: 'Закупки и склад' },
+  { id: 'suppliers', label: '7. Магазины и поставщики', group: 'Закупки и склад' },
+  { id: 'cash_bank', label: '8. Касса и банковские счета', group: 'Финансы и отчётность' },
+  { id: 'expenses', label: '9. Операционные расходы', group: 'Финансы и отчётность' },
+  { id: 'reports', label: '10. Прибыль и отчёты', group: 'Финансы и отчётность' },
+  { id: 'documents', label: '11. Документы и шаблоны', group: 'Финансы и отчётность' },
+  { id: 'users', label: '12. Пользователи и права', group: 'Управление и защита', ownerOnly: true },
+  { id: 'installment_settings', label: '13. Настройки рассрочки', group: 'Управление и защита' },
+  { id: 'security_settings', label: '14. Настройки безопасности', group: 'Управление и защита', ownerOnly: true },
+];
+
+export function getLocalTodayIso(now: Date = new Date()): string {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function calculateDaysUntilDue(dueDateIso: string, todayIso: string): number {
+  const [dueY, dueM, dueD] = dueDateIso.slice(0, 10).split('-').map(Number);
+  const [todY, todM, todD] = todayIso.slice(0, 10).split('-').map(Number);
+  const dueUtc = Date.UTC(dueY, (dueM || 1) - 1, dueD || 1);
+  const todUtc = Date.UTC(todY, (todM || 1) - 1, todD || 1);
+  return Math.round((dueUtc - todUtc) / (1000 * 60 * 60 * 24));
+}
+
+export type UpcomingPaymentUrgency = 'today' | 'soon' | 'overdue';
+
+export type UpcomingPaymentStatusLabel =
+  | 'Сегодня'
+  | 'Завтра'
+  | 'Через 2 дня'
+  | 'Просрочено';
+
+export interface UpcomingPaymentReminderItem {
+  scheduleItemId: string;
+  contractId: string;
+  clientId: string;
+  clientName: string;
+  clientPhone: string;
+  dueDate: string;
+  remainingKopecks: number;
+  daysUntilDue: number;
+  urgency: UpcomingPaymentUrgency;
+  statusLabel: UpcomingPaymentStatusLabel;
+}
+
+/**
+ * Dynamically computes upcoming and overdue unpaid schedule installments
+ * directly from active/restructured contracts and their current schedules:
+ * - Shows installments due in 2 days ('Через 2 дня'), 1 day ('Завтра'), today ('Сегодня'),
+ *   or past due ('Просрочено') if not yet paid in full.
+ * - Automatically excludes fully paid installments (remainingKopecks <= 0).
+ * - For partially paid installments, returns only the remaining unpaid amount (remainingKopecks).
+ * - Always uses the contract's current schedule version.
+ * - Sorts:
+ *   1) Due today (daysUntilDue === 0)
+ *   2) Due in 1–2 days (daysUntilDue === 1, then daysUntilDue === 2)
+ *   3) Overdue (daysUntilDue < 0, ordered by dueDate ascending)
+ */
+export function computeUpcomingPaymentReminders(
+  contracts: ContractDTO[],
+  todayIso: string = getLocalTodayIso()
+): UpcomingPaymentReminderItem[] {
+  const items: UpcomingPaymentReminderItem[] = [];
+
+  for (const contract of contracts) {
+    if (contract.status !== 'active' && contract.status !== 'restructured') {
+      continue;
+    }
+    if (contract.remainingDebtKopecks <= 0) {
+      continue;
+    }
+
+    const schedule = contract.schedule || [];
+    for (const item of schedule) {
+      if (
+        contract.currentScheduleVersion !== undefined &&
+        item.scheduleVersion !== undefined &&
+        item.scheduleVersion !== contract.currentScheduleVersion
+      ) {
+        continue;
+      }
+      if (item.status === 'paid' || item.status === 'superseded' || item.status === 'waived') {
+        continue;
+      }
+
+      const remainingKopecks = Math.max(
+        0,
+        typeof item.remainingKopecks === 'number'
+          ? item.remainingKopecks
+          : item.plannedKopecks - item.paidKopecks
+      );
+      if (remainingKopecks <= 0) {
+        continue;
+      }
+
+      const daysUntilDue = calculateDaysUntilDue(item.dueDate, todayIso);
+      if (daysUntilDue > 2) {
+        continue;
+      }
+
+      let urgency: UpcomingPaymentUrgency;
+      let statusLabel: UpcomingPaymentStatusLabel;
+
+      if (daysUntilDue === 0) {
+        urgency = 'today';
+        statusLabel = 'Сегодня';
+      } else if (daysUntilDue === 1) {
+        urgency = 'soon';
+        statusLabel = 'Завтра';
+      } else if (daysUntilDue === 2) {
+        urgency = 'soon';
+        statusLabel = 'Через 2 дня';
+      } else {
+        urgency = 'overdue';
+        statusLabel = 'Просрочено';
+      }
+
+      items.push({
+        scheduleItemId: item.id,
+        contractId: contract.id,
+        clientId: contract.clientId,
+        clientName: contract.clientName,
+        clientPhone: contract.clientPhone,
+        dueDate: item.dueDate,
+        remainingKopecks,
+        daysUntilDue,
+        urgency,
+        statusLabel,
+      });
+    }
+  }
+
+  const urgencyRank: Record<UpcomingPaymentUrgency, number> = {
+    today: 0,
+    soon: 1,
+    overdue: 2,
+  };
+
+  items.sort((a, b) => {
+    const rankDiff = urgencyRank[a.urgency] - urgencyRank[b.urgency];
+    if (rankDiff !== 0) return rankDiff;
+
+    if (a.daysUntilDue !== b.daysUntilDue) {
+      return a.daysUntilDue - b.daysUntilDue;
+    }
+
+    return a.clientName.localeCompare(b.clientName, 'ru');
+  });
+
+  return items;
+}
+
 

@@ -524,6 +524,10 @@ interface NewPaymentModalProps {
   clients: ClientDTO[];
   contracts: ContractDTO[];
   accounts: FinancialAccountDTO[];
+  initialClientId?: string | null;
+  initialContractId?: string | null;
+  initialScheduleItemId?: string | null;
+  initialAmountKopecks?: number | null;
   onClose: () => void;
   apiFetch: (path: string, options?: RequestInit) => Promise<any>;
   onSuccess: () => Promise<void>;
@@ -533,15 +537,24 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   clients,
   contracts,
   accounts,
+  initialClientId,
+  initialContractId,
+  initialScheduleItemId,
+  initialAmountKopecks,
   onClose,
   apiFetch,
   onSuccess,
 }) => {
-  const [clientId, setClientId] = useState(clients[0]?.id || '');
-  const [contractId, setContractId] = useState<string>('');
+  const [clientId, setClientId] = useState(initialClientId || clients[0]?.id || '');
+  const [contractId, setContractId] = useState<string>(initialContractId || '');
   const [accountId, setAccountId] = useState(accounts[0]?.id || 'acc_bank_main');
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank_transfer'>('bank_transfer');
-  const [amountRubles, setAmountRubles] = useState('');
+  const [amountRubles, setAmountRubles] = useState(() => {
+    if (initialAmountKopecks && initialAmountKopecks > 0) {
+      return (initialAmountKopecks / 100).toFixed(2).replace(/\.00$/, '');
+    }
+    return '';
+  });
   const [eventDate, setEventDate] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState('');
   const [allocationMode, setAllocationMode] = useState<'auto' | 'manual'>('auto');
@@ -552,10 +565,18 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!clientId && clients.length > 0) {
+    if (initialClientId) {
+      setClientId(initialClientId);
+    } else if (!clientId && clients.length > 0) {
       setClientId(clients[0].id);
     }
-  }, [clients, clientId]);
+  }, [clients, clientId, initialClientId]);
+
+  useEffect(() => {
+    if (initialContractId) {
+      setContractId(initialContractId);
+    }
+  }, [initialContractId]);
 
   useEffect(() => {
     if (accounts.length > 0 && !accounts.some((a) => a.id === accountId)) {
@@ -579,6 +600,25 @@ export const NewPaymentModal: React.FC<NewPaymentModalProps> = ({
   const unpaidItems = (selectedContract?.schedule || []).filter((i) => i.remainingKopecks > 0);
 
   const amountKopecks = parseRublesInputToKopecks(amountRubles);
+
+  // If a specific non-first schedule item was requested, target it in manual mode
+  useEffect(() => {
+    if (
+      initialScheduleItemId &&
+      selectedContract &&
+      unpaidItems.length > 0 &&
+      unpaidItems[0]?.id !== initialScheduleItemId &&
+      unpaidItems.some((i) => i.id === initialScheduleItemId)
+    ) {
+      const targetItem = unpaidItems.find((i) => i.id === initialScheduleItemId)!;
+      const targetKop =
+        initialAmountKopecks && initialAmountKopecks > 0
+          ? Math.min(initialAmountKopecks, targetItem.remainingKopecks)
+          : targetItem.remainingKopecks;
+      setAllocationMode('manual');
+      setAllocMap({ [initialScheduleItemId]: (targetKop / 100).toFixed(2) });
+    }
+  }, [initialScheduleItemId, selectedContract?.id]);
 
   // Automatically recalculate allocations when amount, contract, mode, or strategy changes
   useEffect(() => {

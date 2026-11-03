@@ -49,8 +49,11 @@ import {
 } from './components/ClientAndWhatsAppViews';
 import { buildDirectWhatsAppUrl } from './shared/clientStatus';
 import {
+  AppSectionId,
+  computeUpcomingPaymentReminders,
   formatWelcomeGreeting,
   getSafeInitialLaunchSection,
+  NAV_SECTIONS,
   shouldLoadConfidentialState,
 } from './shared/contractFormHelpers';
 import { ManualAllocationModal, NewPaymentModal } from './components/PaymentAllocateModal';
@@ -82,40 +85,7 @@ import {
   ChevronUp,
 } from 'lucide-react';
 
-type SectionId =
-  | 'dashboard'
-  | 'clients'
-  | 'contracts'
-  | 'whatsapp_contracts'
-  | 'payments'
-  | 'overdues'
-  | 'purchases'
-  | 'suppliers'
-  | 'cash_bank'
-  | 'expenses'
-  | 'reports'
-  | 'documents'
-  | 'users'
-  | 'installment_settings'
-  | 'security_settings';
-
-const NAV_SECTIONS: Array<{ id: SectionId; label: string; group: string; ownerOnly?: boolean }> = [
-  { id: 'dashboard', label: '1. Главный экран', group: 'Операционный контур' },
-  { id: 'clients', label: '2. Клиенты и статусы', group: 'Операционный контур' },
-  { id: 'contracts', label: '3. Договоры и графики', group: 'Операционный контур' },
-  { id: 'whatsapp_contracts', label: 'Найти и отправить договор', group: 'Операционный контур' },
-  { id: 'payments', label: '4. Платежи и распределение', group: 'Операционный контур' },
-  { id: 'overdues', label: '5. Просрочки и контакты', group: 'Операционный контур' },
-  { id: 'purchases', label: '6. Закупки и товары', group: 'Закупки и склад' },
-  { id: 'suppliers', label: '7. Магазины и поставщики', group: 'Закупки и склад' },
-  { id: 'cash_bank', label: '8. Касса и банковские счета', group: 'Финансы и отчётность' },
-  { id: 'expenses', label: '9. Операционные расходы', group: 'Финансы и отчётность' },
-  { id: 'reports', label: '10. Прибыль и отчёты', group: 'Финансы и отчётность' },
-  { id: 'documents', label: '11. Документы и шаблоны', group: 'Финансы и отчётность' },
-  { id: 'users', label: '12. Пользователи и права', group: 'Управление и защита', ownerOnly: true },
-  { id: 'installment_settings', label: '13. Настройки рассрочки', group: 'Управление и защита' },
-  { id: 'security_settings', label: '14. Настройки безопасности', group: 'Управление и защита', ownerOnly: true },
-];
+type SectionId = AppSectionId;
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<{
@@ -184,6 +154,12 @@ export default function App() {
   } | null>(null);
   const [allocatingPayment, setAllocatingPayment] = useState<PaymentDTO | null>(null);
   const [showNewPaymentModal, setShowNewPaymentModal] = useState(false);
+  const [paymentModalPrefill, setPaymentModalPrefill] = useState<{
+    clientId: string;
+    contractId: string;
+    scheduleItemId: string;
+    amountKopecks: number;
+  } | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
 
   // Inline form states for sections
@@ -730,6 +706,11 @@ export default function App() {
         return !isPureGuarantor;
       }),
     [clients, contracts]
+  );
+
+  const upcomingPaymentItems = useMemo(
+    () => computeUpcomingPaymentReminders(contracts),
+    [contracts]
   );
 
   // Filtered lists by searchQuery
@@ -1295,6 +1276,15 @@ export default function App() {
         <nav className="hidden xl:flex items-center gap-5 text-xs xl:text-sm font-medium text-slate-600 overflow-x-auto">
           <button
             type="button"
+            onClick={() => setActiveSection('upcoming_payments')}
+            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
+              activeSection === 'upcoming_payments' ? 'text-slate-900 underline underline-offset-8 font-semibold' : ''
+            }`}
+          >
+            Ближайшие платежи
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveSection('dashboard')}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
               activeSection === 'dashboard' ? 'text-slate-900 underline underline-offset-8' : ''
@@ -1512,8 +1502,8 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-6 max-w-[1440px] mx-auto w-full min-w-0 space-y-5 sm:space-y-6">
-          {/* Workspace Toolbar: Only rendered inside operational sections, never on the neutral Welcome Screen */}
-          {activeSection !== 'dashboard' && (
+          {/* Workspace Toolbar: Only rendered inside operational sections, never on the neutral Welcome Screen or minimal Upcoming Payments tab */}
+          {activeSection !== 'dashboard' && activeSection !== 'upcoming_payments' && (
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 no-print">
               <div className="relative w-full sm:w-80">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -1529,7 +1519,10 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowNewPaymentModal(true)}
+                  onClick={() => {
+                    setPaymentModalPrefill(null);
+                    setShowNewPaymentModal(true);
+                  }}
                   disabled={!canWrite}
                   className="flex-1 sm:flex-initial justify-center px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap shrink-0 inline-flex items-center gap-1.5"
                 >
@@ -1580,6 +1573,101 @@ export default function App() {
             </div>
           ) : (
             <>
+              {/* ==================== 0. БЛИЖАЙШИЕ ПЛАТЕЖИ ==================== */}
+              {activeSection === 'upcoming_payments' && (
+                <section aria-label="Ближайшие платежи" className="max-w-3xl mx-auto space-y-4">
+                  <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
+                    Ближайшие платежи
+                  </h1>
+
+                  {upcomingPaymentItems.length === 0 ? (
+                    <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-sm text-slate-500">
+                      Ближайших платежей нет
+                    </div>
+                  ) : (
+                    <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200 overflow-hidden">
+                      {upcomingPaymentItems.map((item) => {
+                        const badgeClass =
+                          item.urgency === 'today'
+                            ? 'bg-amber-50 text-amber-900 border-amber-200'
+                            : item.urgency === 'overdue'
+                              ? 'bg-red-50 text-red-800 border-red-200'
+                              : 'bg-slate-100 text-slate-700 border-slate-200';
+
+                        const openPaymentForItem = () => {
+                          if (!canWrite) return;
+                          setPaymentModalPrefill({
+                            clientId: item.clientId,
+                            contractId: item.contractId,
+                            scheduleItemId: item.scheduleItemId,
+                            amountKopecks: item.remainingKopecks,
+                          });
+                          setShowNewPaymentModal(true);
+                        };
+
+                        return (
+                          <div
+                            key={item.scheduleItemId}
+                            onClick={openPaymentForItem}
+                            role={canWrite ? 'button' : undefined}
+                            tabIndex={canWrite ? 0 : undefined}
+                            onKeyDown={(e) => {
+                              if (canWrite && (e.key === 'Enter' || e.key === ' ')) {
+                                e.preventDefault();
+                                openPaymentForItem();
+                              }
+                            }}
+                            className={`p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                              canWrite ? 'cursor-pointer hover:bg-slate-50' : ''
+                            }`}
+                          >
+                            <div className="min-w-0 space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-sm sm:text-base font-semibold text-slate-900 break-words">
+                                  {item.clientName}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 text-[11px] font-medium border rounded-md whitespace-nowrap ${badgeClass}`}
+                                >
+                                  {item.statusLabel}
+                                </span>
+                              </div>
+                              <div className="text-xs sm:text-sm font-mono text-slate-600">
+                                <a
+                                  href={`tel:${item.clientPhone}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="hover:text-slate-900 hover:underline"
+                                >
+                                  {item.clientPhone}
+                                </a>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100">
+                              <div className="text-base sm:text-lg font-bold font-mono text-slate-900 whitespace-nowrap">
+                                {formatMoney(item.remainingKopecks)}
+                              </div>
+                              {canWrite && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openPaymentForItem();
+                                  }}
+                                  className="px-3.5 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                                >
+                                  Внести платёж
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
+
               {/* ==================== 1. БЕЗОПАСНЫЙ ГЛАВНЫЙ ЭКРАН ПРИВЕТСТВИЯ ==================== */}
               {activeSection === 'dashboard' && (
                 <section
@@ -5824,7 +5912,14 @@ export default function App() {
           clients={borrowerClients}
           contracts={contracts}
           accounts={accounts}
-          onClose={() => setShowNewPaymentModal(false)}
+          initialClientId={paymentModalPrefill?.clientId}
+          initialContractId={paymentModalPrefill?.contractId}
+          initialScheduleItemId={paymentModalPrefill?.scheduleItemId}
+          initialAmountKopecks={paymentModalPrefill?.amountKopecks}
+          onClose={() => {
+            setShowNewPaymentModal(false);
+            setPaymentModalPrefill(null);
+          }}
           apiFetch={apiFetch}
           onSuccess={async () => {
             await loadFullState();

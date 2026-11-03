@@ -12,10 +12,12 @@ import {
 } from '../src/server/finance/calculator';
 import {
   applyTariffProfileToContractTerms,
+  computeUpcomingPaymentReminders,
   createInitialContractClientState,
   createInitialContractTermsState,
   formatWelcomeGreeting,
   getSafeInitialLaunchSection,
+  NAV_SECTIONS,
   shouldLoadConfidentialState,
   switchContractFormToExistingClient,
   switchContractFormToNewClient,
@@ -2430,6 +2432,258 @@ test('6. Сквозной production-тест: Healthcheck, CSRF, клиенты
       true
     );
     assert.equal(finalStateAfterDeletes.data.contracts.length >= 1, true);
+
+    // =========================================================================
+    // 11. Вкладка «Ближайшие платежи»: проверка всех 10 сценариев
+    // =========================================================================
+
+    // 11.1 Первая вкладка в списке навигации и загрузка защищённого состояния
+    assert.equal(NAV_SECTIONS[0].id, 'upcoming_payments');
+    assert.equal(NAV_SECTIONS[0].label, 'Ближайшие платежи');
+    assert.equal(
+      shouldLoadConfidentialState({
+        isAuthenticated: true,
+        activeSection: 'upcoming_payments',
+      }),
+      true
+    );
+
+    // 11.2 Создаём клиентов и договоры с платежами: через 2 дня, завтра, сегодня, просроченный и через 5 дней
+    const refToday = '2026-11-10';
+    const makeTestContractWithSingleSchedule = async (params: {
+      sessionToken: string;
+      csrfToken: string;
+      fullName: string;
+      phone: string;
+      dueDate: string;
+      amountKopecks: number;
+    }) => {
+      const res = await apiCall('/api/v1/contracts', {
+        method: 'POST',
+        sessionToken: params.sessionToken,
+        csrfToken: params.csrfToken,
+        body: {
+          clientMode: 'new',
+          newClient: {
+            fullName: params.fullName,
+            phone: params.phone,
+          },
+          itemTitle: 'Тестовый товар для ближайших платежей',
+          purchaseCostKopecks: params.amountKopecks,
+          deliveryCostKopecks: 0,
+          otherCostKopecks: 0,
+          markupMode: 'percent',
+          markupPercent: 0,
+          downPaymentMode: 'percent',
+          downPaymentPercent: 0,
+          termMonths: 1,
+          paymentDayOfMonth: Number(params.dueDate.slice(8, 10)),
+          roundingRule: 'kopeck',
+          scheduleType: 'equal',
+          startDate: '2026-10-15',
+          confirmedCalculation: true,
+        },
+      });
+      assert.equal(res.status, 201);
+      return res.data.id as string;
+    };
+
+    const contractIn2DaysId = await makeTestContractWithSingleSchedule({
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      fullName: 'Клиент Через Два Дня',
+      phone: '+79287770002',
+      dueDate: '2026-11-12', // Через 2 дня относительно 2026-11-10
+      amountKopecks: 1200000,
+    });
+
+    const contractTomorrowId = await makeTestContractWithSingleSchedule({
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      fullName: 'Клиент На Завтра',
+      phone: '+79287770001',
+      dueDate: '2026-11-11', // Завтра относительно 2026-11-10
+      amountKopecks: 1500000,
+    });
+
+    const contractTodayId = await makeTestContractWithSingleSchedule({
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      fullName: 'Клиент На Сегодня',
+      phone: '+79287770000',
+      dueDate: '2026-11-10', // Сегодня
+      amountKopecks: 2000000,
+    });
+
+    const contractOverdueId = await makeTestContractWithSingleSchedule({
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      fullName: 'Клиент Просроченный',
+      phone: '+79287770009',
+      dueDate: '2026-11-07', // Просрочено на 3 дня
+      amountKopecks: 1800000,
+    });
+
+    const contractIn5DaysId = await makeTestContractWithSingleSchedule({
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      fullName: 'Клиент Через Пять Дней',
+      phone: '+79287770005',
+      dueDate: '2026-11-15', // Через 5 дней — не должен попадать в ближайшие платежи
+      amountKopecks: 2500000,
+    });
+
+    // Другой пользователь (Аккаунт Б) создаёт свой платёж на сегодня
+    const fatherContractTodayId = await makeTestContractWithSingleSchedule({
+      sessionToken: accBNewToken,
+      csrfToken: accBNewCsrf,
+      fullName: 'Клиент Отца Сегодня',
+      phone: '+79288880000',
+      dueDate: '2026-11-10',
+      amountKopecks: 3000000,
+    });
+
+    const upcomingStateAccA = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const ourTestContracts = upcomingStateAccA.data.contracts.filter((c: { id: string }) =>
+      [
+        contractIn2DaysId,
+        contractTomorrowId,
+        contractTodayId,
+        contractOverdueId,
+        contractIn5DaysId,
+      ].includes(c.id)
+    );
+
+    const upcomingInitial = computeUpcomingPaymentReminders(ourTestContracts, refToday);
+    // Платёж через 5 дней НЕ отображается; отображаются ровно 4 платежа в порядке: Сегодня -> Завтра -> Через 2 дня -> Просрочено
+    assert.equal(upcomingInitial.length, 4);
+    assert.deepEqual(
+      upcomingInitial.map((i) => ({
+        contractId: i.contractId,
+        statusLabel: i.statusLabel,
+        remainingKopecks: i.remainingKopecks,
+      })),
+      [
+        { contractId: contractTodayId, statusLabel: 'Сегодня', remainingKopecks: 2000000 },
+        { contractId: contractTomorrowId, statusLabel: 'Завтра', remainingKopecks: 1500000 },
+        { contractId: contractIn2DaysId, statusLabel: 'Через 2 дня', remainingKopecks: 1200000 },
+        { contractId: contractOverdueId, statusLabel: 'Просрочено', remainingKopecks: 1800000 },
+      ]
+    );
+
+    // Проверка минимального набора полей (нет лишних полей договора/товара/поручителей в записи)
+    for (const item of upcomingInitial) {
+      assert.ok(item.clientName);
+      assert.ok(item.clientPhone);
+      assert.equal(typeof item.remainingKopecks, 'number');
+      assert.equal('itemTitle' in item, false);
+      assert.equal('contractNumber' in item, false);
+      assert.equal('guarantors' in item, false);
+    }
+
+    // Проверка изоляции между пользователями: в списке Аккаунта А нет клиента Аккаунта Б
+    const allUpcomingAccA = computeUpcomingPaymentReminders(upcomingStateAccA.data.contracts, refToday);
+    assert.equal(
+      allUpcomingAccA.some((i) => i.contractId === fatherContractTodayId || i.clientName === 'Клиент Отца Сегодня'),
+      false
+    );
+    const upcomingStateAccB = await apiCall('/api/v1/state', { sessionToken: accBNewToken });
+    const allUpcomingAccB = computeUpcomingPaymentReminders(upcomingStateAccB.data.contracts, refToday);
+    assert.equal(
+      allUpcomingAccB.some((i) => i.contractId === fatherContractTodayId && i.clientName === 'Клиент Отца Сегодня'),
+      true
+    );
+    assert.equal(
+      allUpcomingAccB.some((i) => i.contractId === contractTodayId),
+      false
+    );
+
+    // 11.3 Частичная оплата платежа «На Сегодня» (вносим 8 000 ₽ из 20 000 ₽) -> остаётся 12 000 ₽
+    const todayContractObj = ourTestContracts.find((c: { id: string }) => c.id === contractTodayId);
+    const partialPayRes = await apiCall('/api/v1/payments', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        idempotencyKey: 'idem_upcoming_partial_01',
+        clientId: todayContractObj.clientId,
+        contractId: contractTodayId,
+        accountId: 'acc_bank_main',
+        paymentMethod: 'bank_transfer',
+        amountKopecks: 800000,
+        eventDate: refToday,
+        autoAllocate: true,
+      },
+    });
+    assert.equal(partialPayRes.status, 201);
+
+    const stateAfterPartial = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const upcomingAfterPartial = computeUpcomingPaymentReminders(
+      stateAfterPartial.data.contracts.filter((c: { id: string }) =>
+        [contractIn2DaysId, contractTomorrowId, contractTodayId, contractOverdueId].includes(c.id)
+      ),
+      refToday
+    );
+    const todayItemAfterPartial = upcomingAfterPartial.find((i) => i.contractId === contractTodayId);
+    assert.ok(todayItemAfterPartial);
+    assert.equal(todayItemAfterPartial.remainingKopecks, 1200000); // Остаток 12 000 ₽
+
+    // 11.4 Полная оплата оставшихся 12 000 ₽ -> запись автоматически исчезает из «Ближайших платежей»
+    const fullPayRes = await apiCall('/api/v1/payments', {
+      method: 'POST',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        idempotencyKey: 'idem_upcoming_full_02',
+        clientId: todayContractObj.clientId,
+        contractId: contractTodayId,
+        accountId: 'acc_bank_main',
+        paymentMethod: 'bank_transfer',
+        amountKopecks: 1200000,
+        eventDate: refToday,
+        autoAllocate: true,
+      },
+    });
+    assert.equal(fullPayRes.status, 201);
+
+    const stateAfterFull = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const upcomingAfterFull = computeUpcomingPaymentReminders(
+      stateAfterFull.data.contracts.filter((c: { id: string }) =>
+        [contractIn2DaysId, contractTomorrowId, contractTodayId, contractOverdueId].includes(c.id)
+      ),
+      refToday
+    );
+    assert.equal(
+      upcomingAfterFull.some((i) => i.contractId === contractTodayId),
+      false
+    );
+    assert.equal(upcomingAfterFull.length, 3);
+
+    // 11.5 Изменение графика договора (перенос даты платежа на 25-е число) -> список автоматически обновляется
+    const changeScheduleDayRes = await apiCall(`/api/v1/contracts/${contractTomorrowId}/payment-day`, {
+      method: 'PATCH',
+      sessionToken: accAToken,
+      csrfToken: accACsrf,
+      body: {
+        paymentDayOfMonth: 25,
+        reason: 'Перенос платежа на 25 число',
+      },
+    });
+    assert.equal(changeScheduleDayRes.status, 200);
+
+    const stateAfterScheduleEdit = await apiCall('/api/v1/state', { sessionToken: accAToken });
+    const upcomingAfterScheduleEdit = computeUpcomingPaymentReminders(
+      stateAfterScheduleEdit.data.contracts.filter((c: { id: string }) =>
+        [contractIn2DaysId, contractTomorrowId, contractTodayId, contractOverdueId].includes(c.id)
+      ),
+      refToday
+    );
+    // Платёж, перенесённый с 11 ноября на 25 ноября, больше не входит в ближайшие 2 дня относительно 10 ноября
+    assert.equal(
+      upcomingAfterScheduleEdit.some((i) => i.contractId === contractTomorrowId),
+      false
+    );
+    assert.equal(upcomingAfterScheduleEdit.length, 2);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
